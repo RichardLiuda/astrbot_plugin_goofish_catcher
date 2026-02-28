@@ -101,17 +101,17 @@ def load_plugin_settings(
     plugin_data_dir.mkdir(parents=True, exist_ok=True)
     db_path = plugin_data_dir / "goofish_catcher.db"
 
-    provider_mode = str(
+    requested_provider_mode = str(
         raw.get("provider_mode", PROVIDER_MODE_PLAYWRIGHT_LOCAL)
     ).strip()
-    if provider_mode not in SUPPORTED_PROVIDER_MODES:
-        logger.warning(
-            "[%s] Unknown provider_mode '%s', fallback to %s",
+    provider_mode = PROVIDER_MODE_PLAYWRIGHT_LOCAL
+    if requested_provider_mode and requested_provider_mode != provider_mode:
+        logger.info(
+            "[%s] provider_mode=%s is temporarily disabled, forced to %s",
             plugin_name,
+            requested_provider_mode,
             provider_mode,
-            PROVIDER_MODE_PLAYWRIGHT_LOCAL,
         )
-        provider_mode = PROVIDER_MODE_PLAYWRIGHT_LOCAL
 
     storage_state_path: Path | None = None
     storage_state_file = _first_file(raw.get("playwright_storage_state_file"))
@@ -129,8 +129,8 @@ def load_plugin_settings(
             )
 
     webhook_url = str(raw.get("webhook_url", "")).strip() or None
-    remote_base_url = str(raw.get("remote_base_url", "")).strip() or None
-    remote_api_key = str(raw.get("remote_api_key", "")).strip() or None
+    remote_base_url = None
+    remote_api_key = None
     llm_provider_id = str(raw.get("llm_provider_id", "")).strip() or None
     llm_prefilter_provider_id = (
         str(raw.get("llm_prefilter_provider_id", "")).strip() or None
@@ -163,12 +163,12 @@ def load_plugin_settings(
         default_drop_pct=max(0.0, _as_float(raw.get("default_drop_pct"), 0.05)),
         default_cooldown_sec=max(60, _as_int(raw.get("default_cooldown_sec"), 21600)),
         playwright_storage_state_path=storage_state_path,
-        playwright_headless=_as_bool(raw.get("playwright_headless"), True),
+        playwright_headless=False,
         playwright_block_assets=_as_bool(raw.get("playwright_block_assets"), True),
         webhook_url=webhook_url,
         remote_base_url=remote_base_url,
         remote_api_key=remote_api_key,
-        remote_timeout_sec=max(5, _as_int(raw.get("remote_timeout_sec"), 20)),
+        remote_timeout_sec=20,
         queue_max_size=max(10, _as_int(raw.get("queue_max_size"), 256)),
         llm_enabled=_as_bool(raw.get("llm_enabled"), True),
         llm_provider_id=llm_provider_id,

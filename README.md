@@ -11,6 +11,7 @@ AstrBot 闲鱼关键词监控插件（命令优先，双阶段架构）。
 - SQLite 持久化（订阅、商品、价格历史、通知、抓取记录）
 - 支持主动消息通知（`unified_msg_origin`）和可选 Webhook
 - `立即检查` 返回 LLM TopK 投资建议（失败自动回退启发式评分）
+- `查询` 支持免订阅抓取并返回 LLM 推荐结果
 - 定时任务仅在本轮有候选事件时发送一条 TopK 摘要
 - `明细` 命令读取最近一次缓存结果，不重复抓取
 
@@ -22,6 +23,7 @@ AstrBot 闲鱼关键词监控插件（命令优先，双阶段架构）。
 - `/闲鱼 暂停 <关键词>`
 - `/闲鱼 恢复 <关键词>`
 - `/闲鱼 立即检查 [关键词]`
+- `/闲鱼 查询 <关键词...> [--pages N]`
 - `/闲鱼 明细 <关键词> [limit]`
 - `/闲鱼 状态`
 
@@ -38,13 +40,12 @@ AstrBot 闲鱼关键词监控插件（命令优先，双阶段架构）。
 
 核心抓取与调度：
 
-- `provider_mode`: `playwright_local | remote_rest`
 - `default_interval_sec`, `default_pages`, `max_pages`
 - `scheduler_tick_sec`, `max_concurrency`, `queue_max_size`
 - `fetch_timeout_sec`, `retry_base_sec`, `retry_max_sec`
 - `default_new_window_sec`, `default_drop_abs`, `default_drop_pct`, `default_cooldown_sec`
 - `playwright_storage_state_file`
-- `playwright_headless`, `playwright_block_assets`
+- `playwright_block_assets`
 - `webhook_url`
 
 LLM 建议相关：
@@ -66,8 +67,10 @@ LLM 建议相关：
 - 抓取后先做“相关性预筛选”（只看关键词匹配，不看价格与功能），再进入上新/降价检测。
 - 定时监控：仅当本轮检测到上新/降价候选时，才触发 LLM（或回退评分）并发送一条摘要。
 - 立即检查：抓取后直接返回 TopK 建议。
+- 查询命令：无需订阅，支持空格关键词（整段文本作为关键词）；可用 `--pages N` 或 `-p N` 指定抓取页数。
 - 明细命令：读取最近一次缓存快照（来自定时拉取或立即检查），不触发新抓取。
 - 如未配置可用模型或模型超时，自动降级到本地启发式逻辑，不中断抓取。
+- 当前版本固定使用本地 Playwright Provider，并强制有头模式；远程 Provider 配置将在后续版本恢复。
 
 ## 风险说明
 

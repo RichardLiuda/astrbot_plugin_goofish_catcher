@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import datetime
 
@@ -18,6 +19,7 @@ from .app.types import (
     NormalizedItem,
     ProviderError,
     ProviderErrorCode,
+    RecommendationCandidate,
     RecommendationResult,
 )
 
@@ -109,7 +111,7 @@ class GoofishCatcherPlugin(Star):
 
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):
-        """闲鱼关键词监控命令。"""
+        """闲鱼监控指令入口，查看命令总览。"""
         yield event.plain_result(
             "用法：\n"
             "/闲鱼 订阅 <关键词> [interval_sec] [pages]\n"
@@ -118,6 +120,7 @@ class GoofishCatcherPlugin(Star):
             "/闲鱼 暂停 <关键词>\n"
             "/闲鱼 恢复 <关键词>\n"
             "/闲鱼 立即检查 [关键词]\n"
+            "/闲鱼 查询 <关键词...> [--pages N]\n"
             "/闲鱼 明细 <关键词> [limit]\n"
             "/闲鱼 状态"
         )
@@ -130,6 +133,7 @@ class GoofishCatcherPlugin(Star):
         interval_sec: int = 0,
         pages: int = 0,
     ):
+        """创建或更新关键词订阅，并立即触发一次检查。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -172,6 +176,7 @@ class GoofishCatcherPlugin(Star):
 
     @goofish.command("退订", alias={"unsubscribe", "unwatch"})
     async def unsubscribe(self, event: AstrMessageEvent, keyword: str):
+        """删除当前会话下指定关键词的订阅。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -187,6 +192,7 @@ class GoofishCatcherPlugin(Star):
 
     @goofish.command("列表", alias={"list"})
     async def list_subscriptions(self, event: AstrMessageEvent):
+        """查看当前会话的订阅列表与运行状态。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -210,6 +216,7 @@ class GoofishCatcherPlugin(Star):
 
     @goofish.command("暂停", alias={"pause"})
     async def pause(self, event: AstrMessageEvent, keyword: str):
+        """暂停指定关键词订阅，不再参与自动轮询。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -224,6 +231,7 @@ class GoofishCatcherPlugin(Star):
 
     @goofish.command("恢复", alias={"resume"})
     async def resume(self, event: AstrMessageEvent, keyword: str):
+        """恢复已暂停订阅，并立即入队一次检查。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -242,6 +250,7 @@ class GoofishCatcherPlugin(Star):
 
     @goofish.command("立即检查", alias={"checknow", "run"})
     async def check_now(self, event: AstrMessageEvent, keyword: str = ""):
+        """对订阅执行立即检查并返回推荐；不填关键词则批量入队当前会话全部订阅。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -326,6 +335,83 @@ class GoofishCatcherPlugin(Star):
             return
         yield event.plain_result(f"已提交 {enqueued} 个任务到检查队列。")
 
+    @goofish.command("查询", alias={"query", "search", "inspect"})
+    async def query_once(
+        self,
+        event: AstrMessageEvent,
+        keyword: str = "",
+    ):
+        """免订阅查询：整段关键词可包含空格，可选 --pages/-p 指定页数。"""
+        if not await self._check_ready(event):
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+        if self._provider_error:
+            yield event.plain_result(
+                f"Provider 当前不可用，无法执行查询。\n原因：{self._provider_error}"
+            )
+            return
+        assert self.provider is not None
+        assert self.recommender is not None
+
+        raw_query_args = (
+            _extract_subcommand_args(event.get_message_str()) or str(keyword).strip()
+        )
+        keyword_text, page_count = _parse_query_input(
+            raw_keyword=raw_query_args,
+            default_pages=self.settings.default_pages,
+            max_pages=self.settings.max_pages,
+        )
+        if not keyword_text:
+            yield event.plain_result(
+                "关键词不能为空。示例：/闲鱼 查询 适马 60-600 --pages 2"
+            )
+            return
+        timeout_sec = max(self.settings.fetch_timeout_sec + 30, 45)
+        try:
+            raw_items = await asyncio.wait_for(
+                self.provider.search(
+                    keyword=keyword_text,
+                    pages=page_count,
+                    timeout_sec=self.settings.fetch_timeout_sec,
+                ),
+                timeout=timeout_sec,
+            )
+            filtered_items, filter_mode = await self.recommender.prefilter_items(
+                umo=event.unified_msg_origin,
+                keyword=keyword_text,
+                items=raw_items,
+            )
+            candidates = _build_query_candidates(
+                keyword=keyword_text,
+                items=filtered_items,
+                observed_at=int(time.time()),
+            )
+            recommendation = await self.recommender.analyze(
+                umo=event.unified_msg_origin,
+                keyword=keyword_text,
+                candidates=candidates,
+                top_k=self.settings.llm_top_k,
+            )
+            yield event.plain_result(
+                _render_query_recommendation_preview(
+                    recommendation=recommendation,
+                    page_count=page_count,
+                    raw_total=len(raw_items),
+                    filtered_total=len(filtered_items),
+                    filter_mode=filter_mode,
+                )
+            )
+            return
+        except asyncio.TimeoutError:
+            yield event.plain_result(f"查询超时（>{timeout_sec}s），请稍后重试。")
+            return
+        except ProviderError as exc:
+            yield event.plain_result(f"查询失败：{exc.code.value}\n{exc.message}")
+            return
+        except Exception as exc:
+            yield event.plain_result(f"查询失败：{exc}")
+            return
+
     @goofish.command("明细", alias={"detail", "items"})
     async def detail(
         self,
@@ -333,6 +419,7 @@ class GoofishCatcherPlugin(Star):
         keyword: str,
         limit: int = 10,
     ):
+        """查看订阅最近一次缓存快照，不触发新抓取。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -368,6 +455,7 @@ class GoofishCatcherPlugin(Star):
 
     @goofish.command("状态", alias={"status"})
     async def status(self, event: AstrMessageEvent):
+        """查看调度器、Provider 与当前会话订阅的运行状态。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -440,6 +528,87 @@ def _render_recommendation_preview(recommendation: RecommendationResult) -> str:
         lines.append(f"   风险：{item.risk}")
         lines.append(f"   链接：{item.url}")
     lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
+    return "\n".join(lines)
+
+
+def _build_query_candidates(
+    keyword: str,
+    items: list[NormalizedItem],
+    observed_at: int,
+) -> list[RecommendationCandidate]:
+    return [
+        RecommendationCandidate(
+            event_type="NEW",
+            keyword=keyword,
+            item_id=item.item_id,
+            title=item.title,
+            price=item.price,
+            url=item.url,
+            publish_time=item.publish_time,
+            observed_at=observed_at,
+        )
+        for item in items
+    ]
+
+
+def _extract_subcommand_args(message: str) -> str:
+    normalized = re.sub(r"\s+", " ", message.strip())
+    if not normalized:
+        return ""
+    parts = normalized.split(" ", 2)
+    if len(parts) < 3:
+        return ""
+    return parts[2].strip()
+
+
+def _parse_query_input(
+    raw_keyword: str,
+    *,
+    default_pages: int,
+    max_pages: int,
+) -> tuple[str, int]:
+    text = raw_keyword.strip()
+    page_count = max(1, min(default_pages, max_pages))
+    if not text:
+        return "", page_count
+
+    matched = re.search(r"(?:^|\s)(?:--pages|-p)\s+(\d+)\s*$", text)
+    if matched:
+        page_count = max(1, min(int(matched.group(1)), max_pages))
+        text = text[: matched.start()].strip()
+    return text, page_count
+
+
+def _render_query_recommendation_preview(
+    recommendation: RecommendationResult,
+    *,
+    page_count: int,
+    raw_total: int,
+    filtered_total: int,
+    filter_mode: str,
+) -> str:
+    lines = [
+        f"【查询推荐】关键词：{recommendation.keyword}",
+        f"抓取页数：{page_count} | 原始结果：{raw_total} | 初筛后：{filtered_total}",
+        f"初筛模式：{filter_mode}",
+        f"候选数：{recommendation.total_candidates} | 推荐数：{len(recommendation.top)}",
+        f"分析方式：{'LLM' if recommendation.used_llm else 'Heuristic'}",
+        f"总体建议：{recommendation.summary}",
+    ]
+    if recommendation.fallback_reason:
+        lines.append(f"回退原因：{recommendation.fallback_reason}")
+
+    if not recommendation.top:
+        lines.append("未产出可推荐条目，请尝试更精确的关键词后重试。")
+        return "\n".join(lines)
+
+    for idx, item in enumerate(recommendation.top, start=1):
+        lines.append(f"{idx}. [{item.score:.1f}] {item.title}")
+        lines.append(f"   价格：￥{item.price:.2f}")
+        lines.append(f"   理由：{item.reason}")
+        lines.append(f"   风险：{item.risk}")
+        lines.append(f"   链接：{item.url}")
+    lines.append(f"可再次执行 /闲鱼 查询 {recommendation.keyword}")
     return "\n".join(lines)
 
 

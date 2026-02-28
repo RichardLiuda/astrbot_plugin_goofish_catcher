@@ -1,10 +1,4 @@
 {
-  "provider_mode": {
-    "type": "string",
-    "description": "数据源模式",
-    "hint": "playwright_local 或 remote_rest",
-    "default": "playwright_local"
-  },
   "default_interval_sec": {
     "type": "int",
     "description": "默认轮询间隔（秒）",
@@ -83,11 +77,6 @@
       "json"
     ]
   },
-  "playwright_headless": {
-    "type": "bool",
-    "description": "是否启用无头模式",
-    "default": true
-  },
   "playwright_block_assets": {
     "type": "bool",
     "description": "是否拦截图片/字体/媒体以加快加载",
@@ -97,21 +86,6 @@
     "type": "string",
     "description": "可选 Webhook 地址",
     "default": ""
-  },
-  "remote_base_url": {
-    "type": "string",
-    "description": "远程 Provider 地址（P1）",
-    "default": ""
-  },
-  "remote_api_key": {
-    "type": "string",
-    "description": "远程 Provider API Key（P1）",
-    "default": ""
-  },
-  "remote_timeout_sec": {
-    "type": "int",
-    "description": "远程 Provider 超时（秒）",
-    "default": 20
   },
   "llm_enabled": {
     "type": "bool",
