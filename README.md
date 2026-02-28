@@ -1,79 +1,314 @@
 # astrbot_plugin_goofish_catcher
 
-AstrBot 闲鱼关键词监控插件（命令优先，双阶段架构）。
+闲鱼关键词监控插件（命令优先）。  
+支持订阅轮询、上新/降价检测、LLM 推荐分析、免订阅临时查询。
 
-## 功能
+目前很多功能都比较原始，可能配置起来会有点麻烦，请见谅！
+
+如果有大佬能贡献一下pr的话，感激不尽！
+
+如果觉得插件有帮助，欢迎star！Ciallo～(∠・ω< )⌒★
+
+<img src="https://storage.moegirl.org.cn/moegirl/commons/8/8f/BanG_Dream%21_It%27s_MyGO%21%21%21%21%21_08205410.jpg" width="50%" />
+
+## 环境要求
+
+
+| 依赖         | 建议版本    | 说明                   |
+| ---------- | ------- | -------------------- |
+| Python     | >= 3.10 | 与 AstrBot 运行环境一致     |
+| AstrBot    | >= 4.x  | 需要指令系统 + Provider 能力 |
+| Playwright | 最新稳定版   | 用于闲鱼页面抓取             |
+
+
+## 版本进度（TODO）
+
+### 已实现
+
+- 本地 Playwright Provider 抓取链路（P0）
+- 命令优先交互：订阅/退订/列表/暂停/恢复/立即检查/查询/明细/状态
+- 相关性初筛（LLM 优先，失败回退规则）
+- LLM 推荐 TopK（失败自动回退启发式）
+- SQLite 持久化与定时调度
+- 查询命令支持空格关键词与 `--pages/-p` 参数
+- WebUI 配置项支持推荐模型与初筛模型下拉选择
+
+### 暂未实现
+
+- 远程 Provider（P1）完整可用链路（`remote_rest`）
+- 远程健康检查与统一错误码对接（`/health`、`/v1/search`）
+- Cloudflare Tunnel + Access Token 接入文档与一键配置
+- 订阅级更细粒度策略（例如更复杂的过滤模板）
+
+### 当前无法实现
+
+- 经检验当前无法稳定支持 **无头模式抓取闲鱼**，因此本版本强制使用有头浏览器。
+- 当前不实现 **验证码自动绕过**（仅检测并暂停订阅，需人工处理登录/风控）。
+
+## 功能概览
 
 - 关键词订阅/退订/列表/暂停/恢复
-- 后台定时抓取（`on_astrbot_loaded` 启动）
-- 原始结果相关性预筛选（优先 LLM，失败回退本地关键词匹配）
-- 上新检测 + 降价检测（含去重与冷却）
-- SQLite 持久化（订阅、商品、价格历史、通知、抓取记录）
-- 支持主动消息通知（`unified_msg_origin`）和可选 Webhook
-- `立即检查` 返回 LLM TopK 投资建议（失败自动回退启发式评分）
-- `查询` 支持免订阅抓取并返回 LLM 推荐结果
-- 定时任务仅在本轮有候选事件时发送一条 TopK 摘要
-- `明细` 命令读取最近一次缓存结果，不重复抓取
+- 后台定时抓取（`on_astrbot_loaded` 自动启动调度）
+- 原始结果相关性初筛（优先 LLM，失败回退关键词规则）
+- 上新检测 + 降价检测（去重 + 冷却）
+- LLM TopK 推荐（不可用时自动回退启发式打分）
+- 免订阅即时查询（`/闲鱼 查询`）
+- SQLite 持久化（订阅、商品快照、价格历史、通知、抓取记录）
+- 主动消息通知 + 可选 Webhook
 
-## 命令
+## 安装与启动
 
-- `/闲鱼 订阅 <关键词> [interval_sec] [pages]`
-- `/闲鱼 退订 <关键词>`
-- `/闲鱼 列表`
-- `/闲鱼 暂停 <关键词>`
-- `/闲鱼 恢复 <关键词>`
-- `/闲鱼 立即检查 [关键词]`
-- `/闲鱼 查询 <关键词...> [--pages N]`
-- `/闲鱼 明细 <关键词> [limit]`
-- `/闲鱼 状态`
+1. 安装依赖
 
-## 安装
+```bash
+uv pip install -r data/plugins/astrbot_plugin_goofish_catcher/requirements.txt
+```
 
-1. 安装依赖：
-   - `aiosqlite`
-   - `httpx`
-   - `playwright`
-2. 首次运行前安装浏览器：
-   - `uv run python -m playwright install chromium chromium-headless-shell`
+1. 安装 Playwright 浏览器
+
+```bash
+uv run python -m playwright install chromium chromium-headless-shell
+```
+
+1. 启动 AstrBot，插件会自动加载
+
+## 登录态准备（建议）
+
+闲鱼对未登录/风控会比较敏感，建议先准备 `storage_state.json` 并在 WebUI 配置 `playwright_storage_state_file`。
+
+### Windows（PowerShell）
+
+1. 在 AstrBot 根目录生成登录脚本
+
+```powershell
+@'
+import asyncio
+from playwright.async_api import async_playwright
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.goto("https://www.goofish.com/")
+        print("请在浏览器完成登录，回到终端按 Enter 保存登录态...")
+        await asyncio.get_running_loop().run_in_executor(None, input)
+        await context.storage_state(path="storage_state.json")
+        await browser.close()
+        print("已保存: storage_state.json")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+'@ | Set-Content -Encoding utf8 .\save_state.py
+```
+
+1. 运行脚本并手动登录
+
+```powershell
+uv run python .\save_state.py
+```
+
+1. 移动到插件数据目录（可选但推荐）
+
+```powershell
+New-Item -ItemType Directory -Force .\data\plugin_data\astrbot_plugin_goofish_catcher | Out-Null
+Move-Item .\storage_state.json .\data\plugin_data\astrbot_plugin_goofish_catcher\storage_state.json -Force
+```
+
+### macOS / Linux（Bash）
+
+1. 生成登录脚本
+
+```bash
+cat > ./save_state.py <<'PY'
+import asyncio
+from playwright.async_api import async_playwright
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.goto("https://www.goofish.com/")
+        print("请在浏览器完成登录，回到终端按 Enter 保存登录态...")
+        await asyncio.get_running_loop().run_in_executor(None, input)
+        await context.storage_state(path="storage_state.json")
+        await browser.close()
+        print("已保存: storage_state.json")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+PY
+```
+
+1. 运行脚本并手动登录
+
+```bash
+uv run python ./save_state.py
+```
+
+1. 移动到插件数据目录（可选但推荐）
+
+```bash
+mkdir -p ./data/plugin_data/astrbot_plugin_goofish_catcher
+mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storage_state.json
+```
+
+### 在 WebUI 中生效
+
+1. 打开插件配置，设置 `playwright_storage_state_file` 指向 `storage_state.json`
+2. 保存配置并重载插件
+3. 如订阅已被暂停，执行：
+
+```text
+/闲鱼 恢复 <关键词>
+```
+
+## 指令说明（AstrBot 行为）
+
+
+| 指令                                    | 作用      | 行为说明                                       |
+| ------------------------------------- | ------- | ------------------------------------------ |
+| `/闲鱼 订阅 <关键词> [interval_sec] [pages]` | 新建/更新订阅 | 保存订阅后会自动触发一次检查入队                           |
+| `/闲鱼 退订 <关键词>`                        | 删除订阅    | 仅删除当前会话该关键词订阅                              |
+| `/闲鱼 列表`                              | 查看订阅    | 显示启用/暂停状态、页数、下次执行时间                        |
+| `/闲鱼 暂停 <关键词>`                        | 暂停订阅    | 暂停后不再参与定时轮询                                |
+| `/闲鱼 恢复 <关键词>`                        | 恢复订阅    | 恢复后会立即触发一次检查入队                             |
+| `/闲鱼 立即检查 [关键词]`                      | 订阅检查    | 传关键词：同步执行该订阅并返回推荐；不传：批量入队当前会话所有启用订阅        |
+| `/闲鱼 查询 <关键词...> [--pages N]`         | 免订阅查询   | 直接抓取并返回推荐；支持空格关键词，末尾可用 `--pages`/`-p` 指定页数 |
+| `/闲鱼 明细 <关键词> [limit]`                | 查看缓存明细  | 读取该订阅最近一次缓存快照，不重新抓取                        |
+| `/闲鱼 状态`                              | 运行状态    | 查看调度器、队列、Provider、DB 与当前会话订阅概况             |
+
+
+## 关键行为规则
+
+### 1) 定时轮询
+
+- 调度器按 `scheduler_tick_sec` 扫描到期订阅并入队。
+- 仅在本轮出现候选事件（上新/降价）时发送摘要通知，避免刷屏。
+
+### 2) 推荐与初筛
+
+- 抓取后先做相关性初筛（只判断“是否像目标商品”）。
+- 初筛通过后再做推荐评分（LLM 或启发式回退）。
+- LLM 不可用、超时或输出异常时，不中断主流程。
+
+### 3) 查询 vs 立即检查
+
+- `查询`：不依赖订阅，不写订阅状态，适合临时看盘。
+- `立即检查`：面向已订阅关键词，会更新订阅运行数据与缓存。
+
+### 4) 明细来源
+
+- `明细` 只读最近一次缓存（来自定时轮询或立即检查）。
+- `明细` 不触发新抓取，因此响应更快且稳定。
 
 ## 配置项（`_conf_schema.json`）
 
-核心抓取与调度：
+### 抓取与调度
 
-- `default_interval_sec`, `default_pages`, `max_pages`
-- `scheduler_tick_sec`, `max_concurrency`, `queue_max_size`
-- `fetch_timeout_sec`, `retry_base_sec`, `retry_max_sec`
-- `default_new_window_sec`, `default_drop_abs`, `default_drop_pct`, `default_cooldown_sec`
-- `playwright_storage_state_file`
-- `playwright_block_assets`
-- `webhook_url`
 
-LLM 建议相关：
+| 配置项                    | 说明            | 默认值   |
+| ---------------------- | ------------- | ----- |
+| `default_interval_sec` | 默认轮询间隔（秒）     | `600` |
+| `default_pages`        | 默认抓取页数        | `1`   |
+| `max_pages`            | 最大抓取页数        | `2`   |
+| `scheduler_tick_sec`   | 调度扫描间隔（秒）     | `15`  |
+| `max_concurrency`      | 最大并发 Worker 数 | `1`   |
+| `queue_max_size`       | 任务队列最大长度      | `256` |
+| `fetch_timeout_sec`    | 单次抓取超时（秒）     | `20`  |
+| `max_retries`          | 最大重试次数        | `3`   |
+| `retry_base_sec`       | 重试基础退避（秒）     | `30`  |
+| `retry_max_sec`        | 重试最大退避（秒）     | `900` |
 
-- `llm_enabled`
-- `llm_provider_id`（WebUI 下拉选择 AstrBot 已配置模型）
-- `llm_timeout_sec`
-- `llm_top_k`
-- `llm_max_candidates`
 
-原始结果预筛选（快速）：
+### 事件阈值
 
-- `llm_prefilter_enabled`
-- `llm_prefilter_timeout_sec`
-- `llm_prefilter_max_items`
 
-## 行为说明
+| 配置项                      | 说明          | 默认值     |
+| ------------------------ | ----------- | ------- |
+| `default_new_window_sec` | 上新判定窗口（秒）   | `1800`  |
+| `default_drop_abs`       | 绝对降价阈值（元）   | `50.0`  |
+| `default_drop_pct`       | 相对降价阈值（0-1） | `0.05`  |
+| `default_cooldown_sec`   | 同类通知冷却（秒）   | `21600` |
 
-- 抓取后先做“相关性预筛选”（只看关键词匹配，不看价格与功能），再进入上新/降价检测。
-- 定时监控：仅当本轮检测到上新/降价候选时，才触发 LLM（或回退评分）并发送一条摘要。
-- 立即检查：抓取后直接返回 TopK 建议。
-- 查询命令：无需订阅，支持空格关键词（整段文本作为关键词）；可用 `--pages N` 或 `-p N` 指定抓取页数。
-- 明细命令：读取最近一次缓存快照（来自定时拉取或立即检查），不触发新抓取。
-- 如未配置可用模型或模型超时，自动降级到本地启发式逻辑，不中断抓取。
-- 当前版本固定使用本地 Playwright Provider，并强制有头模式；远程 Provider 配置将在后续版本恢复。
 
-## 风险说明
+### Playwright 与通知
 
-- 页面结构变化可能导致解析失败（`PARSE_ERROR`）。
-- 登录态失效或验证码触发会暂停订阅并告警（不做自动绕过）。
-- 建议保持低并发，结合退避策略，避免触发风控。
+
+| 配置项                             | 说明            | 默认值    |
+| ------------------------------- | ------------- | ------ |
+| `playwright_storage_state_file` | 登录态 JSON 文件   | `[]`   |
+| `playwright_block_assets`       | 是否拦截图片/字体/媒体  | `true` |
+| `webhook_url`                   | 可选 Webhook 地址 | `""`   |
+
+
+### LLM 推荐
+
+
+| 配置项                         | 说明             | 默认值    |
+| --------------------------- | -------------- | ------ |
+| `llm_enabled`               | 是否启用 LLM 推荐    | `true` |
+| `llm_provider_id`           | 推荐模型（WebUI 下拉） | `""`   |
+| `llm_prefilter_provider_id` | 初筛模型（WebUI 下拉） | `""`   |
+| `llm_timeout_sec`           | 推荐分析超时（秒）      | `25`   |
+| `llm_top_k`                 | 推荐返回数量         | `3`    |
+| `llm_max_candidates`        | 参与推荐的最大候选数     | `20`   |
+| `llm_prefilter_enabled`     | 是否启用 LLM 初筛    | `true` |
+| `llm_prefilter_timeout_sec` | 初筛超时（秒）        | `6`    |
+| `llm_prefilter_max_items`   | 初筛最大商品数        | `30`   |
+
+
+## 数据落盘位置
+
+- 插件数据目录：`data/plugin_data/astrbot_plugin_goofish_catcher`
+- SQLite 文件：`goofish_catcher.db`
+
+主要表：
+
+- `subscriptions`
+- `items`
+- `price_history`
+- `notifications`
+- `fetch_runs`
+
+## 常见问题排查
+
+### 1) AUTH_REQUIRED / CAPTCHA
+
+现象：
+
+- 日志出现 `paused due to AUTH_REQUIRED` 或 `CAPTCHA`
+
+处理：
+
+1. 检查 `playwright_storage_state_file` 是否存在且有效。
+2. 用有头浏览器重新登录并更新 `storage_state.json`。
+3. 执行 `/闲鱼 恢复 <关键词>` 恢复任务。
+
+### 2) 抓取商品数为 0
+
+处理：
+
+1. 确认闲鱼页面实际可见商品。
+2. 降低并发、增加超时、保持有头模式。
+3. 检查关键词是否过窄，或被初筛过滤。
+
+### 3) 查询关键词被截断
+
+请使用：
+
+- `/闲鱼 查询 适马 60-600 Sports`
+- `/闲鱼 查询 适马 60-600 Sports -p 2`
+
+说明：`查询` 支持空格关键词，整段文本会作为关键词解析。
+
+有其他问题欢迎提交issue！
+
+## 风险与建议
+
+- 闲鱼页面结构变化可能导致 `PARSE_ERROR`。
+- 高频抓取可能触发风控，建议低并发 + 合理间隔。
+- 本插件没做验证码绕过。
+  - 欢迎大佬狠狠pr（欧尼该）
+
