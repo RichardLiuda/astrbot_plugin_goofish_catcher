@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.config import PluginSettings  # noqa: E402
+from app.scheduler import MonitoringScheduler  # noqa: E402
+from app.types import (  # noqa: E402
+    ExistingItem,
+    NormalizedItem,
+    RecommendationItem,
+    RecommendationResult,
+    Subscription,
+)
+
+
+def _make_settings(tmp_path: Path) -> PluginSettings:
+    return PluginSettings(
+        plugin_name="astrbot_plugin_goofish_catcher",
+        plugin_data_dir=tmp_path,
+        db_path=tmp_path / "test.db",
+        provider_mode="playwright_local",
+        default_interval_sec=600,
+        default_pages=1,
+        max_pages=2,
+        scheduler_tick_sec=15,
+        max_concurrency=1,
+        fetch_timeout_sec=20,
+        max_retries=3,
+        retry_base_sec=30,
+        retry_max_sec=900,
+        default_new_window_sec=1800,
+        default_drop_abs=50.0,
+        default_drop_pct=0.05,
+        default_cooldown_sec=3600,
+        playwright_storage_state_path=None,
+        playwright_headless=True,
+        playwright_block_assets=True,
+        webhook_url=None,
+        remote_base_url=None,
+        remote_api_key=None,
+        remote_timeout_sec=20,
+        queue_max_size=256,
+        llm_enabled=True,
+        llm_provider_id=None,
+        llm_prefilter_provider_id=None,
+        llm_timeout_sec=25,
+        llm_top_k=3,
+        llm_max_candidates=20,
+        llm_prefilter_enabled=True,
+        llm_prefilter_timeout_sec=6,
+        llm_prefilter_max_items=30,
+    )
+
+
+class _FakeStorage:
+    def __init__(self):
+        self.items: dict[tuple[int, str], ExistingItem] = {}
+        self.notifications: set[tuple[int, str, str, str]] = set()
+        self.recommendations_written = 0
+
+    async def create_fetch_run(self, sub_id: int, started_at: int) -> int:
+        return 1
+
+    async def finish_fetch_run(self, *args, **kwargs) -> None:
+        return None
+
+    async def update_schedule_success(self, *args, **kwargs) -> None:
+        return None
+
+    async def update_schedule_failure(self, *args, **kwargs) -> None:
+        return None
+
+    async def pause_subscription(self, *args, **kwargs) -> None:
+        return None
+
+    async def get_item(self, sub_id: int, item_id: str) -> ExistingItem | None:
+        return self.items.get((sub_id, item_id))
+
+    async def insert_item(self, sub_id: int, item: NormalizedItem, now_ts: int) -> None:
+        self.items[(sub_id, item.item_id)] = ExistingItem(
+            sub_id=sub_id,
+            item_id=item.item_id,
+            title=item.title,
+            url=item.url,
+            publish_time=item.publish_time,
+            first_seen_at=now_ts,
+            last_seen_at=now_ts,
+            last_price=item.price,
+        )
+
+    async def update_item(self, sub_id: int, item: NormalizedItem, now_ts: int) -> None:
+        old = self.items[(sub_id, item.item_id)]
+        self.items[(sub_id, item.item_id)] = ExistingItem(
+            sub_id=sub_id,
+            item_id=item.item_id,
+            title=item.title,
+            url=item.url,
+            publish_time=item.publish_time or old.publish_time,
+            first_seen_at=old.first_seen_at,
+            last_seen_at=now_ts,
+            last_price=item.price,
+        )
+
+    async def insert_price_history(self, *args, **kwargs) -> None:
+        return None
+
+    async def notification_hash_exists(
+        self,
+        sub_id: int,
+        item_id: str,
+        event_type: str,
+        payload_hash: str,
+    ) -> bool:
+        return (sub_id, item_id, event_type, payload_hash) in self.notifications
+
+    async def get_last_notification_sent_at(
+        self, sub_id: int, item_id: str, event_type: str
+    ) -> int | None:
+        return None
+
+    async def insert_notification(
+        self,
+        *,
+        sub_id: int,
+        item_id: str,
+        event_type: str,
+        payload_hash: str,
+        sent_at: int,
+        meta: dict | None = None,
+    ) -> None:
+        self.notifications.add((sub_id, item_id, event_type, payload_hash))
+
+
+class _FakeProvider:
+    async def search(self, *, keyword: str, pages: int, timeout_sec: int):
+        now_ts = int(time.time())
+        return [
+            NormalizedItem(
+                item_id="1001",
+                title=f"{keyword} 新上架",
+                price=6800.0,
+                url="https://www.goofish.com/item?id=1001",
+                publish_time=now_ts,
+            )
+        ]
+
+
+class _FakeNotifier:
+    def __init__(self):
+        self.summary_calls = 0
+
+    async def send_recommendation_summary(self, *, umo: str, recommendation):
+        self.summary_calls += 1
+        return True
+
+    async def send_alert(self, *args, **kwargs):
+        return True
+
+    async def send_new(self, *args, **kwargs):
+        raise AssertionError("send_new should not be called in summary mode")
+
+    async def send_price_drop(self, *args, **kwargs):
+        raise AssertionError("send_price_drop should not be called in summary mode")
+
+
+class _FakeRecommender:
+    async def prefilter_items(self, *, umo: str, keyword: str, items: list):
+        return items, "TEST"
+
+    async def analyze(self, *, umo: str, keyword: str, candidates: list, top_k: int):
+        assert len(candidates) >= 1
+        return RecommendationResult(
+            keyword=keyword,
+            summary="推荐关注降价幅度更高的条目。",
+            top=[
+                RecommendationItem(
+                    item_id=candidates[0].item_id,
+                    score=88.0,
+                    reason="降价幅度可观",
+                    risk="注意验货",
+                    title=candidates[0].title,
+                    price=candidates[0].price,
+                    url=candidates[0].url,
+                )
+            ],
+            total_candidates=len(candidates),
+            used_llm=False,
+            fallback_reason="TEST",
+        )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_sends_summary_only(tmp_path: Path):
+    storage = _FakeStorage()
+    provider = _FakeProvider()
+    notifier = _FakeNotifier()
+    recommender = _FakeRecommender()
+    scheduler = MonitoringScheduler(
+        context=object(),
+        settings=_make_settings(tmp_path),
+        storage=storage,
+        provider=provider,
+        notifier=notifier,
+        recommender=recommender,
+    )
+    sub = Subscription(
+        id=1,
+        umo="webchat:test",
+        keyword="适马60-600",
+        interval_sec=600,
+        pages=1,
+        drop_abs=50.0,
+        drop_pct=0.05,
+        new_window_sec=3600,
+        cooldown_sec=3600,
+        enabled=True,
+        paused_reason=None,
+        last_run_at=None,
+        next_run_at=None,
+        consecutive_failures=0,
+    )
+
+    await scheduler._process_subscription(sub, worker_idx=0)
+
+    assert notifier.summary_calls == 1
+    assert len(storage.notifications) >= 1

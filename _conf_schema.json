@@ -1,0 +1,165 @@
+{
+  "provider_mode": {
+    "type": "string",
+    "description": "数据源模式",
+    "hint": "playwright_local 或 remote_rest",
+    "default": "playwright_local"
+  },
+  "default_interval_sec": {
+    "type": "int",
+    "description": "默认轮询间隔（秒）",
+    "default": 600
+  },
+  "default_pages": {
+    "type": "int",
+    "description": "默认抓取页数",
+    "default": 1
+  },
+  "max_pages": {
+    "type": "int",
+    "description": "最大抓取页数",
+    "default": 2
+  },
+  "scheduler_tick_sec": {
+    "type": "int",
+    "description": "调度扫描间隔（秒）",
+    "default": 15
+  },
+  "max_concurrency": {
+    "type": "int",
+    "description": "最大并发 Worker 数",
+    "default": 1
+  },
+  "queue_max_size": {
+    "type": "int",
+    "description": "任务队列最大长度",
+    "default": 256
+  },
+  "fetch_timeout_sec": {
+    "type": "int",
+    "description": "单次抓取超时（秒）",
+    "default": 20
+  },
+  "max_retries": {
+    "type": "int",
+    "description": "最大重试次数",
+    "default": 3
+  },
+  "retry_base_sec": {
+    "type": "int",
+    "description": "重试基础退避（秒）",
+    "default": 30
+  },
+  "retry_max_sec": {
+    "type": "int",
+    "description": "重试最大退避（秒）",
+    "default": 900
+  },
+  "default_new_window_sec": {
+    "type": "int",
+    "description": "上新判定时间窗（秒）",
+    "default": 1800
+  },
+  "default_drop_abs": {
+    "type": "float",
+    "description": "默认绝对降价阈值（元）",
+    "default": 50.0
+  },
+  "default_drop_pct": {
+    "type": "float",
+    "description": "默认相对降价阈值（0-1）",
+    "default": 0.05
+  },
+  "default_cooldown_sec": {
+    "type": "int",
+    "description": "默认通知冷却（秒）",
+    "default": 21600
+  },
+  "playwright_storage_state_file": {
+    "type": "file",
+    "description": "Playwright 登录态文件（JSON）",
+    "default": [],
+    "file_types": [
+      "json"
+    ]
+  },
+  "playwright_headless": {
+    "type": "bool",
+    "description": "是否启用无头模式",
+    "default": true
+  },
+  "playwright_block_assets": {
+    "type": "bool",
+    "description": "是否拦截图片/字体/媒体以加快加载",
+    "default": true
+  },
+  "webhook_url": {
+    "type": "string",
+    "description": "可选 Webhook 地址",
+    "default": ""
+  },
+  "remote_base_url": {
+    "type": "string",
+    "description": "远程 Provider 地址（P1）",
+    "default": ""
+  },
+  "remote_api_key": {
+    "type": "string",
+    "description": "远程 Provider API Key（P1）",
+    "default": ""
+  },
+  "remote_timeout_sec": {
+    "type": "int",
+    "description": "远程 Provider 超时（秒）",
+    "default": 20
+  },
+  "llm_enabled": {
+    "type": "bool",
+    "description": "是否启用 LLM 推荐",
+    "default": true
+  },
+  "llm_provider_id": {
+    "_special": "select_provider",
+    "type": "string",
+    "description": "推荐分析模型",
+    "hint": "留空时优先使用当前会话模型，再回退到第一个可用模型",
+    "default": ""
+  },
+  "llm_prefilter_provider_id": {
+    "_special": "select_provider",
+    "type": "string",
+    "description": "初筛模型",
+    "hint": "仅用于原始结果相关性初筛；留空时回退到推荐分析模型",
+    "default": ""
+  },
+  "llm_timeout_sec": {
+    "type": "int",
+    "description": "推荐分析超时（秒）",
+    "default": 25
+  },
+  "llm_top_k": {
+    "type": "int",
+    "description": "推荐返回 TopK 数量",
+    "default": 3
+  },
+  "llm_max_candidates": {
+    "type": "int",
+    "description": "参与推荐分析的最大候选数",
+    "default": 20
+  },
+  "llm_prefilter_enabled": {
+    "type": "bool",
+    "description": "是否启用 LLM 初筛",
+    "default": true
+  },
+  "llm_prefilter_timeout_sec": {
+    "type": "int",
+    "description": "初筛超时（秒）",
+    "default": 6
+  },
+  "llm_prefilter_max_items": {
+    "type": "int",
+    "description": "参与初筛的最大原始商品数",
+    "default": 30
+  }
+}

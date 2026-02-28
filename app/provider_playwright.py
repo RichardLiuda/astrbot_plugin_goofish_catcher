@@ -1,0 +1,576 @@
+from __future__ import annotations
+
+import asyncio
+import re
+from datetime import datetime
+from pathlib import Path
+from time import monotonic
+from typing import Any
+from urllib.parse import parse_qs, quote, urlparse
+
+from playwright.async_api import Browser, Playwright, TimeoutError, async_playwright
+from playwright.async_api import Error as PlaywrightError
+
+from astrbot.api import logger
+
+from .config import PluginSettings
+from .types import NormalizedItem, ProviderError, ProviderErrorCode
+
+_PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+class PlaywrightSearchProvider:
+    BASE_URL = "https://www.goofish.com"
+
+    def __init__(self, settings: PluginSettings) -> None:
+        self.settings = settings
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._init_lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        if self._browser is not None:
+            await self._browser.close()
+            self._browser = None
+        if self._playwright is not None:
+            await self._playwright.stop()
+            self._playwright = None
+
+    async def _ensure_browser(self) -> Browser:
+        if self._browser is not None:
+            return self._browser
+
+        async with self._init_lock:
+            if self._browser is not None:
+                return self._browser
+            self._playwright = await async_playwright().start()
+            if self._playwright is None:
+                raise ProviderError(
+                    ProviderErrorCode.UNKNOWN,
+                    "playwright start failed",
+                    retry_after_sec=300,
+                )
+
+            try:
+                self._browser = await self._playwright.chromium.launch(
+                    headless=self.settings.playwright_headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+            except PlaywrightError as exc:
+                message = str(exc)
+                if (
+                    self.settings.playwright_headless
+                    and "Executable doesn't exist" in message
+                    and "chromium_headless_shell" in message
+                ):
+                    chromium_exec = self._playwright.chromium.executable_path
+                    if chromium_exec and Path(chromium_exec).exists():
+                        try:
+                            self._browser = await self._playwright.chromium.launch(
+                                headless=self.settings.playwright_headless,
+                                executable_path=chromium_exec,
+                                args=["--disable-blink-features=AutomationControlled"],
+                            )
+                        except PlaywrightError as fallback_exc:
+                            raise ProviderError(
+                                ProviderErrorCode.DEPENDENCY_MISSING,
+                                "playwright fallback launch failed. Run: "
+                                "uv run python -m playwright install",
+                                retry_after_sec=1800,
+                            ) from fallback_exc
+                    else:
+                        raise ProviderError(
+                            ProviderErrorCode.DEPENDENCY_MISSING,
+                            "playwright browser executable is missing. Run: "
+                            "uv run python -m playwright install chromium chromium-headless-shell",
+                            retry_after_sec=3600,
+                        ) from exc
+                else:
+                    raise ProviderError(
+                        ProviderErrorCode.DEPENDENCY_MISSING,
+                        "failed to launch playwright browser. "
+                        "Run: uv run python -m playwright install",
+                        retry_after_sec=1800,
+                    ) from exc
+            return self._browser
+
+    async def search(
+        self,
+        *,
+        keyword: str,
+        pages: int,
+        timeout_sec: int,
+    ) -> list[NormalizedItem]:
+        browser = await self._ensure_browser()
+        unique: dict[str, NormalizedItem] = {}
+        page_count = max(1, pages)
+        timeout_ms = max(5, timeout_sec) * 1000
+
+        for page_index in range(1, page_count + 1):
+            page_items = await self._fetch_single_page(
+                browser=browser,
+                keyword=keyword,
+                page_index=page_index,
+                timeout_ms=timeout_ms,
+            )
+            for item in page_items:
+                unique[item.item_id] = item
+
+            if not page_items:
+                break
+
+        return list(unique.values())
+
+    async def _fetch_single_page(
+        self,
+        *,
+        browser: Browser,
+        keyword: str,
+        page_index: int,
+        timeout_ms: int,
+    ) -> list[NormalizedItem]:
+        context_kwargs: dict[str, Any] = {
+            "viewport": {"width": 1280, "height": 800},
+        }
+
+        if self.settings.playwright_storage_state_path is not None:
+            storage_path: Path = self.settings.playwright_storage_state_path
+            if storage_path.exists():
+                context_kwargs["storage_state"] = str(storage_path)
+
+        context = await browser.new_context(**context_kwargs)
+        page = await context.new_page()
+        captured_payloads: list[dict[str, Any] | list[Any]] = []
+        error_flags: set[str] = set()
+
+        if self.settings.playwright_block_assets:
+            await context.route("**/*", _route_handler)
+
+        async def on_response(response) -> None:
+            url = response.url.lower()
+            content_type = (response.headers.get("content-type") or "").lower()
+
+            if "captcha" in url:
+                error_flags.add("captcha")
+            # Only treat auth as failure when main document is redirected to login.
+            # Static subresources from passport domains are common even in valid sessions.
+            if response.request.resource_type == "document" and response.status in {
+                301,
+                302,
+                303,
+                307,
+                308,
+            }:
+                location = (response.headers.get("location") or "").lower()
+                if "login" in location or "passport" in location:
+                    error_flags.add("auth")
+
+            if "json" not in content_type:
+                return
+
+            try:
+                payload = await response.json()
+            except Exception:
+                try:
+                    text = await response.text()
+                except Exception:
+                    return
+                lowered = text.lower()
+                if "被挤爆" in text or "rate limit" in lowered:
+                    error_flags.add("rate_limited")
+                if "captcha" in lowered or "验证码" in text or "滑块" in text:
+                    error_flags.add("captcha")
+                return
+
+            if isinstance(payload, (dict, list)):
+                captured_payloads.append(payload)
+
+        page.on("response", on_response)
+        search_url = self._build_search_url(keyword=keyword, page_index=page_index)
+
+        try:
+            await page.goto(
+                search_url, wait_until="domcontentloaded", timeout=timeout_ms
+            )
+            await self._maybe_wait_for_network_idle(page, timeout_ms)
+            current_url = page.url.lower()
+            if "login" in current_url or "passport" in current_url:
+                raise ProviderError(
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    "goofish redirected to login page",
+                )
+            html = await page.content()
+            if "验证码" in html or "captcha" in html.lower() or "滑块" in html:
+                raise ProviderError(
+                    ProviderErrorCode.CAPTCHA,
+                    "captcha detected on goofish page",
+                )
+
+            items = await self._wait_for_items_ready(
+                page=page,
+                captured_payloads=captured_payloads,
+                timeout_ms=timeout_ms,
+            )
+
+            if not items and "rate_limited" in error_flags:
+                raise ProviderError(
+                    ProviderErrorCode.RATE_LIMITED,
+                    "goofish rate limited current request",
+                    retry_after_sec=60,
+                )
+
+            if "captcha" in error_flags:
+                raise ProviderError(
+                    ProviderErrorCode.CAPTCHA,
+                    "captcha response detected",
+                )
+            if "auth" in error_flags:
+                raise ProviderError(
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    "authentication required by goofish",
+                )
+            if not items:
+                logger.info(
+                    "[goofish_catcher] page=%s no items after wait, payloads=%s",
+                    page_index,
+                    len(captured_payloads),
+                )
+            return items
+        except TimeoutError as exc:
+            raise ProviderError(
+                ProviderErrorCode.TIMEOUT,
+                f"playwright timeout while fetching page {page_index}: {exc}",
+            ) from exc
+        except PlaywrightError as exc:
+            raise ProviderError(
+                ProviderErrorCode.UNKNOWN,
+                f"playwright page error: {exc}",
+                retry_after_sec=300,
+            ) from exc
+        finally:
+            await context.close()
+
+    def _build_search_url(self, *, keyword: str, page_index: int) -> str:
+        base = f"{self.BASE_URL}/search?q={quote(keyword)}"
+        if page_index > 1:
+            base = f"{base}&page={page_index}"
+        return base
+
+    async def _extract_items_from_dom(self, page) -> list[NormalizedItem]:
+        try:
+            cards = await page.eval_on_selector_all(
+                "a[href*='item']",
+                """
+                (nodes) => {
+                  return nodes.slice(0, 80).map((node) => {
+                    const href = node.href || node.getAttribute('href') || '';
+                    const text = (node.innerText || '').trim();
+                    const lines = text.split('\\n').map((line) => line.trim()).filter(Boolean);
+                    return {
+                      href,
+                      text,
+                      title: lines[0] || ''
+                    };
+                  });
+                }
+                """,
+            )
+        except Exception:
+            return []
+
+        items: list[NormalizedItem] = []
+        seen: set[str] = set()
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            url = _normalize_url(card.get("href"), self.BASE_URL)
+            if not url:
+                continue
+            item_id = _extract_item_id_from_url(url)
+            title = str(card.get("title", "")).strip()
+            price = _parse_price(card.get("text"))
+            if not item_id or not title or price is None:
+                continue
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            items.append(
+                NormalizedItem(
+                    item_id=item_id,
+                    title=title,
+                    price=price,
+                    url=url,
+                    publish_time=None,
+                    raw=card,
+                )
+            )
+        return items
+
+    async def _maybe_wait_for_network_idle(self, page, timeout_ms: int) -> None:
+        idle_timeout = max(1200, min(6000, timeout_ms // 3))
+        try:
+            await page.wait_for_load_state("networkidle", timeout=idle_timeout)
+        except Exception:
+            await page.wait_for_timeout(min(1800, idle_timeout))
+
+    async def _wait_for_items_ready(
+        self,
+        *,
+        page,
+        captured_payloads: list[dict[str, Any] | list[Any]],
+        timeout_ms: int,
+    ) -> list[NormalizedItem]:
+        wait_budget_ms = max(2000, min(12000, int(timeout_ms * 0.65)))
+        deadline = monotonic() + (wait_budget_ms / 1000.0)
+        poll_ms = 350
+        last_dom_count = -1
+        stable_rounds = 0
+        loop_count = 0
+
+        while monotonic() < deadline:
+            payload_items = self._extract_items_from_payloads(captured_payloads)
+            if payload_items:
+                return payload_items
+
+            dom_items = await self._extract_items_from_dom(page)
+            dom_count = len(dom_items)
+            if dom_count > 0:
+                if dom_count == last_dom_count:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                # Either enough cards, or count stabilized for a while.
+                if dom_count >= 6 or stable_rounds >= 2:
+                    return dom_items
+            last_dom_count = dom_count
+
+            loop_count += 1
+            if loop_count % 2 == 0:
+                try:
+                    await page.evaluate(
+                        "window.scrollBy(0, Math.max(window.innerHeight, 900));"
+                    )
+                except Exception:
+                    pass
+            await page.wait_for_timeout(poll_ms)
+
+        payload_items = self._extract_items_from_payloads(captured_payloads)
+        if payload_items:
+            return payload_items
+        return await self._extract_items_from_dom(page)
+
+    def _extract_items_from_payloads(
+        self, payloads: list[dict[str, Any] | list[Any]]
+    ) -> list[NormalizedItem]:
+        results: list[NormalizedItem] = []
+        seen: set[str] = set()
+        stack: list[Any] = list(payloads)
+
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                normalized = self._normalize_item_candidate(node)
+                if normalized and normalized.item_id not in seen:
+                    seen.add(normalized.item_id)
+                    results.append(normalized)
+                for value in node.values():
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(node, list):
+                for item in node:
+                    if isinstance(item, (dict, list)):
+                        stack.append(item)
+        return results
+
+    def _normalize_item_candidate(self, data: dict[str, Any]) -> NormalizedItem | None:
+        title = _pick_first_text(
+            data,
+            ("title", "item_title", "name", "itemName", "subject"),
+        )
+        if not title:
+            return None
+
+        url = _normalize_url(
+            _pick_first_text(data, ("url", "item_url", "detail_url", "jumpUrl")),
+            self.BASE_URL,
+        )
+
+        item_id = _pick_first_text(
+            data,
+            ("item_id", "itemId", "id", "auctionId", "targetId", "itemid"),
+        )
+        if not item_id and url:
+            item_id = _extract_item_id_from_url(url)
+        if not item_id:
+            return None
+
+        price = _extract_price(data)
+        if price is None:
+            return None
+
+        if not url:
+            url = f"{self.BASE_URL}/item?id={item_id}"
+
+        publish_time = _extract_publish_time(data)
+        return NormalizedItem(
+            item_id=item_id,
+            title=title,
+            price=price,
+            url=url,
+            publish_time=publish_time,
+            raw=data,
+        )
+
+
+async def _route_handler(route) -> None:
+    if route.request.resource_type in {"image", "font", "media"}:
+        await route.abort()
+        return
+    await route.continue_()
+
+
+def _pick_first_text(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        if key not in data:
+            continue
+        value = data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_url(url: Any, base_url: str) -> str | None:
+    if url is None:
+        return None
+    text = str(url).strip()
+    if not text:
+        return None
+    if text.startswith("//"):
+        return "https:" + text
+    if text.startswith("/"):
+        return base_url + text
+    return text
+
+
+def _extract_item_id_from_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key in ("id", "item_id", "itemId", "auctionId"):
+        values = query.get(key)
+        if not values:
+            continue
+        value = str(values[0]).strip()
+        if value:
+            return value
+
+    match = re.search(r"item(?:_id)?[=/](\d+)", url)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _extract_price(data: dict[str, Any]) -> float | None:
+    candidate_keys = (
+        "price",
+        "current_price",
+        "currentPrice",
+        "displayPrice",
+        "priceText",
+        "amount",
+        "salePrice",
+        "finalPrice",
+    )
+
+    for key in candidate_keys:
+        if key not in data:
+            continue
+        parsed = _parse_price(data.get(key))
+        if parsed is not None:
+            return parsed
+
+    for key in ("priceInfo", "tradePrice", "item_price", "price_data"):
+        if key not in data:
+            continue
+        parsed = _parse_price(data.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_price(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        match = _PRICE_RE.search(text)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    if isinstance(value, dict):
+        for key in ("price", "amount", "value", "text", "display", "priceText"):
+            if key in value:
+                parsed = _parse_price(value.get(key))
+                if parsed is not None:
+                    return parsed
+        return None
+    if isinstance(value, list):
+        for item in value:
+            parsed = _parse_price(item)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _extract_publish_time(data: dict[str, Any]) -> int | None:
+    for key in (
+        "publish_time",
+        "publishTime",
+        "create_time",
+        "createTime",
+        "gmtCreate",
+        "ctime",
+        "time",
+    ):
+        if key not in data:
+            continue
+        parsed = _parse_timestamp(data.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_timestamp(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        ts = int(value)
+        if ts > 10_000_000_000:
+            ts = ts // 1000
+        return ts if ts > 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            ts = int(text)
+            if ts > 10_000_000_000:
+                ts = ts // 1000
+            return ts if ts > 0 else None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return int(dt.timestamp())
+    return None
