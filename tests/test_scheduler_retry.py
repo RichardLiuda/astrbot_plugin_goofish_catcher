@@ -1,13 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from app.scheduler import calculate_retry_delay  # noqa: E402
+from data.plugins.astrbot_plugin_goofish_catcher.app.scheduler import calculate_retry_delay
 
 
 def test_retry_delay_grows_exponentially_without_jitter():

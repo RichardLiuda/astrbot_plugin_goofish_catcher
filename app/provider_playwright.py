@@ -43,8 +43,8 @@ class PlaywrightSearchProvider:
         async with self._init_lock:
             if self._browser is not None:
                 return self._browser
-            self._playwright = await async_playwright().start()
-            if self._playwright is None:
+            playwright = await async_playwright().start()
+            if playwright is None:
                 raise ProviderError(
                     ProviderErrorCode.UNKNOWN,
                     "playwright start failed",
@@ -52,7 +52,7 @@ class PlaywrightSearchProvider:
                 )
 
             try:
-                self._browser = await self._playwright.chromium.launch(
+                browser = await playwright.chromium.launch(
                     headless=self.settings.playwright_headless,
                     args=["--disable-blink-features=AutomationControlled"],
                 )
@@ -63,15 +63,16 @@ class PlaywrightSearchProvider:
                     and "Executable doesn't exist" in message
                     and "chromium_headless_shell" in message
                 ):
-                    chromium_exec = self._playwright.chromium.executable_path
+                    chromium_exec = playwright.chromium.executable_path
                     if chromium_exec and Path(chromium_exec).exists():
                         try:
-                            self._browser = await self._playwright.chromium.launch(
+                            browser = await playwright.chromium.launch(
                                 headless=self.settings.playwright_headless,
                                 executable_path=chromium_exec,
                                 args=["--disable-blink-features=AutomationControlled"],
                             )
                         except PlaywrightError as fallback_exc:
+                            await playwright.stop()
                             raise ProviderError(
                                 ProviderErrorCode.DEPENDENCY_MISSING,
                                 "playwright fallback launch failed. Run: "
@@ -79,6 +80,7 @@ class PlaywrightSearchProvider:
                                 retry_after_sec=1800,
                             ) from fallback_exc
                     else:
+                        await playwright.stop()
                         raise ProviderError(
                             ProviderErrorCode.DEPENDENCY_MISSING,
                             "playwright browser executable is missing. Run: "
@@ -86,12 +88,18 @@ class PlaywrightSearchProvider:
                             retry_after_sec=3600,
                         ) from exc
                 else:
+                    await playwright.stop()
                     raise ProviderError(
                         ProviderErrorCode.DEPENDENCY_MISSING,
                         "failed to launch playwright browser. "
                         "Run: uv run python -m playwright install",
                         retry_after_sec=1800,
                     ) from exc
+            except Exception:
+                await playwright.stop()
+                raise
+            self._playwright = playwright
+            self._browser = browser
             return self._browser
 
     async def search(
@@ -509,11 +517,17 @@ def _parse_price(value: Any) -> float | None:
         return float(value)
     if isinstance(value, str):
         text = value.strip().replace(",", "")
+        lowered = text.lower()
+        multiplier = 1.0
+        if "万" in text or re.search(r"\d(?:\.\d+)?\s*w", lowered):
+            multiplier = 10_000.0
+        elif "千" in text or re.search(r"\d(?:\.\d+)?\s*k", lowered):
+            multiplier = 1_000.0
         match = _PRICE_RE.search(text)
         if not match:
             return None
         try:
-            return float(match.group(1))
+            return float(match.group(1)) * multiplier
         except ValueError:
             return None
     if isinstance(value, dict):

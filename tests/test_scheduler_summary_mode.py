@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from app.config import PluginSettings  # noqa: E402
-from app.scheduler import MonitoringScheduler  # noqa: E402
-from app.types import (  # noqa: E402
+from data.plugins.astrbot_plugin_goofish_catcher.app.config import PluginSettings
+from data.plugins.astrbot_plugin_goofish_catcher.app.scheduler import MonitoringScheduler
+from data.plugins.astrbot_plugin_goofish_catcher.app.types import (
     ExistingItem,
     NormalizedItem,
     RecommendationItem,
@@ -84,6 +79,15 @@ class _FakeStorage:
     async def get_item(self, sub_id: int, item_id: str) -> ExistingItem | None:
         return self.items.get((sub_id, item_id))
 
+    async def get_items_by_ids(
+        self, sub_id: int, item_ids: list[str]
+    ) -> dict[str, ExistingItem]:
+        return {
+            item_id: self.items[(sub_id, item_id)]
+            for item_id in item_ids
+            if (sub_id, item_id) in self.items
+        }
+
     async def insert_item(self, sub_id: int, item: NormalizedItem, now_ts: int) -> None:
         self.items[(sub_id, item.item_id)] = ExistingItem(
             sub_id=sub_id,
@@ -95,6 +99,15 @@ class _FakeStorage:
             last_seen_at=now_ts,
             last_price=item.price,
         )
+
+    async def upsert_items_bulk(
+        self, sub_id: int, items: list[NormalizedItem], now_ts: int
+    ) -> None:
+        for item in items:
+            if (sub_id, item.item_id) in self.items:
+                await self.update_item(sub_id, item, now_ts)
+            else:
+                await self.insert_item(sub_id, item, now_ts)
 
     async def update_item(self, sub_id: int, item: NormalizedItem, now_ts: int) -> None:
         old = self.items[(sub_id, item.item_id)]
@@ -112,6 +125,9 @@ class _FakeStorage:
     async def insert_price_history(self, *args, **kwargs) -> None:
         return None
 
+    async def insert_price_history_bulk(self, *args, **kwargs) -> None:
+        return None
+
     async def notification_hash_exists(
         self,
         sub_id: int,
@@ -126,6 +142,11 @@ class _FakeStorage:
     ) -> int | None:
         return None
 
+    async def get_last_notification_sent_map(
+        self, sub_id: int, item_ids: list[str], event_type: str
+    ) -> dict[str, int]:
+        return {}
+
     async def insert_notification(
         self,
         *,
@@ -137,6 +158,13 @@ class _FakeStorage:
         meta: dict | None = None,
     ) -> None:
         self.notifications.add((sub_id, item_id, event_type, payload_hash))
+
+    async def insert_notifications_bulk(
+        self,
+        rows: list[tuple[int, str, str, str, int, dict | None]],
+    ) -> None:
+        for sub_id, item_id, event_type, payload_hash, _, _ in rows:
+            self.notifications.add((sub_id, item_id, event_type, payload_hash))
 
 
 class _FakeProvider:

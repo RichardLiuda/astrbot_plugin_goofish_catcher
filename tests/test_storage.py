@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from app.storage import SubscriptionStorage  # noqa: E402
-from app.types import NormalizedItem  # noqa: E402
+from data.plugins.astrbot_plugin_goofish_catcher.app.storage import SubscriptionStorage
+from data.plugins.astrbot_plugin_goofish_catcher.app.types import NormalizedItem
 
 
 @pytest.mark.asyncio

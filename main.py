@@ -44,6 +44,7 @@ class GoofishCatcherPlugin(Star):
         self.scheduler: MonitoringScheduler | None = None
         self._provider_error: str | None = None
         self._ready = False
+        self._loaded = False
         self._start_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -84,9 +85,12 @@ class GoofishCatcherPlugin(Star):
             self.settings.provider_mode,
             self.settings.db_path,
         )
+        if self._loaded:
+            await self._ensure_scheduler_started()
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self) -> None:
+        self._loaded = True
         async with self._start_lock:
             if not self._ready:
                 logger.warning("[goofish_catcher] skip start, plugin not ready")
@@ -103,15 +107,27 @@ class GoofishCatcherPlugin(Star):
             await self.scheduler.start()
 
     async def terminate(self) -> None:
+        async def _safe_close(name: str, closer) -> None:
+            try:
+                await closer()
+            except Exception as exc:
+                logger.error(
+                    "[goofish_catcher] failed to close %s: %s",
+                    name,
+                    exc,
+                    exc_info=True,
+                )
+
         if self.scheduler is not None:
-            await self.scheduler.stop()
+            await _safe_close("scheduler", self.scheduler.stop)
         if self.notifier is not None:
-            await self.notifier.close()
+            await _safe_close("notifier", self.notifier.close)
         if self.provider is not None:
-            await self.provider.close()
+            await _safe_close("provider", self.provider.close)
         if self.storage is not None:
-            await self.storage.close()
+            await _safe_close("storage", self.storage.close)
         self._ready = False
+        self._loaded = False
 
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):

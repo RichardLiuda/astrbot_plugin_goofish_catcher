@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[4]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from data.plugins.astrbot_plugin_goofish_catcher.app.types import (  # noqa: E402
+from data.plugins.astrbot_plugin_goofish_catcher.app.types import (
     NormalizedItem,
     RecommendationItem,
     RecommendationResult,
 )
-from data.plugins.astrbot_plugin_goofish_catcher.main import (  # noqa: E402
+from data.plugins.astrbot_plugin_goofish_catcher.main import (
     _build_query_candidates,
     _extract_subcommand_args,
     _parse_query_input,

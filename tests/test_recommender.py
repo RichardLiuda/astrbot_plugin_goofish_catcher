@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from app.config import PluginSettings  # noqa: E402
-from app.recommender import GoofishRecommender, _parse_json_maybe_fenced  # noqa: E402
-from app.types import NormalizedItem, RecommendationCandidate  # noqa: E402
+from data.plugins.astrbot_plugin_goofish_catcher.app.config import PluginSettings
+from data.plugins.astrbot_plugin_goofish_catcher.app.recommender import (
+    GoofishRecommender,
+    _parse_json_maybe_fenced,
+)
+from data.plugins.astrbot_plugin_goofish_catcher.app.types import (
+    NormalizedItem,
+    RecommendationCandidate,
+)
 
 
 class _ProviderMeta:

@@ -419,20 +419,33 @@ class MonitoringScheduler:
         items: list,
         now_ts: int,
     ) -> list[RecommendationCandidate]:
-        candidates: list[RecommendationCandidate] = []
-        for item in items:
-            if item.price < 0:
-                continue
+        normalized_items = [item for item in items if item.price >= 0]
+        if not normalized_items:
+            return []
 
-            existing = await self.storage.get_item(sub.id, item.item_id)
+        item_ids = [item.item_id for item in normalized_items]
+        existing_map = await self.storage.get_items_by_ids(sub.id, item_ids)
+        last_drop_sent_map = await self.storage.get_last_notification_sent_map(
+            sub.id,
+            item_ids,
+            EVENT_PRICE_DROP,
+        )
+
+        await self.storage.upsert_items_bulk(sub.id, normalized_items, now_ts)
+
+        price_history_rows: list[tuple[int, str, float, int, str]] = []
+        candidates: list[RecommendationCandidate] = []
+        for item in normalized_items:
+            existing = existing_map.get(item.item_id)
             if existing is None:
-                await self.storage.insert_item(sub.id, item, now_ts)
-                await self.storage.insert_price_history(
-                    sub.id,
-                    item.item_id,
-                    item.price,
-                    now_ts,
-                    self.settings.provider_mode,
+                price_history_rows.append(
+                    (
+                        sub.id,
+                        item.item_id,
+                        item.price,
+                        now_ts,
+                        self.settings.provider_mode,
+                    )
                 )
 
                 if not within_new_window(item.publish_time, now_ts, sub.new_window_sec):
@@ -473,17 +486,17 @@ class MonitoringScheduler:
                 continue
 
             old_price = existing.last_price
-            await self.storage.update_item(sub.id, item, now_ts)
-
             if old_price is None or float(old_price) == float(item.price):
                 continue
 
-            await self.storage.insert_price_history(
-                sub.id,
-                item.item_id,
-                item.price,
-                now_ts,
-                self.settings.provider_mode,
+            price_history_rows.append(
+                (
+                    sub.id,
+                    item.item_id,
+                    item.price,
+                    now_ts,
+                    self.settings.provider_mode,
+                )
             )
 
             decision = evaluate_price_drop(
@@ -495,11 +508,7 @@ class MonitoringScheduler:
             if not decision.triggered:
                 continue
 
-            last_sent = await self.storage.get_last_notification_sent_at(
-                sub.id,
-                item.item_id,
-                EVENT_PRICE_DROP,
-            )
+            last_sent = last_drop_sent_map.get(item.item_id)
             if in_cooldown(last_sent, now_ts, sub.cooldown_sec):
                 continue
 
@@ -548,6 +557,7 @@ class MonitoringScheduler:
                     },
                 )
             )
+        await self.storage.insert_price_history_bulk(price_history_rows)
         return candidates
 
     async def persist_notifications(
@@ -557,14 +567,18 @@ class MonitoringScheduler:
         candidates: list[RecommendationCandidate],
         sent_at: int,
     ) -> None:
+        rows: list[tuple[int, str, str, str, int, dict | None]] = []
         for candidate in candidates:
             if not candidate.payload_hash:
                 continue
-            await self.storage.insert_notification(
-                sub_id=sub_id,
-                item_id=candidate.item_id,
-                event_type=candidate.event_type,
-                payload_hash=candidate.payload_hash,
-                sent_at=sent_at,
-                meta=candidate.notification_meta,
+            rows.append(
+                (
+                    sub_id,
+                    candidate.item_id,
+                    candidate.event_type,
+                    candidate.payload_hash,
+                    sent_at,
+                    candidate.notification_meta,
+                )
             )
+        await self.storage.insert_notifications_bulk(rows)

@@ -463,6 +463,41 @@ class SubscriptionStorage:
             else None,
         )
 
+    async def get_items_by_ids(
+        self, sub_id: int, item_ids: list[str]
+    ) -> dict[str, ExistingItem]:
+        if not item_ids:
+            return {}
+        conn = self._conn_or_raise()
+        deduped_ids = list(dict.fromkeys(item_ids))
+        placeholders = ",".join("?" for _ in deduped_ids)
+        rows = await (
+            await conn.execute(
+                f"""
+                SELECT sub_id, item_id, title, url, publish_time, first_seen_at, last_seen_at, last_price
+                FROM items
+                WHERE sub_id = ? AND item_id IN ({placeholders})
+                """,
+                (sub_id, *deduped_ids),
+            )
+        ).fetchall()
+        result: dict[str, ExistingItem] = {}
+        for row in rows:
+            item_id = str(row["item_id"])
+            result[item_id] = ExistingItem(
+                sub_id=int(row["sub_id"]),
+                item_id=item_id,
+                title=str(row["title"]),
+                url=str(row["url"]),
+                publish_time=row["publish_time"],
+                first_seen_at=int(row["first_seen_at"]),
+                last_seen_at=int(row["last_seen_at"]),
+                last_price=float(row["last_price"])
+                if row["last_price"] is not None
+                else None,
+            )
+        return result
+
     async def list_items_by_snapshot(
         self,
         *,
@@ -529,6 +564,46 @@ class SubscriptionStorage:
             )
             await conn.commit()
 
+    async def upsert_items_bulk(
+        self,
+        sub_id: int,
+        items: list[NormalizedItem],
+        now_ts: int,
+    ) -> None:
+        if not items:
+            return
+        conn = self._conn_or_raise()
+        records = [
+            (
+                sub_id,
+                item.item_id,
+                item.title,
+                item.url,
+                item.publish_time,
+                now_ts,
+                now_ts,
+                item.price,
+            )
+            for item in items
+        ]
+        async with self._write_lock:
+            await conn.executemany(
+                """
+                INSERT INTO items (
+                    sub_id, item_id, title, url, publish_time,
+                    first_seen_at, last_seen_at, last_price
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sub_id, item_id) DO UPDATE SET
+                    title = excluded.title,
+                    url = excluded.url,
+                    publish_time = COALESCE(excluded.publish_time, items.publish_time),
+                    last_seen_at = excluded.last_seen_at,
+                    last_price = excluded.last_price
+                """,
+                records,
+            )
+            await conn.commit()
+
     async def update_item(self, sub_id: int, item: NormalizedItem, now_ts: int) -> None:
         conn = self._conn_or_raise()
         async with self._write_lock:
@@ -574,6 +649,24 @@ class SubscriptionStorage:
             )
             await conn.commit()
 
+    async def insert_price_history_bulk(
+        self,
+        rows: list[tuple[int, str, float, int, str]],
+    ) -> None:
+        if not rows:
+            return
+        conn = self._conn_or_raise()
+        async with self._write_lock:
+            await conn.executemany(
+                """
+                INSERT INTO price_history (
+                    sub_id, item_id, price, observed_at, source
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            await conn.commit()
+
     async def notification_hash_exists(
         self,
         sub_id: int,
@@ -614,6 +707,34 @@ class SubscriptionStorage:
         ).fetchone()
         return int(row["sent_at"]) if row else None
 
+    async def get_last_notification_sent_map(
+        self,
+        sub_id: int,
+        item_ids: list[str],
+        event_type: str,
+    ) -> dict[str, int]:
+        if not item_ids:
+            return {}
+        conn = self._conn_or_raise()
+        deduped_ids = list(dict.fromkeys(item_ids))
+        placeholders = ",".join("?" for _ in deduped_ids)
+        rows = await (
+            await conn.execute(
+                f"""
+                SELECT item_id, MAX(sent_at) AS last_sent_at
+                FROM notifications
+                WHERE sub_id = ? AND event_type = ? AND item_id IN ({placeholders})
+                GROUP BY item_id
+                """,
+                (sub_id, event_type, *deduped_ids),
+            )
+        ).fetchall()
+        return {
+            str(row["item_id"]): int(row["last_sent_at"])
+            for row in rows
+            if row["last_sent_at"] is not None
+        }
+
     async def insert_notification(
         self,
         *,
@@ -634,6 +755,35 @@ class SubscriptionStorage:
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (sub_id, item_id, event_type, payload_hash, sent_at, meta_json),
+            )
+            await conn.commit()
+
+    async def insert_notifications_bulk(
+        self,
+        rows: list[tuple[int, str, str, str, int, dict | None]],
+    ) -> None:
+        if not rows:
+            return
+        conn = self._conn_or_raise()
+        records = [
+            (
+                sub_id,
+                item_id,
+                event_type,
+                payload_hash,
+                sent_at,
+                json.dumps(meta, ensure_ascii=False) if meta is not None else None,
+            )
+            for sub_id, item_id, event_type, payload_hash, sent_at, meta in rows
+        ]
+        async with self._write_lock:
+            await conn.executemany(
+                """
+                INSERT OR IGNORE INTO notifications (
+                    sub_id, item_id, event_type, payload_hash, sent_at, meta_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                records,
             )
             await conn.commit()
 

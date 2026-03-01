@@ -105,14 +105,15 @@ def load_plugin_settings(
     requested_provider_mode = str(
         raw.get("provider_mode", PROVIDER_MODE_PLAYWRIGHT_LOCAL)
     ).strip()
-    provider_mode = PROVIDER_MODE_PLAYWRIGHT_LOCAL
-    if requested_provider_mode and requested_provider_mode != provider_mode:
-        logger.info(
-            "[%s] provider_mode=%s is temporarily disabled, forced to %s",
+    provider_mode = requested_provider_mode or PROVIDER_MODE_PLAYWRIGHT_LOCAL
+    if provider_mode not in SUPPORTED_PROVIDER_MODES:
+        logger.warning(
+            "[%s] unsupported provider_mode=%s, fallback to %s",
             plugin_name,
-            requested_provider_mode,
             provider_mode,
+            PROVIDER_MODE_PLAYWRIGHT_LOCAL,
         )
+        provider_mode = PROVIDER_MODE_PLAYWRIGHT_LOCAL
 
     storage_state_path: Path | None = None
     storage_state_file = _first_file(raw.get("playwright_storage_state_file"))
@@ -130,8 +131,8 @@ def load_plugin_settings(
             )
 
     webhook_url = str(raw.get("webhook_url", "")).strip() or None
-    remote_base_url = None
-    remote_api_key = None
+    remote_base_url = str(raw.get("remote_base_url", "")).strip() or None
+    remote_api_key = str(raw.get("remote_api_key", "")).strip() or None
     llm_provider_id = str(raw.get("llm_provider_id", "")).strip() or None
     llm_prefilter_provider_id = (
         str(raw.get("llm_prefilter_provider_id", "")).strip() or None
@@ -169,7 +170,7 @@ def load_plugin_settings(
         webhook_url=webhook_url,
         remote_base_url=remote_base_url,
         remote_api_key=remote_api_key,
-        remote_timeout_sec=20,
+        remote_timeout_sec=max(1, _as_int(raw.get("remote_timeout_sec"), 20)),
         queue_max_size=max(10, _as_int(raw.get("queue_max_size"), 256)),
         llm_enabled=_as_bool(raw.get("llm_enabled"), True),
         llm_provider_id=llm_provider_id,

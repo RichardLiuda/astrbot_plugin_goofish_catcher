@@ -52,7 +52,12 @@ class RemoteSearchProvider:
         }
 
         try:
-            response = await client.post(url, headers=headers, json=payload)
+            response = await client.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=max(1, timeout_sec),
+            )
         except httpx.TimeoutException as exc:
             raise ProviderError(
                 ProviderErrorCode.TIMEOUT,
