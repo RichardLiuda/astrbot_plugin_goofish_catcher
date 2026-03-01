@@ -190,7 +190,14 @@ class Notifier:
             return
         client = await self._ensure_client()
         try:
-            await client.post(self.webhook_url, json=payload)
+            response = await client.post(self.webhook_url, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "[goofish_catcher] webhook post failed: status=%s body=%s",
+                exc.response.status_code,
+                exc.response.text[:200],
+            )
         except Exception as exc:
             logger.warning("[goofish_catcher] webhook post failed: %s", exc)
 

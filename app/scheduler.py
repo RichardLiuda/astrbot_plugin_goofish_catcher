@@ -126,6 +126,16 @@ class MonitoringScheduler:
     async def enqueue_manual_check(self, sub_id: int) -> bool:
         return await self._enqueue_sub_id(sub_id)
 
+    async def try_acquire_subscription(self, sub_id: int) -> bool:
+        async with self._inflight_lock:
+            if sub_id in self._inflight_sub_ids:
+                return False
+            self._inflight_sub_ids.add(sub_id)
+            return True
+
+    async def release_subscription(self, sub_id: int) -> None:
+        await self._release_sub_id(sub_id)
+
     async def get_status(self) -> dict[str, int | bool]:
         enabled_count = await self.storage.count_enabled_subscriptions()
         return {
@@ -181,8 +191,8 @@ class MonitoringScheduler:
             self._inflight_sub_ids.discard(sub_id)
 
     async def _poll_loop(self) -> None:
-        try:
-            while self._running:
+        while self._running:
+            try:
                 now_ts = int(time.time())
                 due_subs = await self.storage.get_due_subscriptions(
                     now_ts,
@@ -191,10 +201,15 @@ class MonitoringScheduler:
                 for sub in due_subs:
                     await self._enqueue_sub_id(sub.id)
                 await asyncio.sleep(self.settings.scheduler_tick_sec)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error("[goofish_catcher] poll loop crashed: %s", exc, exc_info=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[goofish_catcher] poll loop crashed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                await asyncio.sleep(min(5, self.settings.scheduler_tick_sec))
 
     async def _worker_loop(self, worker_idx: int) -> None:
         try:
@@ -279,10 +294,21 @@ class MonitoringScheduler:
                     candidates=candidates,
                     top_k=self.settings.llm_top_k,
                 )
-                await self.notifier.send_recommendation_summary(
+                sent = await self.notifier.send_recommendation_summary(
                     umo=sub.umo,
                     recommendation=recommendation,
                 )
+                if sent:
+                    await self.persist_notifications(
+                        sub_id=sub.id,
+                        candidates=candidates,
+                        sent_at=now_ts,
+                    )
+                else:
+                    logger.warning(
+                        "[goofish_catcher] sub=%s summary send failed, skip notification dedupe write",
+                        sub.id,
+                    )
             logger.info(
                 "[goofish_catcher] worker=%s sub=%s success raw=%s filtered=%s candidates=%s prefilter=%s",
                 worker_idx,
@@ -441,14 +467,8 @@ class MonitoringScheduler:
                         url=item.url,
                         publish_time=item.publish_time,
                         observed_at=now_ts,
+                        payload_hash=payload_hash,
                     )
-                )
-                await self.storage.insert_notification(
-                    sub_id=sub.id,
-                    item_id=item.item_id,
-                    event_type=EVENT_NEW,
-                    payload_hash=payload_hash,
-                    sent_at=now_ts,
                 )
                 continue
 
@@ -519,19 +539,32 @@ class MonitoringScheduler:
                     last_price=float(old_price),
                     drop_abs=decision.drop_abs,
                     drop_pct=decision.drop_pct,
+                    payload_hash=payload_hash,
+                    notification_meta={
+                        "drop_abs": decision.drop_abs,
+                        "drop_pct": decision.drop_pct,
+                        "last_price": old_price,
+                        "new_price": item.price,
+                    },
                 )
             )
-            await self.storage.insert_notification(
-                sub_id=sub.id,
-                item_id=item.item_id,
-                event_type=EVENT_PRICE_DROP,
-                payload_hash=payload_hash,
-                sent_at=now_ts,
-                meta={
-                    "drop_abs": decision.drop_abs,
-                    "drop_pct": decision.drop_pct,
-                    "last_price": old_price,
-                    "new_price": item.price,
-                },
-            )
         return candidates
+
+    async def persist_notifications(
+        self,
+        *,
+        sub_id: int,
+        candidates: list[RecommendationCandidate],
+        sent_at: int,
+    ) -> None:
+        for candidate in candidates:
+            if not candidate.payload_hash:
+                continue
+            await self.storage.insert_notification(
+                sub_id=sub_id,
+                item_id=candidate.item_id,
+                event_type=candidate.event_type,
+                payload_hash=candidate.payload_hash,
+                sent_at=sent_at,
+                meta=candidate.notification_meta,
+            )

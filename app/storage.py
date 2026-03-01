@@ -203,70 +203,68 @@ class SubscriptionStorage:
     ) -> tuple[Subscription, bool]:
         conn = self._conn_or_raise()
         now_ts = int(time.time())
-        existing = await self.get_subscription(umo, keyword)
-
         async with self._write_lock:
-            if existing is None:
+            existing = await (
                 await conn.execute(
                     """
-                    INSERT INTO subscriptions (
-                        umo, keyword, interval_sec, pages, drop_abs, drop_pct,
-                        new_window_sec, cooldown_sec, enabled, paused_reason,
-                        last_run_at, next_run_at, consecutive_failures,
-                        created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?)
+                    SELECT id FROM subscriptions
+                    WHERE umo = ? AND keyword = ?
+                    LIMIT 1
                     """,
-                    (
-                        umo,
-                        keyword,
-                        interval_sec,
-                        pages,
-                        drop_abs,
-                        drop_pct,
-                        new_window_sec,
-                        cooldown_sec,
-                        now_ts,
-                        now_ts,
-                        now_ts,
-                    ),
+                    (umo, keyword),
                 )
-                await conn.commit()
-            else:
+            ).fetchone()
+            created = existing is None
+            await conn.execute(
+                """
+                INSERT INTO subscriptions (
+                    umo, keyword, interval_sec, pages, drop_abs, drop_pct,
+                    new_window_sec, cooldown_sec, enabled, paused_reason,
+                    last_run_at, next_run_at, consecutive_failures,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?)
+                ON CONFLICT(umo, keyword) DO UPDATE SET
+                    interval_sec = excluded.interval_sec,
+                    pages = excluded.pages,
+                    drop_abs = excluded.drop_abs,
+                    drop_pct = excluded.drop_pct,
+                    new_window_sec = excluded.new_window_sec,
+                    cooldown_sec = excluded.cooldown_sec,
+                    enabled = 1,
+                    paused_reason = NULL,
+                    next_run_at = excluded.next_run_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    umo,
+                    keyword,
+                    interval_sec,
+                    pages,
+                    drop_abs,
+                    drop_pct,
+                    new_window_sec,
+                    cooldown_sec,
+                    now_ts,
+                    now_ts,
+                    now_ts,
+                ),
+            )
+            await conn.commit()
+            row = await (
                 await conn.execute(
                     """
-                    UPDATE subscriptions
-                    SET
-                        interval_sec = ?,
-                        pages = ?,
-                        drop_abs = ?,
-                        drop_pct = ?,
-                        new_window_sec = ?,
-                        cooldown_sec = ?,
-                        enabled = 1,
-                        paused_reason = NULL,
-                        next_run_at = ?,
-                        updated_at = ?
-                    WHERE id = ?
+                    SELECT * FROM subscriptions
+                    WHERE umo = ? AND keyword = ?
+                    LIMIT 1
                     """,
-                    (
-                        interval_sec,
-                        pages,
-                        drop_abs,
-                        drop_pct,
-                        new_window_sec,
-                        cooldown_sec,
-                        now_ts,
-                        now_ts,
-                        existing.id,
-                    ),
+                    (umo, keyword),
                 )
-                await conn.commit()
+            ).fetchone()
 
-        sub = await self.get_subscription(umo, keyword)
-        if sub is None:
+        if row is None:
             raise RuntimeError("failed to upsert subscription")
-        return sub, existing is None
+        return self._row_to_subscription(row), created
 
     async def delete_subscription(self, umo: str, keyword: str) -> bool:
         conn = self._conn_or_raise()
@@ -511,6 +509,12 @@ class SubscriptionStorage:
                     sub_id, item_id, title, url, publish_time,
                     first_seen_at, last_seen_at, last_price
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sub_id, item_id) DO UPDATE SET
+                    title = excluded.title,
+                    url = excluded.url,
+                    publish_time = COALESCE(excluded.publish_time, items.publish_time),
+                    last_seen_at = excluded.last_seen_at,
+                    last_price = excluded.last_price
                 """,
                 (
                     sub_id,

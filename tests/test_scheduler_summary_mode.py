@@ -154,12 +154,13 @@ class _FakeProvider:
 
 
 class _FakeNotifier:
-    def __init__(self):
+    def __init__(self, *, send_success: bool = True):
         self.summary_calls = 0
+        self.send_success = send_success
 
     async def send_recommendation_summary(self, *, umo: str, recommendation):
         self.summary_calls += 1
-        return True
+        return self.send_success
 
     async def send_alert(self, *args, **kwargs):
         return True
@@ -232,3 +233,42 @@ async def test_scheduler_sends_summary_only(tmp_path: Path):
 
     assert notifier.summary_calls == 1
     assert len(storage.notifications) >= 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_does_not_write_notifications_when_summary_send_fails(
+    tmp_path: Path,
+):
+    storage = _FakeStorage()
+    provider = _FakeProvider()
+    notifier = _FakeNotifier(send_success=False)
+    recommender = _FakeRecommender()
+    scheduler = MonitoringScheduler(
+        context=object(),
+        settings=_make_settings(tmp_path),
+        storage=storage,
+        provider=provider,
+        notifier=notifier,
+        recommender=recommender,
+    )
+    sub = Subscription(
+        id=1,
+        umo="webchat:test",
+        keyword="适马60-600",
+        interval_sec=600,
+        pages=1,
+        drop_abs=50.0,
+        drop_pct=0.05,
+        new_window_sec=3600,
+        cooldown_sec=3600,
+        enabled=True,
+        paused_reason=None,
+        last_run_at=None,
+        next_run_at=None,
+        consecutive_failures=0,
+    )
+
+    await scheduler._process_subscription(sub, worker_idx=0)
+
+    assert notifier.summary_calls == 1
+    assert len(storage.notifications) == 0

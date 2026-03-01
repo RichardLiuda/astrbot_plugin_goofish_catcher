@@ -141,7 +141,9 @@ class GoofishCatcherPlugin(Star):
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
-        assert self.storage is not None
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
 
         interval = (
             interval_sec if interval_sec > 0 else self.settings.default_interval_sec
@@ -184,7 +186,9 @@ class GoofishCatcherPlugin(Star):
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
-        assert self.storage is not None
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
 
         deleted = await self.storage.delete_subscription(
             event.unified_msg_origin, keyword
@@ -200,7 +204,9 @@ class GoofishCatcherPlugin(Star):
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
-        assert self.storage is not None
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
 
         subscriptions = await self.storage.list_subscriptions_by_umo(
             event.unified_msg_origin
@@ -224,7 +230,9 @@ class GoofishCatcherPlugin(Star):
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
-        assert self.storage is not None
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
 
         sub = await self.storage.get_subscription(event.unified_msg_origin, keyword)
         if sub is None:
@@ -239,7 +247,9 @@ class GoofishCatcherPlugin(Star):
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
-        assert self.storage is not None
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
 
         sub = await self.storage.get_subscription(event.unified_msg_origin, keyword)
         if sub is None:
@@ -263,9 +273,15 @@ class GoofishCatcherPlugin(Star):
                 f"Provider 当前不可用，无法执行立即检查。\n原因：{self._provider_error}"
             )
             return
-        assert self.storage is not None
-        assert self.provider is not None
-        assert self.recommender is not None
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
+        if self.provider is None:
+            yield event.plain_result("插件内部错误：抓取组件不可用，请重启后重试。")
+            return
+        if self.recommender is None:
+            yield event.plain_result("插件内部错误：推荐组件不可用，请重启后重试。")
+            return
         await self._ensure_scheduler_started()
         if self.scheduler is None:
             yield event.plain_result("调度器未启动。")
@@ -279,6 +295,12 @@ class GoofishCatcherPlugin(Star):
             if not sub.enabled:
                 yield event.plain_result(
                     f"订阅 {keyword} 当前处于暂停状态（{sub.paused_reason or 'manual'}），请先执行 /闲鱼 恢复 {keyword}"
+                )
+                return
+            acquired = await self.scheduler.try_acquire_subscription(sub.id)
+            if not acquired:
+                yield event.plain_result(
+                    "没有任务被加入队列（可能已在执行或队列已满）。"
                 )
                 return
             try:
@@ -302,6 +324,11 @@ class GoofishCatcherPlugin(Star):
                     candidates=candidates,
                     top_k=self.settings.llm_top_k,
                 )
+                await self.scheduler.persist_notifications(
+                    sub_id=sub.id,
+                    candidates=candidates,
+                    sent_at=now_ts,
+                )
                 yield event.plain_result(_render_recommendation_preview(recommendation))
                 return
             except asyncio.TimeoutError:
@@ -323,6 +350,8 @@ class GoofishCatcherPlugin(Star):
             except Exception as exc:
                 yield event.plain_result(f"立即检查失败：{exc}")
                 return
+            finally:
+                await self.scheduler.release_subscription(sub.id)
 
         enqueued = 0
         subscriptions = await self.storage.list_subscriptions_by_umo(
@@ -354,8 +383,12 @@ class GoofishCatcherPlugin(Star):
                 f"Provider 当前不可用，无法执行查询。\n原因：{self._provider_error}"
             )
             return
-        assert self.provider is not None
-        assert self.recommender is not None
+        if self.provider is None:
+            yield event.plain_result("插件内部错误：抓取组件不可用，请重启后重试。")
+            return
+        if self.recommender is None:
+            yield event.plain_result("插件内部错误：推荐组件不可用，请重启后重试。")
+            return
 
         raw_query_args = (
             _extract_subcommand_args(event.get_message_str()) or str(keyword).strip()
@@ -427,7 +460,9 @@ class GoofishCatcherPlugin(Star):
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
-        assert self.storage is not None
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
 
         sub = await self.storage.get_subscription(event.unified_msg_origin, keyword)
         if sub is None:
@@ -463,7 +498,9 @@ class GoofishCatcherPlugin(Star):
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
-        assert self.storage is not None
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
 
         await self._ensure_scheduler_started()
         scheduler_status = (

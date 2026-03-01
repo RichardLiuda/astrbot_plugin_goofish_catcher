@@ -58,6 +58,8 @@ class RecommendationCandidate:
     last_price: float | None = None
     drop_abs: float | None = None
     drop_pct: float | None = None
+    payload_hash: str | None = None
+    notification_meta: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
