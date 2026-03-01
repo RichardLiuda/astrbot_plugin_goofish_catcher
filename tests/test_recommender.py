@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import PluginSettings  # noqa: E402
-from app.recommender import GoofishRecommender  # noqa: E402
+from app.recommender import GoofishRecommender, _parse_json_maybe_fenced  # noqa: E402
 from app.types import NormalizedItem, RecommendationCandidate  # noqa: E402
 
 
@@ -181,6 +181,34 @@ async def test_recommender_llm_json_parse_and_topk(tmp_path: Path):
     assert result.used_llm
     assert len(result.top) == 1
     assert result.top[0].item_id == "1"
+
+
+def test_recommender_parse_json_with_fenced_noise():
+    raw = """
+Analysis start:
+```json
+{"summary":"ok","top":[{"item_id":"1","score":80,"reason":"r","risk":"k"}]}
+```
+Analysis end.
+"""
+    parsed = _parse_json_maybe_fenced(raw)
+    assert parsed["summary"] == "ok"
+    assert isinstance(parsed.get("top"), list)
+
+
+def test_recommender_parse_json_with_embedded_object():
+    raw = (
+        'some thoughts before {"summary":"s","top":[{"item_id":"1","score":77,'
+        '"reason":"r","risk":"k"}]} trailing text'
+    )
+    parsed = _parse_json_maybe_fenced(raw)
+    assert parsed["summary"] == "s"
+    assert parsed["top"][0]["item_id"] == "1"
+
+
+def test_recommender_parse_json_invalid_still_fails():
+    with pytest.raises(ValueError):
+        _parse_json_maybe_fenced("no valid json body here")
 
 
 @pytest.mark.asyncio

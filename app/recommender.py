@@ -408,13 +408,83 @@ def _safe_float(value: Any, default: float) -> float:
 
 def _parse_json_maybe_fenced(raw_text: str) -> dict[str, Any]:
     cleaned = raw_text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    payload = json.loads(cleaned)
-    if not isinstance(payload, dict):
-        raise ValueError("llm payload must be a dict")
-    return payload
+    if not cleaned:
+        raise ValueError("empty llm output")
+
+    candidates: list[str] = [cleaned]
+    candidates.extend(_extract_fenced_json_candidates(cleaned))
+    candidates.extend(_extract_balanced_json_objects(cleaned))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        payload_text = candidate.strip()
+        if not payload_text or payload_text in seen:
+            continue
+        seen.add(payload_text)
+        try:
+            payload = json.loads(payload_text)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError("llm payload must be a dict")
+
+
+def _extract_fenced_json_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.finditer(
+        r"```(?:json|JSON)?\s*([\s\S]*?)```",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        block = match.group(1).strip()
+        if block:
+            candidates.append(block)
+
+    if text.startswith("```"):
+        stripped = re.sub(r"^```(?:json|JSON)?\s*", "", text, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped).strip()
+        if stripped:
+            candidates.append(stripped)
+    return candidates
+
+
+def _extract_balanced_json_objects(text: str) -> list[str]:
+    blocks: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+
+    for idx, ch in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+
+        if ch == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+            continue
+
+        if ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                blocks.append(text[start : idx + 1])
+                start = -1
+
+    return blocks
 
 
 def _item_snippet(item: NormalizedItem) -> str:

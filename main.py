@@ -7,7 +7,7 @@ from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
 
 from .app.config import load_plugin_settings
 from .app.notifier import Notifier
@@ -31,7 +31,11 @@ class GoofishCatcherPlugin(Star):
         super().__init__(context)
         self.context = context
         self.config = dict(config or {})
-        self.settings = load_plugin_settings(self.config, PLUGIN_NAME)
+        self.settings = load_plugin_settings(
+            self.config,
+            PLUGIN_NAME,
+            plugin_data_dir=StarTools.get_data_dir(PLUGIN_NAME),
+        )
 
         self.storage: SubscriptionStorage | None = None
         self.provider: SearchProvider | None = None
