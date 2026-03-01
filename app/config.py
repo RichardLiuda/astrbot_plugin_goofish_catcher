@@ -94,18 +94,11 @@ class PluginSettings:
 def load_plugin_settings(
     config: dict[str, Any] | None,
     plugin_name: str,
-    plugin_data_dir: Path | None = None,
+    plugin_data_dir: Path,
 ) -> PluginSettings:
     raw = dict(config or {})
 
-    resolved_data_dir = plugin_data_dir
-    if resolved_data_dir is None:
-        # Compatibility fallback for callers that do not inject StarTools data dir.
-        from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
-
-        resolved_data_dir = Path(get_astrbot_plugin_data_path()) / plugin_name
-
-    plugin_data_dir = Path(resolved_data_dir)
+    plugin_data_dir = Path(plugin_data_dir)
     plugin_data_dir.mkdir(parents=True, exist_ok=True)
     db_path = plugin_data_dir / "goofish_catcher.db"
 

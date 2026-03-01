@@ -139,7 +139,9 @@ class Notifier:
             f"总体建议：{recommendation.summary}",
         ]
         if recommendation.fallback_reason:
-            lines.append(f"回退原因：{recommendation.fallback_reason}")
+            lines.append(
+                f"回退原因：{_readable_fallback_reason(recommendation.fallback_reason)}"
+            )
 
         for idx, item in enumerate(recommendation.top, start=1):
             lines.append(f"{idx}. [{item.score:.1f}] {item.title}")
@@ -205,3 +207,17 @@ class Notifier:
 def _format_time(timestamp: int) -> str:
     dt = datetime.fromtimestamp(timestamp)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _readable_fallback_reason(reason: str) -> str:
+    mapping = {
+        "LLM_TIMEOUT": "AI 分析超时，已使用本地规则回退",
+        "NO_PROVIDER": "未找到可用的 AI 模型，已使用本地规则回退",
+        "LLM_DISABLED": "AI 分析已关闭，已使用本地规则回退",
+        "LLM_EXCEPTION": "AI 服务异常，已使用本地规则回退",
+        "LLM_EMPTY": "AI 返回为空，已使用本地规则回退",
+        "LLM_JSON_INVALID": "AI 输出格式异常，已使用本地规则回退",
+        "LLM_JSON_UNUSABLE": "AI 输出不可用，已使用本地规则回退",
+        "NO_CANDIDATE": "本轮没有可分析的候选商品",
+    }
+    return mapping.get(reason, f"已触发回退策略（{reason}）")
