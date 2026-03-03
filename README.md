@@ -5,11 +5,13 @@
 
 目前很多功能都比较原始，可能配置起来会有点麻烦，请见谅！
 
+鼠鼠的linux服务器太垃圾了，带不动，所以linux和mac环境下暂时还没进行完整测试，请见谅！
+
 如果有大佬能贡献一下pr的话，感激不尽！
 
 如果觉得插件有帮助，欢迎star！Ciallo～(∠・ω< )⌒★
 
-<img src="https://storage.moegirl.org.cn/moegirl/commons/8/8f/BanG_Dream%21_It%27s_MyGO%21%21%21%21%21_08205410.jpg" width="50%" />
+
 
 ## 环境要求
 
@@ -64,37 +66,43 @@
 uv pip install -r data/plugins/astrbot_plugin_goofish_catcher/requirements.txt
 ```
 
-2. 安装 Playwright 浏览器
+1. 安装 Playwright 浏览器
 
 ```bash
 uv run python -m playwright install chromium chromium-headless-shell
 ```
 
-3. 启动 AstrBot，插件会自动加载
+1. 启动 AstrBot，插件会自动加载
 
 ## 登录态准备（建议）
 
 闲鱼对未登录/风控会比较敏感，建议先准备 `storage_state.json` 并在 WebUI 配置 `playwright_storage_state_file`。
 
 ### Windows（PowerShell）
+
 1. 进入插件目录，直接运行仓库内脚本并手动登录
+
 ```powershell
 uv run python .\save_state.py
 ```
 
-2. 移动到插件数据目录（可选但推荐）
+1. 移动到插件数据目录（可选但推荐）
+
 ```powershell
 New-Item -ItemType Directory -Force .\data\plugin_data\astrbot_plugin_goofish_catcher | Out-Null
 Move-Item .\storage_state.json .\data\plugin_data\astrbot_plugin_goofish_catcher\storage_state.json -Force
 ```
 
 ### macOS / Linux（Bash）
+
 1. 进入插件目录，直接运行仓库内脚本并手动登录
+
 ```bash
 uv run python ./save_state.py
 ```
 
-2. 移动到插件数据目录（可选但推荐）
+1. 移动到插件数据目录（可选但推荐）
+
 ```bash
 mkdir -p ./data/plugin_data/astrbot_plugin_goofish_catcher
 mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storage_state.json
@@ -259,3 +267,4 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 - 高频抓取可能触发风控，建议低并发 + 合理间隔。
 - 本插件没做验证码绕过。
   - 欢迎大佬狠狠pr（欧尼该）
+
