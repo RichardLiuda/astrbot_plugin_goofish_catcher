@@ -77,78 +77,24 @@ uv run python -m playwright install chromium chromium-headless-shell
 闲鱼对未登录/风控会比较敏感，建议先准备 `storage_state.json` 并在 WebUI 配置 `playwright_storage_state_file`。
 
 ### Windows（PowerShell）
-
-1. 在 AstrBot 根目录生成登录脚本
-
-```powershell
-@'
-import asyncio
-from playwright.async_api import async_playwright
-
-async def main():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
-        await page.goto("https://www.goofish.com/")
-        print("请在浏览器完成登录，回到终端按 Enter 保存登录态...")
-        await asyncio.get_running_loop().run_in_executor(None, input)
-        await context.storage_state(path="storage_state.json")
-        await browser.close()
-        print("已保存: storage_state.json")
-
-if __name__ == "__main__":
-    asyncio.run(main())
-'@ | Set-Content -Encoding utf8 .\save_state.py
-```
-
-2. 运行脚本并手动登录
-
+1. 进入插件目录，直接运行仓库内脚本并手动登录
 ```powershell
 uv run python .\save_state.py
 ```
 
-3. 移动到插件数据目录（可选但推荐）
-
+2. 移动到插件数据目录（可选但推荐）
 ```powershell
 New-Item -ItemType Directory -Force .\data\plugin_data\astrbot_plugin_goofish_catcher | Out-Null
 Move-Item .\storage_state.json .\data\plugin_data\astrbot_plugin_goofish_catcher\storage_state.json -Force
 ```
 
 ### macOS / Linux（Bash）
-
-1. 生成登录脚本
-
-```bash
-cat > ./save_state.py <<'PY'
-import asyncio
-from playwright.async_api import async_playwright
-
-async def main():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
-        await page.goto("https://www.goofish.com/")
-        print("请在浏览器完成登录，回到终端按 Enter 保存登录态...")
-        await asyncio.get_running_loop().run_in_executor(None, input)
-        await context.storage_state(path="storage_state.json")
-        await browser.close()
-        print("已保存: storage_state.json")
-
-if __name__ == "__main__":
-    asyncio.run(main())
-PY
-```
-
-2. 运行脚本并手动登录
-
+1. 进入插件目录，直接运行仓库内脚本并手动登录
 ```bash
 uv run python ./save_state.py
 ```
 
-3. 移动到插件数据目录（可选但推荐）
-
+2. 移动到插件数据目录（可选但推荐）
 ```bash
 mkdir -p ./data/plugin_data/astrbot_plugin_goofish_catcher
 mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storage_state.json
