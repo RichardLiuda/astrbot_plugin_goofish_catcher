@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from data.plugins.astrbot_plugin_goofish_catcher.app.config import PluginSettings
-from data.plugins.astrbot_plugin_goofish_catcher.app.scheduler import MonitoringScheduler
+from data.plugins.astrbot_plugin_goofish_catcher.app.scheduler import (
+    MonitoringScheduler,
+)
 from data.plugins.astrbot_plugin_goofish_catcher.app.types import (
     ExistingItem,
     NormalizedItem,
@@ -38,6 +40,7 @@ def _make_settings(tmp_path: Path) -> PluginSettings:
         playwright_storage_state_path=None,
         playwright_headless=True,
         playwright_block_assets=True,
+        playwright_force_direct=True,
         webhook_url=None,
         remote_base_url=None,
         remote_api_key=None,

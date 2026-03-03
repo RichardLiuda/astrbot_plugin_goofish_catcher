@@ -8,6 +8,7 @@ from datetime import datetime
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.star.filter.command import GreedyStr
 
 from .app.config import load_plugin_settings
 from .app.notifier import Notifier
@@ -388,7 +389,7 @@ class GoofishCatcherPlugin(Star):
     async def query_once(
         self,
         event: AstrMessageEvent,
-        keyword: str = "",
+        keyword: GreedyStr = "",
     ):
         """免订阅查询：整段关键词可包含空格，可选 --pages/-p 指定页数。"""
         if not await self._check_ready(event):
@@ -406,8 +407,9 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result("插件内部错误：推荐组件不可用，请重启后重试。")
             return
 
-        raw_query_args = (
-            _extract_subcommand_args(event.get_message_str()) or str(keyword).strip()
+        raw_query_args = _merge_query_args(
+            message_query_args=_extract_subcommand_args(event.get_message_str()),
+            parsed_keyword=str(keyword).strip(),
         )
         keyword_text, page_count = _parse_query_input(
             raw_keyword=raw_query_args,
@@ -612,10 +614,27 @@ def _extract_subcommand_args(message: str) -> str:
     normalized = re.sub(r"\s+", " ", message.strip())
     if not normalized:
         return ""
+    # Prefer explicit command extraction first.
+    patterns = (
+        r"^/?(?:闲鱼|goofish)\s+(?:查询|query|search|inspect)\s*(.*)$",
+        r"^(?:查询|query|search|inspect)\s*(.*)$",
+    )
+    for pattern in patterns:
+        matched = re.match(pattern, normalized, flags=re.IGNORECASE)
+        if matched:
+            return (matched.group(1) or "").strip()
     parts = normalized.split(" ", 2)
     if len(parts) < 3:
         return ""
     return parts[2].strip()
+
+
+def _merge_query_args(*, message_query_args: str, parsed_keyword: str) -> str:
+    from_message = message_query_args.strip()
+    from_param = parsed_keyword.strip()
+    if from_message and from_param and from_param not in from_message:
+        return f"{from_param} {from_message}".strip()
+    return from_message or from_param
 
 
 def _parse_query_input(
@@ -629,10 +648,19 @@ def _parse_query_input(
     if not text:
         return "", page_count
 
-    matched = re.search(r"(?:^|\s)(?:--pages|-p)\s+(\d+)\s*$", text)
-    if matched:
+    matches = list(
+        re.finditer(
+            r"(?<!\S)(?:--pages|-p)(?:\s*=\s*|\s+)?(\d+)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    if matches:
+        matched = matches[-1]
         page_count = max(1, min(int(matched.group(1)), max_pages))
-        text = text[: matched.start()].strip()
+        text = f"{text[: matched.start()]} {text[matched.end() :]}"
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"^[，,。.!?]+|[，,。.!?]+$", "", text).strip()
     return text, page_count
 
 

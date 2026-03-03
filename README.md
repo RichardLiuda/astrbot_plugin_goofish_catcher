@@ -64,13 +64,13 @@
 uv pip install -r data/plugins/astrbot_plugin_goofish_catcher/requirements.txt
 ```
 
-1. 安装 Playwright 浏览器
+2. 安装 Playwright 浏览器
 
 ```bash
 uv run python -m playwright install chromium chromium-headless-shell
 ```
 
-1. 启动 AstrBot，插件会自动加载
+3. 启动 AstrBot，插件会自动加载
 
 ## 登录态准备（建议）
 
@@ -102,13 +102,13 @@ if __name__ == "__main__":
 '@ | Set-Content -Encoding utf8 .\save_state.py
 ```
 
-1. 运行脚本并手动登录
+2. 运行脚本并手动登录
 
 ```powershell
 uv run python .\save_state.py
 ```
 
-1. 移动到插件数据目录（可选但推荐）
+3. 移动到插件数据目录（可选但推荐）
 
 ```powershell
 New-Item -ItemType Directory -Force .\data\plugin_data\astrbot_plugin_goofish_catcher | Out-Null
@@ -141,13 +141,13 @@ if __name__ == "__main__":
 PY
 ```
 
-1. 运行脚本并手动登录
+2. 运行脚本并手动登录
 
 ```bash
 uv run python ./save_state.py
 ```
 
-1. 移动到插件数据目录（可选但推荐）
+3. 移动到插件数据目录（可选但推荐）
 
 ```bash
 mkdir -p ./data/plugin_data/astrbot_plugin_goofish_catcher
@@ -240,6 +240,7 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 | ------------------------------- | ------------- | ------ |
 | `playwright_storage_state_file` | 登录态 JSON 文件   | `[]`   |
 | `playwright_block_assets`       | 是否拦截图片/字体/媒体  | `true` |
+| `playwright_force_direct`       | 是否强制直连禁用代理    | `true` |
 | `webhook_url`                   | 可选 Webhook 地址 | `""`   |
 
 
@@ -292,7 +293,8 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 
 1. 确认闲鱼页面实际可见商品。
 2. 降低并发、增加超时、保持有头模式。
-3. 检查关键词是否过窄，或被初筛过滤。
+3. 检查 `playwright_force_direct` 是否为 `true`（避免系统代理切换 IP）。
+4. 检查关键词是否过窄，或被初筛过滤。
 
 ### 3) 查询关键词被截断
 
@@ -311,4 +313,3 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 - 高频抓取可能触发风控，建议低并发 + 合理间隔。
 - 本插件没做验证码绕过。
   - 欢迎大佬狠狠pr（欧尼该）
-

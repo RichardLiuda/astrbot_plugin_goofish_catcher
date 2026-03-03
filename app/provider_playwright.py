@@ -28,6 +28,19 @@ class PlaywrightSearchProvider:
         self._browser: Browser | None = None
         self._init_lock = asyncio.Lock()
 
+    def _build_launch_args(self) -> list[str]:
+        args = ["--disable-blink-features=AutomationControlled"]
+        if self.settings.playwright_force_direct:
+            # Force direct egress and bypass system proxy to reduce IP switching.
+            args.extend(
+                [
+                    "--no-proxy-server",
+                    "--proxy-server=direct://",
+                    "--proxy-bypass-list=*",
+                ]
+            )
+        return args
+
     async def close(self) -> None:
         if self._browser is not None:
             await self._browser.close()
@@ -54,7 +67,7 @@ class PlaywrightSearchProvider:
             try:
                 browser = await playwright.chromium.launch(
                     headless=self.settings.playwright_headless,
-                    args=["--disable-blink-features=AutomationControlled"],
+                    args=self._build_launch_args(),
                 )
             except PlaywrightError as exc:
                 message = str(exc)
@@ -69,7 +82,7 @@ class PlaywrightSearchProvider:
                             browser = await playwright.chromium.launch(
                                 headless=self.settings.playwright_headless,
                                 executable_path=chromium_exec,
-                                args=["--disable-blink-features=AutomationControlled"],
+                                args=self._build_launch_args(),
                             )
                         except PlaywrightError as fallback_exc:
                             await playwright.stop()
@@ -243,6 +256,7 @@ class PlaywrightSearchProvider:
                     page_index,
                     len(captured_payloads),
                 )
+            await self._persist_context_storage_state(context)
             return items
         except TimeoutError as exc:
             raise ProviderError(
@@ -257,6 +271,20 @@ class PlaywrightSearchProvider:
             ) from exc
         finally:
             await context.close()
+
+    async def _persist_context_storage_state(self, context) -> None:
+        storage_path = self.settings.playwright_storage_state_path
+        if storage_path is None:
+            return
+        try:
+            storage_path.parent.mkdir(parents=True, exist_ok=True)
+            await context.storage_state(path=str(storage_path))
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] failed to persist storage_state to %s: %s",
+                storage_path,
+                exc,
+            )
 
     def _build_search_url(self, *, keyword: str, page_index: int) -> str:
         base = f"{self.BASE_URL}/search?q={quote(keyword)}"

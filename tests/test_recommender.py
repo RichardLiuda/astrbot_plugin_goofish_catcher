@@ -101,6 +101,7 @@ def _make_settings(tmp_path: Path, **overrides) -> PluginSettings:
         playwright_storage_state_path=None,
         playwright_headless=True,
         playwright_block_assets=True,
+        playwright_force_direct=True,
         webhook_url=None,
         remote_base_url=None,
         remote_api_key=None,

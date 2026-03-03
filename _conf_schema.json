@@ -82,6 +82,11 @@
     "description": "是否拦截图片/字体/媒体以加快加载",
     "default": true
   },
+  "playwright_force_direct": {
+    "type": "bool",
+    "description": "是否强制浏览器直连（禁用系统代理）",
+    "default": true
+  },
   "webhook_url": {
     "type": "string",
     "description": "可选 Webhook 地址",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,7 @@ class PluginSettings:
     playwright_storage_state_path: Path | None
     playwright_headless: bool
     playwright_block_assets: bool
+    playwright_force_direct: bool
     webhook_url: str | None
     remote_base_url: str | None
     remote_api_key: str | None
@@ -116,19 +118,45 @@ def load_plugin_settings(
         provider_mode = PROVIDER_MODE_PLAYWRIGHT_LOCAL
 
     storage_state_path: Path | None = None
+    stable_state_path = plugin_data_dir / "storage_state.json"
     storage_state_file = _first_file(raw.get("playwright_storage_state_file"))
     if storage_state_file:
         candidate = Path(storage_state_file)
         if not candidate.is_absolute():
             candidate = plugin_data_dir / storage_state_file
         if candidate.exists():
-            storage_state_path = candidate
+            try:
+                # Keep a stable state copy under plugin data dir to survive temp-file cleanup.
+                if candidate.resolve() != stable_state_path.resolve():
+                    shutil.copy2(candidate, stable_state_path)
+                    logger.info(
+                        "[%s] copied playwright storage_state to stable path: %s",
+                        plugin_name,
+                        stable_state_path,
+                    )
+                storage_state_path = stable_state_path
+            except Exception as exc:
+                logger.warning(
+                    "[%s] failed to copy storage_state from %s to %s: %s",
+                    plugin_name,
+                    candidate,
+                    stable_state_path,
+                    exc,
+                )
+                storage_state_path = candidate
         else:
             logger.warning(
                 "[%s] playwright_storage_state_file not found: %s",
                 plugin_name,
                 candidate,
             )
+    if storage_state_path is None and stable_state_path.exists():
+        storage_state_path = stable_state_path
+        logger.info(
+            "[%s] use fallback playwright storage_state from stable path: %s",
+            plugin_name,
+            stable_state_path,
+        )
 
     webhook_url = str(raw.get("webhook_url", "")).strip() or None
     remote_base_url = str(raw.get("remote_base_url", "")).strip() or None
@@ -167,6 +195,7 @@ def load_plugin_settings(
         playwright_storage_state_path=storage_state_path,
         playwright_headless=False,
         playwright_block_assets=_as_bool(raw.get("playwright_block_assets"), True),
+        playwright_force_direct=_as_bool(raw.get("playwright_force_direct"), True),
         webhook_url=webhook_url,
         remote_base_url=remote_base_url,
         remote_api_key=remote_api_key,

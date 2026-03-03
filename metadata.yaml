@@ -1,6 +1,6 @@
 name: astrbot_plugin_goofish_catcher
 display_name: 闲鱼蹲蹲助手
 desc: 关键词订阅闲鱼商品上新与降价监控，支持即时查询、LLM 推荐与后台主动通知。
-version: v0.1.0
+version: v0.1.1
 author: RichardLiu
 repo: https://github.com/RichardLiuda/astrbot_plugin_goofish_catcher
