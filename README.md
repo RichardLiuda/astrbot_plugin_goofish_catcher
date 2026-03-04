@@ -5,6 +5,8 @@
 
 目前很多功能都比较原始，可能配置起来会有点麻烦，请见谅！
 
+由于需要用到`playwrite`的有头浏览器，对机器配置有一定要求，如果在服务器上运行，建议至少2G2C起步，否则可能会出现问题。针对服务器性能不够的问题，鼠鼠正在研究将`playwright`模块化并远程部署到本地机器的feature。
+
 鼠鼠的linux服务器太垃圾了，带不动，所以linux和mac环境下暂时还没进行完整测试，请见谅！
 
 如果有大佬能贡献一下pr的话，感激不尽！
@@ -66,13 +68,13 @@
 uv pip install -r data/plugins/astrbot_plugin_goofish_catcher/requirements.txt
 ```
 
-1. 安装 Playwright 浏览器
+2. 安装 Playwright 浏览器
 
 ```bash
 uv run python -m playwright install chromium chromium-headless-shell
 ```
 
-1. 启动 AstrBot，插件会自动加载
+3. 启动 AstrBot，插件会自动加载
 
 ## 登录态准备（建议）
 
@@ -86,7 +88,7 @@ uv run python -m playwright install chromium chromium-headless-shell
 uv run python .\save_state.py
 ```
 
-1. 移动到插件数据目录（可选但推荐）
+2. 移动到插件数据目录（可选但推荐）
 
 ```powershell
 New-Item -ItemType Directory -Force .\data\plugin_data\astrbot_plugin_goofish_catcher | Out-Null
@@ -101,7 +103,7 @@ Move-Item .\storage_state.json .\data\plugin_data\astrbot_plugin_goofish_catcher
 uv run python ./save_state.py
 ```
 
-1. 移动到插件数据目录（可选但推荐）
+2. 移动到插件数据目录（可选但推荐）
 
 ```bash
 mkdir -p ./data/plugin_data/astrbot_plugin_goofish_catcher
