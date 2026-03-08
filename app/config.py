@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import shutil
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ModuleNotFoundError:
+    logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 PROVIDER_MODE_PLAYWRIGHT_LOCAL = "playwright_local"
 PROVIDER_MODE_REMOTE_REST = "remote_rest"

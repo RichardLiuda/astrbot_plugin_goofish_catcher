@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,10 @@ from urllib.parse import parse_qs, quote, urlparse
 from playwright.async_api import Browser, Playwright, TimeoutError, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ModuleNotFoundError:
+    logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 from .config import PluginSettings
 from .types import NormalizedItem, ProviderError, ProviderErrorCode
