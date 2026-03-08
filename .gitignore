@@ -209,4 +209,9 @@ __marimo__/
 # Local research notes
 ai-report.md
 deep-research-report.md
+ADVICE.md
 storage_state.json
+
+# Local-only tests
+tests/test_remote_runtime.py
+tests/test_worker_server.py

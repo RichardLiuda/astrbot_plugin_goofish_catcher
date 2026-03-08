@@ -26,6 +26,10 @@ class ProviderDependencyError(RuntimeError):
     """Raised when provider runtime dependencies are missing."""
 
 
+class ProviderConfigurationError(RuntimeError):
+    """Raised when provider configuration is invalid."""
+
+
 def build_provider(settings: PluginSettings) -> SearchProvider:
     if settings.provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL:
         try:

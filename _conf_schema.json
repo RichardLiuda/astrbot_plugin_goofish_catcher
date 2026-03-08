@@ -69,6 +69,11 @@
     "description": "默认通知冷却（秒）",
     "default": 21600
   },
+  "provider_mode": {
+    "type": "string",
+    "description": "抓取 Provider 模式：playwright_local 或 remote_rest",
+    "default": "playwright_local"
+  },
   "playwright_storage_state_file": {
     "type": "file",
     "description": "Playwright 登录态文件（JSON）",
@@ -91,6 +96,36 @@
     "type": "string",
     "description": "可选 Webhook 地址",
     "default": ""
+  },
+  "remote_base_url": {
+    "type": "string",
+    "description": "远程抓取 Worker 地址，例如 https://worker.example.com",
+    "default": ""
+  },
+  "remote_api_key": {
+    "type": "string",
+    "description": "远程 Worker API Key（可与 Bearer / X-API-Key 兼容）",
+    "default": ""
+  },
+  "remote_headers_json": {
+    "type": "string",
+    "description": "远程请求额外 Header(JSON 对象)，可用于 Cloudflare Access",
+    "default": ""
+  },
+  "remote_timeout_sec": {
+    "type": "int",
+    "description": "远程请求默认超时（秒）",
+    "default": 20
+  },
+  "remote_healthcheck_on_init": {
+    "type": "bool",
+    "description": "插件初始化时是否先探测远程 /health",
+    "default": true
+  },
+  "remote_healthcheck_timeout_sec": {
+    "type": "int",
+    "description": "初始化远程健康检查超时（秒）",
+    "default": 10
   },
   "llm_enabled": {
     "type": "bool",

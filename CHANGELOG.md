@@ -2,6 +2,25 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.1.2] - 2026-03-07
+
+### Added
+
+- 新增远程 Worker 服务 `worker_server.py`，提供 `/health` 与 `/v1/search` 接口，复用现有 Playwright 抓取链路。
+- 新增远程配置项：`provider_mode`、`remote_base_url`、`remote_api_key`、`remote_headers_json`、`remote_timeout_sec`、`remote_healthcheck_on_init`、`remote_healthcheck_timeout_sec`。
+- 新增 Cloudflare Access 兼容能力，支持通过额外请求头注入 `CF-Access-Client-Id` 与 `CF-Access-Client-Secret`。
+
+### Changed
+
+- 远程 Provider 补完 `remote_rest` 闭环，支持启动期健康检查、统一错误码映射与自定义请求头合并。
+- `/闲鱼 状态` 现在会额外展示远程模式地址、最近健康检查时间和远程健康详情。
+- README 补充远程 Worker、Cloudflare Tunnel/Access 与 WebUI 配置说明。
+
+### Fixed
+
+- 修复 WebUI 无法完整配置远程 Provider 的问题。
+- 修复远程模式下仅支持 Bearer/X-API-Key、无法直接接入 Cloudflare Access service token 的问题。
+
 ## [0.1.1] - 2026-03-03
 
 ### Added
@@ -29,4 +48,3 @@
 - 实现订阅生命周期命令：订阅、退订、列表、暂停、恢复、立即检查、状态、明细、查询。
 - 实现本地 Playwright 抓取、SQLite 持久化、调度轮询、上新/降价检测与去重通知。
 - 接入 LLM 推荐与初筛链路，支持失败回退到启发式评分。
-

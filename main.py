@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from typing import Any
 from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
@@ -10,9 +11,14 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
-from .app.config import load_plugin_settings
+from .app.config import PROVIDER_MODE_REMOTE_REST, PluginSettings, load_plugin_settings
 from .app.notifier import Notifier
-from .app.provider import ProviderDependencyError, SearchProvider, build_provider
+from .app.provider import (
+    ProviderConfigurationError,
+    ProviderDependencyError,
+    SearchProvider,
+    build_provider,
+)
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
 from .app.storage import SubscriptionStorage
@@ -44,6 +50,8 @@ class GoofishCatcherPlugin(Star):
         self.recommender: GoofishRecommender | None = None
         self.scheduler: MonitoringScheduler | None = None
         self._provider_error: str | None = None
+        self._provider_health: dict[str, Any] | None = None
+        self._provider_health_checked_at: int | None = None
         self._ready = False
         self._loaded = False
         self._start_lock = asyncio.Lock()
@@ -63,12 +71,34 @@ class GoofishCatcherPlugin(Star):
         )
         try:
             self.provider = build_provider(self.settings)
-        except ProviderDependencyError as exc:
+            (
+                self._provider_health,
+                self._provider_health_checked_at,
+            ) = await _run_remote_provider_healthcheck(
+                self.provider,
+                self.settings,
+            )
+        except (ProviderDependencyError, ProviderConfigurationError, ProviderError) as exc:
             self._provider_error = str(exc)
+            if self.provider is not None:
+                await self.provider.close()
+                self.provider = None
             self._ready = True
             logger.error(
                 "[goofish_catcher] provider initialization failed: %s",
                 self._provider_error,
+            )
+            return
+        except Exception as exc:
+            self._provider_error = str(exc)
+            if self.provider is not None:
+                await self.provider.close()
+                self.provider = None
+            self._ready = True
+            logger.error(
+                "[goofish_catcher] unexpected provider initialization failure: %s",
+                self._provider_error,
+                exc_info=True,
             )
             return
 
@@ -530,22 +560,32 @@ class GoofishCatcherPlugin(Star):
         enabled_local = sum(1 for sub in umo_subscriptions if sub.enabled)
         paused_local = len(umo_subscriptions) - enabled_local
 
-        yield event.plain_result(
-            "闲鱼监控状态：\n"
-            f"- 运行中：{scheduler_status.get('running', False)}\n"
-            f"- 队列长度：{scheduler_status.get('queue_size', 0)}\n"
-            f"- 执行中：{scheduler_status.get('inflight', 0)}\n"
-            f"- Worker 数：{scheduler_status.get('workers', 0)}\n"
-            f"- 当前会话订阅：{len(umo_subscriptions)}（启用 {enabled_local} / 暂停 {paused_local}）\n"
-            f"- 全局启用订阅：{scheduler_status.get('enabled_subscriptions', 0)}\n"
-            f"- Provider：{self.settings.provider_mode}\n"
-            f"- Provider 可用：{self._provider_error is None}\n"
-            f"- Provider 错误：{self._provider_error or '-'}\n"
-            f"- DB：{self.settings.db_path}"
+        lines = [
+            "闲鱼监控状态：",
+            f"- 运行中：{scheduler_status.get('running', False)}",
+            f"- 队列长度：{scheduler_status.get('queue_size', 0)}",
+            f"- 执行中：{scheduler_status.get('inflight', 0)}",
+            f"- Worker 数：{scheduler_status.get('workers', 0)}",
+            f"- 当前会话订阅：{len(umo_subscriptions)}（启用 {enabled_local} / 暂停 {paused_local}）",
+            f"- 全局启用订阅：{scheduler_status.get('enabled_subscriptions', 0)}",
+            f"- Provider：{self.settings.provider_mode}",
+            f"- Provider 可用：{self._provider_error is None}",
+            f"- Provider 错误：{self._provider_error or '-'}",
+            f"- DB：{self.settings.db_path}",
+        ]
+        lines.extend(
+            _render_remote_status_lines(
+                settings=self.settings,
+                provider_health=self._provider_health,
+                provider_health_checked_at=self._provider_health_checked_at,
+            )
         )
+        yield event.plain_result("\n".join(lines))
 
     async def _ensure_scheduler_started(self) -> None:
         if self.scheduler is None:
+            return
+        if self._provider_error:
             return
         if self.scheduler.running:
             return
@@ -564,6 +604,69 @@ def _format_ts(ts: int | None) -> str:
     if ts is None:
         return "-"
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _run_remote_provider_healthcheck(
+    provider: SearchProvider,
+    settings: PluginSettings,
+) -> tuple[dict[str, Any] | None, int | None]:
+    if settings.provider_mode != PROVIDER_MODE_REMOTE_REST:
+        return None, None
+    if not settings.remote_healthcheck_on_init:
+        return None, None
+
+    healthcheck = getattr(provider, "healthcheck", None)
+    if not callable(healthcheck):
+        raise ProviderError(
+            ProviderErrorCode.NETWORK_ERROR,
+            "remote provider does not support healthcheck",
+        )
+
+    checked_at = int(time.time())
+    result = await healthcheck(timeout_sec=settings.remote_healthcheck_timeout_sec)
+    if not isinstance(result, dict):
+        raise ProviderError(
+            ProviderErrorCode.PARSE_ERROR,
+            "remote healthcheck payload is not an object",
+        )
+    if result.get("ok") is not True:
+        raise ProviderError(
+            ProviderErrorCode.NETWORK_ERROR,
+            "remote healthcheck did not return ok=true",
+        )
+    return result, checked_at
+
+
+def _render_remote_status_lines(
+    *,
+    settings: PluginSettings,
+    provider_health: dict[str, Any] | None,
+    provider_health_checked_at: int | None,
+) -> list[str]:
+    if settings.provider_mode != PROVIDER_MODE_REMOTE_REST:
+        return []
+
+    lines = [
+        f"- 远程地址：{settings.remote_base_url or '-'}",
+        f"- 启动健康检查：{settings.remote_healthcheck_on_init}",
+        f"- 最近健康检查：{_format_ts(provider_health_checked_at) if provider_health_checked_at else '未执行'}",
+    ]
+    if not provider_health:
+        lines.append("- 远程健康详情：-")
+        return lines
+
+    lines.append(
+        "- 远程健康详情："
+        f"ok={provider_health.get('ok', False)}, "
+        f"provider={provider_health.get('provider', '-')}, "
+        f"auth={provider_health.get('auth', '-')}, "
+        "storage_state="
+        f"{'yes' if provider_health.get('storage_state') else 'no'}"
+    )
+    provider_error = provider_health.get("provider_error")
+    if provider_error:
+        lines.append(f"- 远程 Worker 错误：{provider_error}")
+    return lines
 
 
 def _render_recommendation_preview(recommendation: RecommendationResult) -> str:

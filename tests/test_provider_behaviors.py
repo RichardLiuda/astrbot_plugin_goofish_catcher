@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from data.plugins.astrbot_plugin_goofish_catcher.app.config import (
     PluginSettings,
     load_plugin_settings,
+)
+from data.plugins.astrbot_plugin_goofish_catcher.app.provider import (
+    ProviderConfigurationError,
 )
 from data.plugins.astrbot_plugin_goofish_catcher.app.provider_playwright import (
     PlaywrightSearchProvider,
@@ -15,6 +20,7 @@ from data.plugins.astrbot_plugin_goofish_catcher.app.provider_playwright import 
 from data.plugins.astrbot_plugin_goofish_catcher.app.provider_remote import (
     RemoteSearchProvider,
 )
+from data.plugins.astrbot_plugin_goofish_catcher.app.types import ProviderError
 
 
 def _make_settings(tmp_path: Path) -> PluginSettings:
@@ -43,7 +49,10 @@ def _make_settings(tmp_path: Path) -> PluginSettings:
         webhook_url=None,
         remote_base_url="https://example.com",
         remote_api_key="",
+        remote_headers_json=None,
         remote_timeout_sec=20,
+        remote_healthcheck_on_init=True,
+        remote_healthcheck_timeout_sec=10,
         queue_max_size=256,
         llm_enabled=True,
         llm_provider_id=None,
@@ -64,30 +73,55 @@ def test_parse_price_with_chinese_units():
 
 
 class _FakeResponse:
-    status_code = 200
-    text = "ok"
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        payload: dict | list | None = None,
+        text: str = "ok",
+        json_exc: Exception | None = None,
+    ):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+        self.text = text
+        self._json_exc = json_exc
 
     def json(self):
-        return {
-            "ok": True,
-            "items": [
-                {
-                    "item_id": "1",
-                    "title": "test",
-                    "url": "https://www.goofish.com/item?id=1",
-                    "price": 100.0,
-                }
-            ],
-        }
+        if self._json_exc is not None:
+            raise self._json_exc
+        return self._payload
 
 
 class _FakeClient:
     def __init__(self):
         self.timeout_arg = None
+        self.last_method = None
+        self.last_url = None
+        self.last_headers = None
+        self.last_json = None
+        self.response: _FakeResponse | Exception = _FakeResponse(
+            payload={
+                "ok": True,
+                "items": [
+                    {
+                        "item_id": "1",
+                        "title": "test",
+                        "url": "https://www.goofish.com/item?id=1",
+                        "price": 100.0,
+                    }
+                ],
+            }
+        )
 
-    async def post(self, *args, **kwargs):
+    async def request(self, method, url, **kwargs):
+        self.last_method = method
+        self.last_url = url
+        self.last_headers = kwargs.get("headers")
+        self.last_json = kwargs.get("json")
         self.timeout_arg = kwargs.get("timeout")
-        return _FakeResponse()
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
 
 
 @pytest.mark.asyncio
@@ -99,6 +133,87 @@ async def test_remote_provider_respects_per_call_timeout(tmp_path: Path):
     items = await provider.search(keyword="镜头", pages=1, timeout_sec=7)
     assert fake_client.timeout_arg == 7
     assert len(items) == 1
+
+
+@pytest.mark.asyncio
+async def test_remote_provider_merges_api_key_and_extra_headers(tmp_path: Path):
+    settings = _make_settings(tmp_path)
+    settings.remote_api_key = "secret-token"
+    settings.remote_headers_json = json.dumps(
+        {
+            "CF-Access-Client-Id": "cf-id",
+            "CF-Access-Client-Secret": "cf-secret",
+        }
+    )
+    provider = RemoteSearchProvider(settings)
+    fake_client = _FakeClient()
+    provider._client = fake_client
+
+    await provider.search(keyword="镜头", pages=1, timeout_sec=7)
+
+    assert fake_client.last_method == "POST"
+    assert fake_client.last_url == "https://example.com/v1/search"
+    assert fake_client.last_headers["Authorization"] == "Bearer secret-token"
+    assert fake_client.last_headers["X-API-Key"] == "secret-token"
+    assert fake_client.last_headers["CF-Access-Client-Id"] == "cf-id"
+    assert fake_client.last_headers["CF-Access-Client-Secret"] == "cf-secret"
+    assert fake_client.last_json["keyword"] == "镜头"
+
+
+@pytest.mark.asyncio
+async def test_remote_provider_healthcheck_success(tmp_path: Path):
+    settings = _make_settings(tmp_path)
+    provider = RemoteSearchProvider(settings)
+    fake_client = _FakeClient()
+    fake_client.response = _FakeResponse(
+        payload={
+            "ok": True,
+            "provider": "playwright_local",
+            "auth": "configured",
+            "storage_state": True,
+        }
+    )
+    provider._client = fake_client
+
+    payload = await provider.healthcheck(timeout_sec=3)
+
+    assert fake_client.last_method == "GET"
+    assert fake_client.last_url == "https://example.com/health"
+    assert fake_client.timeout_arg == 3
+    assert payload["storage_state"] is True
+
+
+@pytest.mark.asyncio
+async def test_remote_provider_healthcheck_raises_on_worker_auth_failure(tmp_path: Path):
+    settings = _make_settings(tmp_path)
+    provider = RemoteSearchProvider(settings)
+    fake_client = _FakeClient()
+    fake_client.response = _FakeResponse(
+        status_code=401,
+        payload={
+            "ok": False,
+            "error": {
+                "code": "NETWORK_ERROR",
+                "message": "worker authorization failed",
+            },
+        },
+        text="worker authorization failed",
+    )
+    provider._client = fake_client
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.healthcheck(timeout_sec=3)
+
+    assert exc_info.value.code.value == "NETWORK_ERROR"
+    assert "worker authorization failed" in exc_info.value.message
+
+
+def test_remote_provider_invalid_headers_json_raises(tmp_path: Path):
+    settings = _make_settings(tmp_path)
+    settings.remote_headers_json = "{invalid"
+
+    with pytest.raises(ProviderConfigurationError):
+        RemoteSearchProvider(settings)
 
 
 def test_load_plugin_settings_copy_storage_state_to_stable_path(tmp_path: Path):
@@ -189,3 +304,41 @@ async def test_playwright_provider_persists_context_storage_state(tmp_path: Path
     await provider._persist_context_storage_state(context)
     assert context.last_path == str(settings.playwright_storage_state_path)
     assert settings.playwright_storage_state_path.exists()
+
+
+def test_load_plugin_settings_remote_options(tmp_path: Path):
+    settings = load_plugin_settings(
+        config={
+            "provider_mode": "remote_rest",
+            "remote_base_url": "https://worker.example.com",
+            "remote_api_key": "secret",
+            "remote_headers_json": '{"CF-Access-Client-Id":"id"}',
+            "remote_timeout_sec": 33,
+            "remote_healthcheck_on_init": False,
+            "remote_healthcheck_timeout_sec": 12,
+        },
+        plugin_name="astrbot_plugin_goofish_catcher",
+        plugin_data_dir=tmp_path / "plugin_data",
+    )
+    assert settings.provider_mode == "remote_rest"
+    assert settings.remote_base_url == "https://worker.example.com"
+    assert settings.remote_api_key == "secret"
+    assert settings.remote_headers_json == '{"CF-Access-Client-Id":"id"}'
+    assert settings.remote_timeout_sec == 33
+    assert settings.remote_healthcheck_on_init is False
+    assert settings.remote_healthcheck_timeout_sec == 12
+
+
+def test_conf_schema_exposes_remote_settings():
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    for key in {
+        "provider_mode",
+        "remote_base_url",
+        "remote_api_key",
+        "remote_headers_json",
+        "remote_timeout_sec",
+        "remote_healthcheck_on_init",
+        "remote_healthcheck_timeout_sec",
+    }:
+        assert key in schema

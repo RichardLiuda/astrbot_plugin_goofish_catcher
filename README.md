@@ -30,6 +30,9 @@
 ### 已实现
 
 - 本地 Playwright Provider 抓取链路（P0）
+- 远程 Provider（P1）可用链路（`remote_rest`）
+- 远程健康检查与统一错误码对接（`/health`、`/v1/search`）
+- Cloudflare Tunnel + Access / API Key 接入配置
 - 命令优先交互：订阅/退订/列表/暂停/恢复/立即检查/查询/明细/状态
 - 相关性初筛（LLM 优先，失败回退规则）
 - LLM 推荐 TopK（失败自动回退启发式）
@@ -39,9 +42,7 @@
 
 ### 暂未实现
 
-- 远程 Provider（P1）完整可用链路（`remote_rest`）
-- 远程健康检查与统一错误码对接（`/health`、`/v1/search`）
-- Cloudflare Tunnel + Access Token 接入文档与一键配置
+- 插件直连远程 Playwright/CDP（如 `playwright_remote_cdp`）
 - 订阅级更细粒度策略（例如更复杂的过滤模板）
 
 ### 当前无法实现
@@ -75,6 +76,88 @@ uv run python -m playwright install chromium chromium-headless-shell
 ```
 
 3. 启动 AstrBot，插件会自动加载
+
+## 远程 Worker（`remote_rest`）
+
+远程模式下，AstrBot 插件只负责调度与通知，浏览器、登录态和抓取都放在远端 worker 上。
+
+链路如下：
+
+`AstrBot 插件 -> RemoteSearchProvider(httpx) -> Cloudflare Tunnel/HTTPS -> worker_server.py -> PlaywrightSearchProvider -> 闲鱼`
+
+### 1. 远端机器准备登录态
+
+远端 worker 所在机器执行一次手动登录：
+
+```powershell
+uv run python .\save_state.py
+```
+
+建议把生成的 `storage_state.json` 放到单独目录，例如：
+
+```powershell
+New-Item -ItemType Directory -Force .\worker_data | Out-Null
+Move-Item .\storage_state.json .\worker_data\storage_state.json -Force
+```
+
+### 2. 启动远端 worker
+
+在远端机器进入插件目录后，设置环境变量并启动：
+
+```powershell
+$env:GOOFISH_WORKER_DATA_DIR = ".\worker_data"
+$env:GOOFISH_WORKER_STORAGE_STATE_FILE = ".\worker_data\storage_state.json"
+$env:GOOFISH_WORKER_CF_ACCESS_CLIENT_ID = "<your-cf-client-id>"
+$env:GOOFISH_WORKER_CF_ACCESS_CLIENT_SECRET = "<your-cf-client-secret>"
+uv run uvicorn worker_server:app --host 127.0.0.1 --port 8787
+```
+
+如果你不用 Cloudflare Access，也可以只配置 API Key：
+
+```powershell
+$env:GOOFISH_WORKER_API_KEY = "<your-api-key>"
+uv run uvicorn worker_server:app --host 127.0.0.1 --port 8787
+```
+
+### 3. 用 Cloudflare Tunnel 暴露 worker
+
+将本地 `127.0.0.1:8787` 暴露成 HTTPS 域名，例如：
+
+- `https://goofish-worker.example.com`
+
+推荐在 Tunnel 前挂 Cloudflare Access service token，不要直接把 worker 裸暴露到公网。
+
+### 4. AstrBot WebUI 配置示例
+
+如果走 Cloudflare Access：
+
+- `provider_mode`: `remote_rest`
+- `remote_base_url`: `https://goofish-worker.example.com`
+- `remote_timeout_sec`: `20`
+- `remote_healthcheck_on_init`: `true`
+- `remote_headers_json`:
+
+```json
+{"CF-Access-Client-Id":"<your-cf-client-id>","CF-Access-Client-Secret":"<your-cf-client-secret>"}
+```
+
+如果走 API Key：
+
+- `provider_mode`: `remote_rest`
+- `remote_base_url`: `https://goofish-worker.example.com`
+- `remote_api_key`: `<your-api-key>`
+- `remote_headers_json`: 留空
+
+### 5. 健康检查与状态
+
+- 插件初始化时会按 `remote_healthcheck_on_init` 先请求远端 `/health`
+- `/闲鱼 状态` 会额外显示远程地址、最近一次健康检查时间和远程健康详情
+- 远端 `/health` 会返回当前鉴权状态以及 `storage_state.json` 是否存在
+
+### 6. 远程错误语义
+
+- worker 返回 `AUTH_REQUIRED / CAPTCHA / RATE_LIMITED / TIMEOUT / PARSE_ERROR` 时，插件仍沿用现有暂停/退避逻辑
+- worker 自身鉴权失败或网络异常，会映射为 `NETWORK_ERROR`，不会误判成闲鱼登录态问题
 
 ## 登录态准备（建议）
 
@@ -194,10 +277,23 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 
 | 配置项                             | 说明            | 默认值    |
 | ------------------------------- | ------------- | ------ |
+| `provider_mode`                 | 抓取模式，支持本地或远程  | `"playwright_local"` |
 | `playwright_storage_state_file` | 登录态 JSON 文件   | `[]`   |
 | `playwright_block_assets`       | 是否拦截图片/字体/媒体  | `true` |
 | `playwright_force_direct`       | 是否强制直连禁用代理    | `true` |
 | `webhook_url`                   | 可选 Webhook 地址 | `""`   |
+
+### 远程 Provider
+
+
+| 配置项                           | 说明                                      | 默认值    |
+| ----------------------------- | --------------------------------------- | ------ |
+| `remote_base_url`             | 远程 worker 的基础地址                          | `""`   |
+| `remote_api_key`              | 远程 worker API Key                       | `""`   |
+| `remote_headers_json`         | 远程请求附加 Header(JSON 对象字符串)               | `""`   |
+| `remote_timeout_sec`          | 远程请求默认超时（秒）                             | `20`   |
+| `remote_healthcheck_on_init`  | 初始化时是否先探测远程 `/health`                   | `true` |
+| `remote_healthcheck_timeout_sec` | 初始化远程健康检查超时（秒）                       | `10`   |
 
 
 ### LLM 推荐

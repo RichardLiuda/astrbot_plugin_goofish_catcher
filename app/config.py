@@ -80,7 +80,10 @@ class PluginSettings:
     webhook_url: str | None
     remote_base_url: str | None
     remote_api_key: str | None
+    remote_headers_json: str | None
     remote_timeout_sec: int
+    remote_healthcheck_on_init: bool
+    remote_healthcheck_timeout_sec: int
     queue_max_size: int
     llm_enabled: bool
     llm_provider_id: str | None
@@ -161,6 +164,7 @@ def load_plugin_settings(
     webhook_url = str(raw.get("webhook_url", "")).strip() or None
     remote_base_url = str(raw.get("remote_base_url", "")).strip() or None
     remote_api_key = str(raw.get("remote_api_key", "")).strip() or None
+    remote_headers_json = str(raw.get("remote_headers_json", "")).strip() or None
     llm_provider_id = str(raw.get("llm_provider_id", "")).strip() or None
     llm_prefilter_provider_id = (
         str(raw.get("llm_prefilter_provider_id", "")).strip() or None
@@ -199,7 +203,16 @@ def load_plugin_settings(
         webhook_url=webhook_url,
         remote_base_url=remote_base_url,
         remote_api_key=remote_api_key,
+        remote_headers_json=remote_headers_json,
         remote_timeout_sec=max(1, _as_int(raw.get("remote_timeout_sec"), 20)),
+        remote_healthcheck_on_init=_as_bool(
+            raw.get("remote_healthcheck_on_init"),
+            True,
+        ),
+        remote_healthcheck_timeout_sec=max(
+            1,
+            _as_int(raw.get("remote_healthcheck_timeout_sec"), 10),
+        ),
         queue_max_size=max(10, _as_int(raw.get("queue_max_size"), 256)),
         llm_enabled=_as_bool(raw.get("llm_enabled"), True),
         llm_provider_id=llm_provider_id,

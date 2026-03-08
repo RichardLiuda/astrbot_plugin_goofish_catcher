@@ -1,0 +1,375 @@
+from __future__ import annotations
+
+import os
+from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+try:
+    from .app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
+    from .app.provider_playwright import PlaywrightSearchProvider
+    from .app.types import ProviderError, ProviderErrorCode
+except ImportError:
+    from app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
+    from app.provider_playwright import PlaywrightSearchProvider
+    from app.types import ProviderError, ProviderErrorCode
+
+
+class SearchRequest(BaseModel):
+    keyword: str
+    pages: int = Field(default=1, ge=1)
+    timeout_ms: int = Field(default=20_000, ge=1_000)
+    sort: str = "time_desc"
+    use_login: bool = True
+
+
+@dataclass(slots=True)
+class WorkerAuthConfig:
+    api_key: str | None
+    cf_access_client_id: str | None
+    cf_access_client_secret: str | None
+    error: str | None = None
+
+    @property
+    def status(self) -> str:
+        if self.error:
+            return "misconfigured"
+        if self.api_key or (
+            self.cf_access_client_id and self.cf_access_client_secret
+        ):
+            return "configured"
+        return "disabled"
+
+
+@dataclass(slots=True)
+class WorkerRuntime:
+    settings: PluginSettings | None
+    provider: Any | None
+    auth: WorkerAuthConfig
+    provider_error: str | None = None
+    provider_error_code: ProviderErrorCode = ProviderErrorCode.UNKNOWN
+
+
+def build_worker_settings_from_env() -> PluginSettings:
+    plugin_data_dir = Path(
+        os.getenv("GOOFISH_WORKER_DATA_DIR", ".goofish_worker")
+    ).expanduser()
+    plugin_data_dir.mkdir(parents=True, exist_ok=True)
+
+    storage_state_file = os.getenv("GOOFISH_WORKER_STORAGE_STATE_FILE", "").strip()
+    if storage_state_file:
+        storage_state_path = Path(storage_state_file).expanduser()
+        if not storage_state_path.is_absolute():
+            storage_state_path = plugin_data_dir / storage_state_path
+    else:
+        storage_state_path = plugin_data_dir / "storage_state.json"
+
+    return PluginSettings(
+        plugin_name="goofish_worker",
+        plugin_data_dir=plugin_data_dir,
+        db_path=plugin_data_dir / "goofish_catcher.db",
+        provider_mode=PROVIDER_MODE_PLAYWRIGHT_LOCAL,
+        default_interval_sec=600,
+        default_pages=1,
+        max_pages=max(1, _env_int("GOOFISH_WORKER_MAX_PAGES", 2)),
+        scheduler_tick_sec=15,
+        max_concurrency=1,
+        fetch_timeout_sec=max(5, _env_int("GOOFISH_WORKER_FETCH_TIMEOUT_SEC", 20)),
+        max_retries=0,
+        retry_base_sec=30,
+        retry_max_sec=900,
+        default_new_window_sec=1800,
+        default_drop_abs=50.0,
+        default_drop_pct=0.05,
+        default_cooldown_sec=21600,
+        playwright_storage_state_path=storage_state_path,
+        playwright_headless=False,
+        playwright_block_assets=_env_bool("GOOFISH_WORKER_BLOCK_ASSETS", True),
+        playwright_force_direct=_env_bool("GOOFISH_WORKER_FORCE_DIRECT", True),
+        webhook_url=None,
+        remote_base_url=None,
+        remote_api_key=None,
+        remote_headers_json=None,
+        remote_timeout_sec=20,
+        remote_healthcheck_on_init=False,
+        remote_healthcheck_timeout_sec=10,
+        queue_max_size=256,
+        llm_enabled=False,
+        llm_provider_id=None,
+        llm_prefilter_provider_id=None,
+        llm_timeout_sec=25,
+        llm_top_k=3,
+        llm_max_candidates=20,
+        llm_prefilter_enabled=False,
+        llm_prefilter_timeout_sec=6,
+        llm_prefilter_max_items=30,
+    )
+
+
+def build_worker_auth_from_env() -> WorkerAuthConfig:
+    api_key = os.getenv("GOOFISH_WORKER_API_KEY", "").strip() or None
+    cf_access_client_id = (
+        os.getenv("GOOFISH_WORKER_CF_ACCESS_CLIENT_ID", "").strip() or None
+    )
+    cf_access_client_secret = (
+        os.getenv("GOOFISH_WORKER_CF_ACCESS_CLIENT_SECRET", "").strip() or None
+    )
+    error = None
+    if bool(cf_access_client_id) != bool(cf_access_client_secret):
+        error = (
+            "cloudflare access service token requires both client id and client secret"
+        )
+    return WorkerAuthConfig(
+        api_key=api_key,
+        cf_access_client_id=cf_access_client_id,
+        cf_access_client_secret=cf_access_client_secret,
+        error=error,
+    )
+
+
+def create_runtime_from_env() -> WorkerRuntime:
+    auth = build_worker_auth_from_env()
+    settings: PluginSettings | None = None
+    try:
+        settings = build_worker_settings_from_env()
+        provider = PlaywrightSearchProvider(settings)
+        return WorkerRuntime(
+            settings=settings,
+            provider=provider,
+            auth=auth,
+        )
+    except ModuleNotFoundError as exc:
+        return WorkerRuntime(
+            settings=settings,
+            provider=None,
+            auth=auth,
+            provider_error=(
+                "playwright is not installed. "
+                "Run: uv pip install -r requirements.txt && "
+                "uv run python -m playwright install chromium chromium-headless-shell"
+            ),
+            provider_error_code=ProviderErrorCode.DEPENDENCY_MISSING,
+        )
+    except Exception as exc:
+        return WorkerRuntime(
+            settings=settings,
+            provider=None,
+            auth=auth,
+            provider_error=str(exc),
+            provider_error_code=ProviderErrorCode.UNKNOWN,
+        )
+
+
+def create_app(runtime: WorkerRuntime | None = None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.runtime = runtime or create_runtime_from_env()
+        try:
+            yield
+        finally:
+            current_runtime: WorkerRuntime | None = getattr(app.state, "runtime", None)
+            provider = getattr(current_runtime, "provider", None)
+            if provider is not None and hasattr(provider, "close"):
+                await provider.close()
+
+    app = FastAPI(title="Goofish Remote Worker", lifespan=lifespan)
+
+    @app.exception_handler(HTTPException)
+    async def handle_http_exception(_, exc: HTTPException):
+        return _error_response(
+            status_code=exc.status_code,
+            code=ProviderErrorCode.NETWORK_ERROR,
+            message=str(exc.detail),
+        )
+
+    @app.get("/health")
+    async def health(
+        authorization: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+        cf_access_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+        cf_access_client_secret: str | None = Header(
+            None,
+            alias="CF-Access-Client-Secret",
+        ),
+    ):
+        current_runtime = _get_runtime(app)
+        _verify_request_auth(
+            current_runtime.auth,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            cf_access_client_id=cf_access_client_id,
+            cf_access_client_secret=cf_access_client_secret,
+        )
+        if current_runtime.provider_error:
+            return _error_response(
+                status_code=503,
+                code=current_runtime.provider_error_code,
+                message=current_runtime.provider_error,
+            )
+
+        storage_state = bool(
+            current_runtime.settings
+            and current_runtime.settings.playwright_storage_state_path
+            and current_runtime.settings.playwright_storage_state_path.exists()
+        )
+        payload = {
+            "ok": True,
+            "provider": (
+                current_runtime.settings.provider_mode
+                if current_runtime.settings is not None
+                else PROVIDER_MODE_PLAYWRIGHT_LOCAL
+            ),
+            "auth": current_runtime.auth.status,
+            "storage_state": storage_state,
+        }
+        return payload
+
+    @app.post("/v1/search")
+    async def search(
+        req: SearchRequest,
+        authorization: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+        cf_access_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+        cf_access_client_secret: str | None = Header(
+            None,
+            alias="CF-Access-Client-Secret",
+        ),
+    ):
+        current_runtime = _get_runtime(app)
+        _verify_request_auth(
+            current_runtime.auth,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            cf_access_client_id=cf_access_client_id,
+            cf_access_client_secret=cf_access_client_secret,
+        )
+        if current_runtime.provider_error or current_runtime.provider is None:
+            return _error_response(
+                status_code=503,
+                code=current_runtime.provider_error_code,
+                message=current_runtime.provider_error or "worker provider is unavailable",
+            )
+
+        try:
+            items = await current_runtime.provider.search(
+                keyword=req.keyword,
+                pages=req.pages,
+                timeout_sec=max(5, req.timeout_ms // 1000),
+            )
+        except ProviderError as exc:
+            return _error_response(
+                status_code=400,
+                code=exc.code,
+                message=exc.message,
+                retry_after_sec=exc.retry_after_sec,
+            )
+        except Exception as exc:
+            return _error_response(
+                status_code=500,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
+
+        return {
+            "ok": True,
+            "items": [asdict(item) for item in items],
+        }
+
+    return app
+
+
+def _get_runtime(app: FastAPI) -> WorkerRuntime:
+    runtime: WorkerRuntime | None = getattr(app.state, "runtime", None)
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="worker runtime is not ready")
+    return runtime
+
+
+def _verify_request_auth(
+    auth: WorkerAuthConfig,
+    *,
+    authorization: str | None,
+    x_api_key: str | None,
+    cf_access_client_id: str | None,
+    cf_access_client_secret: str | None,
+) -> None:
+    if auth.error:
+        raise HTTPException(status_code=503, detail=auth.error)
+    if auth.status == "disabled":
+        return
+
+    bearer_token = _extract_bearer_token(authorization)
+    if auth.api_key and (
+        bearer_token == auth.api_key or x_api_key == auth.api_key
+    ):
+        return
+    if (
+        auth.cf_access_client_id
+        and auth.cf_access_client_secret
+        and cf_access_client_id == auth.cf_access_client_id
+        and cf_access_client_secret == auth.cf_access_client_secret
+    ):
+        return
+
+    raise HTTPException(status_code=401, detail="worker authorization failed")
+
+
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    parts = authorization.strip().split(" ", 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip() or None
+    return authorization.strip() or None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    lowered = raw.strip().lower()
+    if lowered in {"true", "1", "yes", "on"}:
+        return True
+    if lowered in {"false", "0", "no", "off"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _error_response(
+    *,
+    status_code: int,
+    code: ProviderErrorCode,
+    message: str,
+    retry_after_sec: int | None = None,
+) -> JSONResponse:
+    error = {
+        "code": code.value,
+        "message": message,
+    }
+    if retry_after_sec is not None:
+        error["retry_after_sec"] = retry_after_sec
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "ok": False,
+            "error": error,
+        },
+    )
+
+
+app = create_app()
