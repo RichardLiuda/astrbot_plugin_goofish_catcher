@@ -312,7 +312,10 @@ def test_load_plugin_settings_remote_options(tmp_path: Path):
             "provider_mode": "remote_rest",
             "remote_base_url": "https://worker.example.com",
             "remote_api_key": "secret",
-            "remote_headers_json": '{"CF-Access-Client-Id":"id"}',
+            "remote_headers": [
+                "CF-Access-Client-Id: id",
+                "CF-Access-Client-Secret: secret2",
+            ],
             "remote_timeout_sec": 33,
             "remote_healthcheck_on_init": False,
             "remote_healthcheck_timeout_sec": 12,
@@ -323,10 +326,26 @@ def test_load_plugin_settings_remote_options(tmp_path: Path):
     assert settings.provider_mode == "remote_rest"
     assert settings.remote_base_url == "https://worker.example.com"
     assert settings.remote_api_key == "secret"
-    assert settings.remote_headers_json == '{"CF-Access-Client-Id":"id"}'
+    assert json.loads(settings.remote_headers_json or "{}") == {
+        "CF-Access-Client-Id": "id",
+        "CF-Access-Client-Secret": "secret2",
+    }
     assert settings.remote_timeout_sec == 33
     assert settings.remote_healthcheck_on_init is False
     assert settings.remote_healthcheck_timeout_sec == 12
+
+
+def test_load_plugin_settings_remote_headers_json_is_still_supported(tmp_path: Path):
+    settings = load_plugin_settings(
+        config={
+            "provider_mode": "remote_rest",
+            "remote_base_url": "https://worker.example.com",
+            "remote_headers_json": '{"CF-Access-Client-Id":"id"}',
+        },
+        plugin_name="astrbot_plugin_goofish_catcher",
+        plugin_data_dir=tmp_path / "plugin_data",
+    )
+    assert settings.remote_headers_json == '{"CF-Access-Client-Id":"id"}'
 
 
 def test_conf_schema_exposes_remote_settings():
@@ -335,8 +354,8 @@ def test_conf_schema_exposes_remote_settings():
     for key in {
         "provider_mode",
         "remote_base_url",
+        "remote_headers",
         "remote_api_key",
-        "remote_headers_json",
         "remote_timeout_sec",
         "remote_healthcheck_on_init",
         "remote_healthcheck_timeout_sec",

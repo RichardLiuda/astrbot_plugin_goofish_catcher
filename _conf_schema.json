@@ -1,82 +1,57 @@
 {
-  "default_interval_sec": {
-    "type": "int",
-    "description": "默认轮询间隔（秒）",
-    "default": 600
-  },
-  "default_pages": {
-    "type": "int",
-    "description": "默认抓取页数",
-    "default": 1
-  },
-  "max_pages": {
-    "type": "int",
-    "description": "最大抓取页数",
-    "default": 2
-  },
-  "scheduler_tick_sec": {
-    "type": "int",
-    "description": "调度扫描间隔（秒）",
-    "default": 15
-  },
-  "max_concurrency": {
-    "type": "int",
-    "description": "最大并发 Worker 数",
-    "default": 1
-  },
-  "queue_max_size": {
-    "type": "int",
-    "description": "任务队列最大长度",
-    "default": 256
-  },
-  "fetch_timeout_sec": {
-    "type": "int",
-    "description": "单次抓取超时（秒）",
-    "default": 20
-  },
-  "max_retries": {
-    "type": "int",
-    "description": "最大重试次数",
-    "default": 3
-  },
-  "retry_base_sec": {
-    "type": "int",
-    "description": "重试基础退避（秒）",
-    "default": 30
-  },
-  "retry_max_sec": {
-    "type": "int",
-    "description": "重试最大退避（秒）",
-    "default": 900
-  },
-  "default_new_window_sec": {
-    "type": "int",
-    "description": "上新判定时间窗（秒）",
-    "default": 1800
-  },
-  "default_drop_abs": {
-    "type": "float",
-    "description": "默认绝对降价阈值（元）",
-    "default": 50.0
-  },
-  "default_drop_pct": {
-    "type": "float",
-    "description": "默认相对降价阈值（0-1）",
-    "default": 0.05
-  },
-  "default_cooldown_sec": {
-    "type": "int",
-    "description": "默认通知冷却（秒）",
-    "default": 21600
-  },
   "provider_mode": {
     "type": "string",
-    "description": "抓取 Provider 模式：playwright_local 或 remote_rest",
+    "description": "模式",
+    "hint": "`playwright_local` 为本地浏览器，`remote_rest` 为远程 Worker",
+    "options": [
+      "playwright_local",
+      "remote_rest"
+    ],
     "default": "playwright_local"
+  },
+  "remote_base_url": {
+    "type": "string",
+    "description": "远程地址",
+    "hint": "例如 `https://worker.example.com`，不要带结尾斜杠",
+    "default": ""
+  },
+  "remote_headers": {
+    "type": "list",
+    "description": "远程 Header",
+    "hint": "每行一个 `Header: Value`；Cloudflare Access 常用两行：`CF-Access-Client-Id: ...` 和 `CF-Access-Client-Secret: ...`",
+    "default": [],
+    "items": {
+      "type": "string"
+    }
+  },
+  "remote_api_key": {
+    "type": "string",
+    "description": "API Key",
+    "hint": "只在远程 Worker 自己启用 API Key 鉴权时填写；如果走 Cloudflare Access，留空",
+    "default": ""
+  },
+  "remote_timeout_sec": {
+    "type": "int",
+    "description": "远程超时",
+    "hint": "一般保持 20 秒；远程主机较慢时可调到 30-45",
+    "default": 20
+  },
+  "remote_healthcheck_on_init": {
+    "type": "bool",
+    "description": "启动检查",
+    "hint": "建议开启；启动时先探测远程 `/health`",
+    "default": true
+  },
+  "remote_healthcheck_timeout_sec": {
+    "type": "int",
+    "description": "检查超时",
+    "hint": "默认 10 秒；网络较慢时再调大",
+    "default": 10
   },
   "playwright_storage_state_file": {
     "type": "file",
-    "description": "Playwright 登录态文件（JSON）",
+    "description": "登录态文件",
+    "hint": "只在本地模式使用；远程模式请在远程主机的 `worker_config.json` 配置",
     "default": [],
     "file_types": [
       "json"
@@ -84,52 +59,110 @@
   },
   "playwright_block_assets": {
     "type": "bool",
-    "description": "是否拦截图片/字体/媒体以加快加载",
+    "description": "拦截资源",
+    "hint": "建议开启；远程模式由远程主机自己的 worker 配置决定",
     "default": true
   },
   "playwright_force_direct": {
     "type": "bool",
-    "description": "是否强制浏览器直连（禁用系统代理）",
+    "description": "直连浏览器",
+    "hint": "建议开启，减少系统代理导致的 IP 波动；远程模式由远程主机自己的 worker 配置决定",
     "default": true
+  },
+  "default_interval_sec": {
+    "type": "int",
+    "description": "默认轮询间隔（秒）",
+    "hint": "新建订阅时默认使用；建议不要低于 300 秒，过高频率容易触发风控",
+    "default": 600
+  },
+  "default_pages": {
+    "type": "int",
+    "description": "默认抓取页数",
+    "hint": "新建订阅或查询时的默认页数；建议 1-2 页",
+    "default": 1
+  },
+  "max_pages": {
+    "type": "int",
+    "description": "最大抓取页数",
+    "hint": "会限制订阅和查询的页数上限；远程 Worker 也建议保持较小值",
+    "default": 2
+  },
+  "scheduler_tick_sec": {
+    "type": "int",
+    "description": "调度扫描间隔（秒）",
+    "hint": "调度器多久检查一次待执行订阅；一般 10-30 秒足够",
+    "default": 15
+  },
+  "max_concurrency": {
+    "type": "int",
+    "description": "最大并发 Worker 数",
+    "hint": "建议先保持 1；并发过高容易触发闲鱼风控或让浏览器不稳定",
+    "default": 1
+  },
+  "queue_max_size": {
+    "type": "int",
+    "description": "任务队列最大长度",
+    "hint": "一般不用改，默认值已足够",
+    "default": 256
+  },
+  "fetch_timeout_sec": {
+    "type": "int",
+    "description": "单次抓取超时（秒）",
+    "hint": "本地或远程 Provider 的单次抓取超时；网络较慢时可调大到 30-45",
+    "default": 20
+  },
+  "max_retries": {
+    "type": "int",
+    "description": "最大重试次数",
+    "hint": "调度失败后的最大自动重试次数",
+    "default": 3
+  },
+  "retry_base_sec": {
+    "type": "int",
+    "description": "重试基础退避（秒）",
+    "hint": "失败后第一次重试等待时间",
+    "default": 30
+  },
+  "retry_max_sec": {
+    "type": "int",
+    "description": "重试最大退避（秒）",
+    "hint": "连续失败时的最大等待时间",
+    "default": 900
+  },
+  "default_new_window_sec": {
+    "type": "int",
+    "description": "上新判定时间窗（秒）",
+    "hint": "商品发布时间落在这个窗口内时会更倾向判定为上新",
+    "default": 1800
+  },
+  "default_drop_abs": {
+    "type": "float",
+    "description": "默认绝对降价阈值（元）",
+    "hint": "价格下降超过这个金额会触发降价候选",
+    "default": 50.0
+  },
+  "default_drop_pct": {
+    "type": "float",
+    "description": "默认相对降价阈值（0-1）",
+    "hint": "例如 0.05 表示 5%",
+    "default": 0.05
+  },
+  "default_cooldown_sec": {
+    "type": "int",
+    "description": "默认通知冷却（秒）",
+    "hint": "同一商品相同事件的通知冷却时间",
+    "default": 21600
   },
   "webhook_url": {
     "type": "string",
     "description": "可选 Webhook 地址",
+    "hint": "不需要额外回调通知时留空",
     "default": ""
-  },
-  "remote_base_url": {
-    "type": "string",
-    "description": "远程抓取 Worker 地址，例如 https://worker.example.com",
-    "default": ""
-  },
-  "remote_api_key": {
-    "type": "string",
-    "description": "远程 Worker API Key（可与 Bearer / X-API-Key 兼容）",
-    "default": ""
-  },
-  "remote_headers_json": {
-    "type": "string",
-    "description": "远程请求额外 Header(JSON 对象)，可用于 Cloudflare Access",
-    "default": ""
-  },
-  "remote_timeout_sec": {
-    "type": "int",
-    "description": "远程请求默认超时（秒）",
-    "default": 20
-  },
-  "remote_healthcheck_on_init": {
-    "type": "bool",
-    "description": "插件初始化时是否先探测远程 /health",
-    "default": true
-  },
-  "remote_healthcheck_timeout_sec": {
-    "type": "int",
-    "description": "初始化远程健康检查超时（秒）",
-    "default": 10
   },
   "llm_enabled": {
     "type": "bool",
     "description": "是否启用 LLM 推荐",
+    "hint": "关闭后将只使用启发式规则，不再调用大模型分析",
     "default": true
   },
   "llm_provider_id": {
@@ -149,31 +182,37 @@
   "llm_timeout_sec": {
     "type": "int",
     "description": "推荐分析超时（秒）",
+    "hint": "超时后会自动回退到启发式推荐",
     "default": 25
   },
   "llm_top_k": {
     "type": "int",
     "description": "推荐返回 TopK 数量",
+    "hint": "建议 3-5，过大可读性会变差",
     "default": 3
   },
   "llm_max_candidates": {
     "type": "int",
     "description": "参与推荐分析的最大候选数",
+    "hint": "候选越多越慢；建议保持默认",
     "default": 20
   },
   "llm_prefilter_enabled": {
     "type": "bool",
     "description": "是否启用 LLM 初筛",
+    "hint": "关闭后只用规则初筛",
     "default": true
   },
   "llm_prefilter_timeout_sec": {
     "type": "int",
     "description": "初筛超时（秒）",
+    "hint": "超时后会自动回退到规则初筛",
     "default": 6
   },
   "llm_prefilter_max_items": {
     "type": "int",
     "description": "参与初筛的最大原始商品数",
+    "hint": "越大越慢，保持默认通常足够",
     "default": 30
   }
 }

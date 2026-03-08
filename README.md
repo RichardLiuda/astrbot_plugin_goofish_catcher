@@ -165,10 +165,11 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 - `remote_base_url`: `https://goofish-worker.example.com`
 - `remote_timeout_sec`: `20`
 - `remote_healthcheck_on_init`: `true`
-- `remote_headers_json`:
+- `remote_headers`:
 
-```json
-{"CF-Access-Client-Id":"<your-cf-client-id>","CF-Access-Client-Secret":"<your-cf-client-secret>"}
+```text
+CF-Access-Client-Id: <your-cf-client-id>
+CF-Access-Client-Secret: <your-cf-client-secret>
 ```
 
 如果走 API Key：
@@ -176,7 +177,7 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 - `provider_mode`: `remote_rest`
 - `remote_base_url`: `https://goofish-worker.example.com`
 - `remote_api_key`: `<your-api-key>`
-- `remote_headers_json`: 留空
+- `remote_headers`: 留空
 
 ### 5. 健康检查与状态
 
@@ -320,7 +321,7 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 | ----------------------------- | --------------------------------------- | ------ |
 | `remote_base_url`             | 远程 worker 的基础地址                          | `""`   |
 | `remote_api_key`              | 远程 worker API Key                       | `""`   |
-| `remote_headers_json`         | 远程请求附加 Header(JSON 对象字符串)               | `""`   |
+| `remote_headers`             | 远程请求附加 Header 列表，每行 `Header: Value`      | `[]`   |
 | `remote_timeout_sec`          | 远程请求默认超时（秒）                             | `20`   |
 | `remote_healthcheck_on_init`  | 初始化时是否先探测远程 `/health`                   | `true` |
 | `remote_healthcheck_timeout_sec` | 初始化远程健康检查超时（秒）                       | `10`   |

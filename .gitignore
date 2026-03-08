@@ -206,11 +206,12 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Local research notes
+# Local notes / deployment artifacts
+ADVICE.md
 ai-report.md
 deep-research-report.md
-ADVICE.md
 storage_state.json
+worker_config.json
 
 # Local-only tests
 tests/test_remote_runtime.py

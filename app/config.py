@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import logging
 from dataclasses import dataclass
@@ -56,6 +57,55 @@ def _first_file(raw_value: Any) -> str | None:
     if isinstance(raw_value, str) and raw_value.strip():
         return raw_value.strip()
     return None
+
+
+def _normalize_remote_headers(
+    raw: dict[str, Any],
+    *,
+    plugin_name: str,
+) -> str | None:
+    raw_json = str(raw.get("remote_headers_json", "")).strip() or None
+    if raw_json:
+        return raw_json
+
+    raw_list = raw.get("remote_headers")
+    if raw_list is None:
+        return None
+    if not isinstance(raw_list, list):
+        logger.warning(
+            "[%s] remote_headers should be a list, got %s",
+            plugin_name,
+            type(raw_list).__name__,
+        )
+        return None
+
+    headers: dict[str, str] = {}
+    for item in raw_list:
+        text = str(item).strip()
+        if not text:
+            continue
+        key, sep, value = text.partition(":")
+        if not sep:
+            logger.warning(
+                "[%s] ignore invalid remote_headers item without colon: %s",
+                plugin_name,
+                text,
+            )
+            continue
+        key_text = key.strip()
+        value_text = value.strip()
+        if not key_text or not value_text:
+            logger.warning(
+                "[%s] ignore invalid remote_headers item with empty key/value: %s",
+                plugin_name,
+                text,
+            )
+            continue
+        headers[key_text] = value_text
+
+    if not headers:
+        return None
+    return json.dumps(headers, ensure_ascii=False)
 
 
 @dataclass(slots=True)
@@ -168,7 +218,7 @@ def load_plugin_settings(
     webhook_url = str(raw.get("webhook_url", "")).strip() or None
     remote_base_url = str(raw.get("remote_base_url", "")).strip() or None
     remote_api_key = str(raw.get("remote_api_key", "")).strip() or None
-    remote_headers_json = str(raw.get("remote_headers_json", "")).strip() or None
+    remote_headers_json = _normalize_remote_headers(raw, plugin_name=plugin_name)
     llm_provider_id = str(raw.get("llm_provider_id", "")).strip() or None
     llm_prefilter_provider_id = (
         str(raw.get("llm_prefilter_provider_id", "")).strip() or None
