@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -56,12 +57,18 @@ class WorkerRuntime:
 
 
 def build_worker_settings_from_env() -> PluginSettings:
+    config = load_worker_config()
     plugin_data_dir = Path(
-        os.getenv("GOOFISH_WORKER_DATA_DIR", ".goofish_worker")
+        _cfg_str(config, "data_dir", "GOOFISH_WORKER_DATA_DIR", ".goofish_worker")
     ).expanduser()
     plugin_data_dir.mkdir(parents=True, exist_ok=True)
 
-    storage_state_file = os.getenv("GOOFISH_WORKER_STORAGE_STATE_FILE", "").strip()
+    storage_state_file = _cfg_str(
+        config,
+        "storage_state_file",
+        "GOOFISH_WORKER_STORAGE_STATE_FILE",
+        "",
+    )
     if storage_state_file:
         storage_state_path = Path(storage_state_file).expanduser()
         if not storage_state_path.is_absolute():
@@ -76,10 +83,18 @@ def build_worker_settings_from_env() -> PluginSettings:
         provider_mode=PROVIDER_MODE_PLAYWRIGHT_LOCAL,
         default_interval_sec=600,
         default_pages=1,
-        max_pages=max(1, _env_int("GOOFISH_WORKER_MAX_PAGES", 2)),
+        max_pages=max(1, _cfg_int(config, "max_pages", "GOOFISH_WORKER_MAX_PAGES", 2)),
         scheduler_tick_sec=15,
         max_concurrency=1,
-        fetch_timeout_sec=max(5, _env_int("GOOFISH_WORKER_FETCH_TIMEOUT_SEC", 20)),
+        fetch_timeout_sec=max(
+            5,
+            _cfg_int(
+                config,
+                "fetch_timeout_sec",
+                "GOOFISH_WORKER_FETCH_TIMEOUT_SEC",
+                20,
+            ),
+        ),
         max_retries=0,
         retry_base_sec=30,
         retry_max_sec=900,
@@ -89,8 +104,18 @@ def build_worker_settings_from_env() -> PluginSettings:
         default_cooldown_sec=21600,
         playwright_storage_state_path=storage_state_path,
         playwright_headless=False,
-        playwright_block_assets=_env_bool("GOOFISH_WORKER_BLOCK_ASSETS", True),
-        playwright_force_direct=_env_bool("GOOFISH_WORKER_FORCE_DIRECT", True),
+        playwright_block_assets=_cfg_bool(
+            config,
+            "block_assets",
+            "GOOFISH_WORKER_BLOCK_ASSETS",
+            True,
+        ),
+        playwright_force_direct=_cfg_bool(
+            config,
+            "force_direct",
+            "GOOFISH_WORKER_FORCE_DIRECT",
+            True,
+        ),
         webhook_url=None,
         remote_base_url=None,
         remote_api_key=None,
@@ -112,12 +137,17 @@ def build_worker_settings_from_env() -> PluginSettings:
 
 
 def build_worker_auth_from_env() -> WorkerAuthConfig:
-    api_key = os.getenv("GOOFISH_WORKER_API_KEY", "").strip() or None
-    cf_access_client_id = (
-        os.getenv("GOOFISH_WORKER_CF_ACCESS_CLIENT_ID", "").strip() or None
+    config = load_worker_config()
+    api_key = _cfg_optional_str(config, "api_key", "GOOFISH_WORKER_API_KEY")
+    cf_access_client_id = _cfg_optional_str(
+        config,
+        "cf_access_client_id",
+        "GOOFISH_WORKER_CF_ACCESS_CLIENT_ID",
     )
-    cf_access_client_secret = (
-        os.getenv("GOOFISH_WORKER_CF_ACCESS_CLIENT_SECRET", "").strip() or None
+    cf_access_client_secret = _cfg_optional_str(
+        config,
+        "cf_access_client_secret",
+        "GOOFISH_WORKER_CF_ACCESS_CLIENT_SECRET",
     )
     error = None
     if bool(cf_access_client_id) != bool(cf_access_client_secret):
@@ -163,6 +193,21 @@ def create_runtime_from_env() -> WorkerRuntime:
             provider_error=str(exc),
             provider_error_code=ProviderErrorCode.UNKNOWN,
         )
+
+
+def load_worker_config() -> dict[str, Any]:
+    config_path = Path(
+        os.getenv("GOOFISH_WORKER_CONFIG", "worker_config.json")
+    ).expanduser()
+    if not config_path.exists():
+        return {}
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid worker config json: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("worker config root must be a JSON object")
+    return raw
 
 
 def create_app(runtime: WorkerRuntime | None = None) -> FastAPI:
@@ -328,16 +373,79 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     return authorization.strip() or None
 
 
+def _cfg_optional_str(
+    config: dict[str, Any],
+    key: str,
+    env_name: str,
+) -> str | None:
+    env_value = os.getenv(env_name)
+    if env_value is not None:
+        return env_value.strip() or None
+    raw_value = config.get(key)
+    if raw_value is None:
+        return None
+    return str(raw_value).strip() or None
+
+
+def _cfg_str(
+    config: dict[str, Any],
+    key: str,
+    env_name: str,
+    default: str,
+) -> str:
+    return _cfg_optional_str(config, key, env_name) or default
+
+
+def _cfg_bool(
+    config: dict[str, Any],
+    key: str,
+    env_name: str,
+    default: bool,
+) -> bool:
+    raw = os.getenv(env_name)
+    if raw is not None:
+        return _parse_bool(raw, default)
+    if key in config:
+        return _parse_bool(config.get(key), default)
+    return default
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
-    lowered = raw.strip().lower()
+    return _parse_bool(raw, default)
+
+
+def _parse_bool(raw: Any, default: bool) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return default
+    lowered = str(raw).strip().lower()
     if lowered in {"true", "1", "yes", "on"}:
         return True
     if lowered in {"false", "0", "no", "off"}:
         return False
     return default
+
+
+def _cfg_int(
+    config: dict[str, Any],
+    key: str,
+    env_name: str,
+    default: int,
+) -> int:
+    raw = os.getenv(env_name)
+    if raw is not None:
+        return _env_int(env_name, default)
+    raw = config.get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 def _env_int(name: str, default: int) -> int:

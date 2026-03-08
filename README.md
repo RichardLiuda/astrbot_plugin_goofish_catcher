@@ -102,21 +102,51 @@ Move-Item .\storage_state.json .\worker_data\storage_state.json -Force
 
 ### 2. 启动远端 worker
 
-在远端机器进入插件目录后，设置环境变量并启动：
+最推荐的方式是放一个本地 `worker_config.json`，后续只维护这一个文件。
+
+示例：
+
+```json
+{
+  "data_dir": "./worker_data",
+  "storage_state_file": "./worker_data/storage_state.json",
+  "cf_access_client_id": "<your-cf-client-id>",
+  "cf_access_client_secret": "<your-cf-client-secret>",
+  "max_pages": 2,
+  "fetch_timeout_sec": 20,
+  "block_assets": true,
+  "force_direct": true
+}
+```
+
+然后直接启动：
+
+```powershell
+uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
+```
+
+如果你想把配置文件放到别的位置，可以指定：
+
+```powershell
+$env:GOOFISH_WORKER_CONFIG = "D:\path\to\worker_config.json"
+uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
+```
+
+仍然支持环境变量方式；环境变量优先级高于 JSON 配置。老的环境变量启动方式如下：
 
 ```powershell
 $env:GOOFISH_WORKER_DATA_DIR = ".\worker_data"
 $env:GOOFISH_WORKER_STORAGE_STATE_FILE = ".\worker_data\storage_state.json"
 $env:GOOFISH_WORKER_CF_ACCESS_CLIENT_ID = "<your-cf-client-id>"
 $env:GOOFISH_WORKER_CF_ACCESS_CLIENT_SECRET = "<your-cf-client-secret>"
-uv run uvicorn worker_server:app --host 127.0.0.1 --port 8787
+uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 ```
 
 如果你不用 Cloudflare Access，也可以只配置 API Key：
 
 ```powershell
 $env:GOOFISH_WORKER_API_KEY = "<your-api-key>"
-uv run uvicorn worker_server:app --host 127.0.0.1 --port 8787
+uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 ```
 
 ### 3. 用 Cloudflare Tunnel 暴露 worker
