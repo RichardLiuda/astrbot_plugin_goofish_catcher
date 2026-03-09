@@ -55,9 +55,18 @@ def _make_settings(tmp_path: Path) -> PluginSettings:
         llm_timeout_sec=25,
         llm_top_k=3,
         llm_max_candidates=20,
+        llm_recommend_prompt=(
+            "关键词: $keyword\n候选条目（最多推荐 $top_k 条）:\n$candidates_json\n\n"
+            "请输出 JSON，字段必须包含 summary 和 top。"
+        ),
         llm_prefilter_enabled=True,
         llm_prefilter_timeout_sec=6,
         llm_prefilter_max_items=30,
+        llm_prefilter_prompt=(
+            "关键词: $keyword\n商品列表: $items_json\n"
+            "请只做“商品相关性筛选”，忽略价格、功能优劣、成色。\n"
+            '输出 JSON: {"keep_item_ids": ["..."]}'
+        ),
     )
 
 

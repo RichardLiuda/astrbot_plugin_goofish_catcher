@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from string import Template
 from typing import Any
 
 from astrbot.api import logger
@@ -185,11 +186,10 @@ class GoofishRecommender:
             }
             for item in items
         ]
-        prompt = (
-            f"关键词: {keyword}\n"
-            f"商品列表: {json.dumps(payload, ensure_ascii=False)}\n"
-            "请只做“商品相关性筛选”，忽略价格、功能优劣、成色。"
-            '输出 JSON: {"keep_item_ids": ["..."]}'
+        prompt = _render_prompt_template(
+            self.settings.llm_prefilter_prompt,
+            keyword=keyword,
+            items_json=json.dumps(payload, ensure_ascii=False),
         )
         try:
             llm_resp = await asyncio.wait_for(
@@ -390,11 +390,18 @@ class GoofishRecommender:
             for c in candidates
         ]
         return (
-            f"关键词: {keyword}\n"
-            f"候选条目（最多推荐 {top_k} 条）:\n"
-            f"{json.dumps(serialized, ensure_ascii=False)}\n\n"
-            "请输出 JSON，字段必须包含 summary 和 top。"
+            _render_prompt_template(
+                self.settings.llm_recommend_prompt,
+                keyword=keyword,
+                top_k=top_k,
+                candidates_json=json.dumps(serialized, ensure_ascii=False),
+            )
         )
+
+
+def _render_prompt_template(template: str, **values: Any) -> str:
+    prepared = {key: str(value) for key, value in values.items()}
+    return Template(template).safe_substitute(prepared)
 
 
 def _safe_float(value: Any, default: float) -> float:

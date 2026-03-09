@@ -53,6 +53,8 @@ class _FakeContext:
             [_Provider("fallback")] if with_fallback_provider else []
         )
         self.last_chat_provider_id: str | None = None
+        self.last_prompt: str | None = None
+        self.last_system_prompt: str | None = None
 
     def get_using_provider(self, umo: str):
         return self._session_provider
@@ -72,6 +74,8 @@ class _FakeContext:
 
     async def llm_generate(self, **kwargs):
         self.last_chat_provider_id = kwargs.get("chat_provider_id")
+        self.last_prompt = kwargs.get("prompt")
+        self.last_system_prompt = kwargs.get("system_prompt")
         if self.delay_sec > 0:
             await asyncio.sleep(self.delay_sec)
         if self.raise_exc is not None:
@@ -116,9 +120,18 @@ def _make_settings(tmp_path: Path, **overrides) -> PluginSettings:
         llm_timeout_sec=25,
         llm_top_k=3,
         llm_max_candidates=20,
+        llm_recommend_prompt=(
+            "关键词: $keyword\n候选条目（最多推荐 $top_k 条）:\n$candidates_json\n\n"
+            "请输出 JSON，字段必须包含 summary 和 top。"
+        ),
         llm_prefilter_enabled=True,
         llm_prefilter_timeout_sec=6,
         llm_prefilter_max_items=30,
+        llm_prefilter_prompt=(
+            "关键词: $keyword\n商品列表: $items_json\n"
+            "请只做“商品相关性筛选”，忽略价格、功能优劣、成色。\n"
+            '输出 JSON: {"keep_item_ids": ["..."]}'
+        ),
     )
     for key, value in overrides.items():
         setattr(settings, key, value)
@@ -309,6 +322,29 @@ async def test_recommender_prefers_configured_provider(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_recommender_uses_configured_recommend_prompt(tmp_path: Path):
+    context = _FakeContext(
+        llm_text='{"summary":"ok","top":[{"item_id":"1","score":88,"reason":"r","risk":"k"}]}'
+    )
+    recommender = GoofishRecommender(
+        context=context,
+        settings=_make_settings(
+            tmp_path,
+            llm_recommend_prompt="RECOMMEND::$keyword::$top_k::$candidates_json",
+        ),
+    )
+    await recommender.analyze(
+        umo="webchat:test",
+        keyword="镜头",
+        candidates=_candidates(),
+        top_k=2,
+    )
+    assert context.last_prompt is not None
+    assert context.last_prompt.startswith("RECOMMEND::镜头::2::")
+    assert '"item_id": "1"' in context.last_prompt
+
+
+@pytest.mark.asyncio
 async def test_prefilter_items_by_llm(tmp_path: Path):
     items = [
         NormalizedItem(
@@ -338,6 +374,35 @@ async def test_prefilter_items_by_llm(tmp_path: Path):
     )
     assert mode == "LLM_PREFILTER"
     assert [item.item_id for item in filtered] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_prefilter_uses_configured_prompt(tmp_path: Path):
+    items = [
+        NormalizedItem(
+            item_id="1",
+            title="适马 60-600 国行",
+            price=6800.0,
+            url="https://www.goofish.com/item?id=1",
+            publish_time=None,
+        )
+    ]
+    context = _FakeContext(llm_text='{"keep_item_ids":["1"]}')
+    recommender = GoofishRecommender(
+        context=context,
+        settings=_make_settings(
+            tmp_path,
+            llm_prefilter_prompt="PREFILTER::$keyword::$items_json",
+        ),
+    )
+    await recommender.prefilter_items(
+        umo="webchat:test",
+        keyword="适马60-600",
+        items=items,
+    )
+    assert context.last_prompt is not None
+    assert context.last_prompt.startswith("PREFILTER::适马60-600::")
+    assert '"item_id": "1"' in context.last_prompt
 
 
 @pytest.mark.asyncio

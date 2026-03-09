@@ -197,6 +197,12 @@
     "hint": "候选越多越慢；建议保持默认",
     "default": 20
   },
+  "llm_recommend_prompt": {
+    "type": "string",
+    "description": "推荐提示词",
+    "hint": "商品推荐阶段使用；支持 `$keyword`、`$top_k`、`$candidates_json` 三个占位符",
+    "default": "关键词: $keyword\n候选条目（最多推荐 $top_k 条）:\n$candidates_json\n\n请输出 JSON，字段必须包含 summary 和 top。"
+  },
   "llm_prefilter_enabled": {
     "type": "bool",
     "description": "是否启用 LLM 初筛",
@@ -214,5 +220,11 @@
     "description": "参与初筛的最大原始商品数",
     "hint": "越大越慢，保持默认通常足够",
     "default": 30
+  },
+  "llm_prefilter_prompt": {
+    "type": "string",
+    "description": "筛选提示词",
+    "hint": "结果筛选阶段使用；支持 `$keyword`、`$items_json` 两个占位符",
+    "default": "关键词: $keyword\n商品列表: $items_json\n请只做“商品相关性筛选”，忽略价格、功能优劣、成色。\n输出 JSON: {\"keep_item_ids\": [\"...\"]}"
   }
 }

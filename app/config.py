@@ -19,6 +19,20 @@ SUPPORTED_PROVIDER_MODES = {
     PROVIDER_MODE_REMOTE_REST,
 }
 
+DEFAULT_LLM_RECOMMEND_PROMPT = (
+    "关键词: $keyword\n"
+    "候选条目（最多推荐 $top_k 条）:\n"
+    "$candidates_json\n\n"
+    "请输出 JSON，字段必须包含 summary 和 top。"
+)
+
+DEFAULT_LLM_PREFILTER_PROMPT = (
+    "关键词: $keyword\n"
+    "商品列表: $items_json\n"
+    "请只做“商品相关性筛选”，忽略价格、功能优劣、成色。\n"
+    '输出 JSON: {"keep_item_ids": ["..."]}'
+)
+
 
 def _as_int(value: Any, default: int) -> int:
     try:
@@ -145,9 +159,11 @@ class PluginSettings:
     llm_timeout_sec: int
     llm_top_k: int
     llm_max_candidates: int
+    llm_recommend_prompt: str
     llm_prefilter_enabled: bool
     llm_prefilter_timeout_sec: int
     llm_prefilter_max_items: int
+    llm_prefilter_prompt: str
 
 
 def load_plugin_settings(
@@ -223,6 +239,14 @@ def load_plugin_settings(
     llm_prefilter_provider_id = (
         str(raw.get("llm_prefilter_provider_id", "")).strip() or None
     )
+    llm_recommend_prompt = (
+        str(raw.get("llm_recommend_prompt", "")).strip()
+        or DEFAULT_LLM_RECOMMEND_PROMPT
+    )
+    llm_prefilter_prompt = (
+        str(raw.get("llm_prefilter_prompt", "")).strip()
+        or DEFAULT_LLM_PREFILTER_PROMPT
+    )
 
     default_interval_sec = max(30, _as_int(raw.get("default_interval_sec"), 600))
     default_pages = max(1, _as_int(raw.get("default_pages"), 1))
@@ -274,9 +298,11 @@ def load_plugin_settings(
         llm_timeout_sec=max(5, _as_int(raw.get("llm_timeout_sec"), 25)),
         llm_top_k=max(1, _as_int(raw.get("llm_top_k"), 3)),
         llm_max_candidates=max(1, _as_int(raw.get("llm_max_candidates"), 20)),
+        llm_recommend_prompt=llm_recommend_prompt,
         llm_prefilter_enabled=_as_bool(raw.get("llm_prefilter_enabled"), True),
         llm_prefilter_timeout_sec=max(
             1, _as_int(raw.get("llm_prefilter_timeout_sec"), 6)
         ),
         llm_prefilter_max_items=max(1, _as_int(raw.get("llm_prefilter_max_items"), 30)),
+        llm_prefilter_prompt=llm_prefilter_prompt,
     )
