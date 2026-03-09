@@ -2,6 +2,25 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-03-09
+
+### Added
+
+- 新增 `llm_recommend_prompt` 配置项，可自定义商品推荐阶段的 LLM 提示词。
+- 新增 `llm_prefilter_prompt` 配置项，可自定义结果筛选阶段的 LLM 提示词。
+
+### Changed
+
+- 推荐与筛选提示词支持模板占位符。
+- 商品推荐提示词支持 `$keyword`、`$top_k`、`$candidates_json`。
+- 结果筛选提示词支持 `$keyword`、`$items_json`。
+- 保持默认提示词与原有 JSON 输出契约兼容，已有行为不变。
+
+### Tested
+
+- 覆盖自定义提示词是否真正传入 `llm_generate()` 的单元测试。
+- 验证推荐、筛选和调度相关测试通过。
+
 ## [1.0.0] - 2026-03-09
 
 ### Added
