@@ -1,0 +1,9 @@
+{
+    "data_dir": "./worker_data",
+    "storage_state_file": "storage_state.json",
+    "max_pages": 2,
+    "fetch_timeout_sec": 20,
+    "block_assets": true,
+    "force_direct": true
+}
+  
