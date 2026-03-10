@@ -159,11 +159,11 @@ class PluginSettings:
     llm_timeout_sec: int
     llm_top_k: int
     llm_max_candidates: int
-    llm_recommend_prompt: str
     llm_prefilter_enabled: bool
     llm_prefilter_timeout_sec: int
     llm_prefilter_max_items: int
-    llm_prefilter_prompt: str
+    llm_recommend_prompt: str = DEFAULT_LLM_RECOMMEND_PROMPT
+    llm_prefilter_prompt: str = DEFAULT_LLM_PREFILTER_PROMPT
 
 
 def load_plugin_settings(

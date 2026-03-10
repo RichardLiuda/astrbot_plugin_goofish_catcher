@@ -7,6 +7,8 @@ import httpx
 import pytest
 
 from data.plugins.astrbot_plugin_goofish_catcher.app.config import (
+    DEFAULT_LLM_PREFILTER_PROMPT,
+    DEFAULT_LLM_RECOMMEND_PROMPT,
     PluginSettings,
     load_plugin_settings,
 )
@@ -372,3 +374,48 @@ def test_conf_schema_exposes_remote_settings():
         "llm_prefilter_prompt",
     }:
         assert key in schema
+
+
+def test_plugin_settings_manual_init_keeps_prompt_defaults(tmp_path: Path):
+    settings = PluginSettings(
+        plugin_name="astrbot_plugin_goofish_catcher",
+        plugin_data_dir=tmp_path,
+        db_path=tmp_path / "test.db",
+        provider_mode="playwright_local",
+        default_interval_sec=600,
+        default_pages=1,
+        max_pages=2,
+        scheduler_tick_sec=15,
+        max_concurrency=1,
+        fetch_timeout_sec=20,
+        max_retries=3,
+        retry_base_sec=30,
+        retry_max_sec=900,
+        default_new_window_sec=1800,
+        default_drop_abs=50.0,
+        default_drop_pct=0.05,
+        default_cooldown_sec=21600,
+        playwright_storage_state_path=None,
+        playwright_headless=False,
+        playwright_block_assets=True,
+        playwright_force_direct=True,
+        webhook_url=None,
+        remote_base_url=None,
+        remote_api_key=None,
+        remote_headers_json=None,
+        remote_timeout_sec=20,
+        remote_healthcheck_on_init=True,
+        remote_healthcheck_timeout_sec=10,
+        queue_max_size=256,
+        llm_enabled=True,
+        llm_provider_id=None,
+        llm_prefilter_provider_id=None,
+        llm_timeout_sec=25,
+        llm_top_k=3,
+        llm_max_candidates=20,
+        llm_prefilter_enabled=True,
+        llm_prefilter_timeout_sec=6,
+        llm_prefilter_max_items=30,
+    )
+    assert settings.llm_recommend_prompt == DEFAULT_LLM_RECOMMEND_PROMPT
+    assert settings.llm_prefilter_prompt == DEFAULT_LLM_PREFILTER_PROMPT
