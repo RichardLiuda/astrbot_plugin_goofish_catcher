@@ -21,6 +21,7 @@ from .provider import SearchProvider
 from .recommender import GoofishRecommender
 from .storage import SubscriptionStorage
 from .types import (
+    NormalizedItem,
     ProviderError,
     ProviderErrorCode,
     RecommendationCandidate,
@@ -272,12 +273,12 @@ class MonitoringScheduler:
                 # Add a global timeout wrapper to avoid hanging without logs.
                 timeout=max(self.settings.fetch_timeout_sec + 30, 45),
             )
-            items, filter_mode = await self.recommender.prefilter_items(
-                umo=sub.umo,
-                keyword=sub.keyword,
-                items=raw_items,
-            )
             now_ts = int(time.time())
+            items, filter_mode, skipped_filtered = await self._prefilter_subscription_items(
+                sub=sub,
+                raw_items=raw_items,
+                now_ts=now_ts,
+            )
             candidates = await self._process_items(sub, items, now_ts)
             await self.storage.finish_fetch_run(
                 run_id,
@@ -310,11 +311,12 @@ class MonitoringScheduler:
                         sub.id,
                     )
             logger.info(
-                "[goofish_catcher] worker=%s sub=%s success raw=%s filtered=%s candidates=%s prefilter=%s",
+                "[goofish_catcher] worker=%s sub=%s success raw=%s filtered=%s cached_skip=%s candidates=%s prefilter=%s",
                 worker_idx,
                 sub.id,
                 len(raw_items),
                 len(items),
+                skipped_filtered,
                 len(candidates),
                 filter_mode,
             )
@@ -412,6 +414,44 @@ class MonitoringScheduler:
                 exc,
                 exc_info=True,
             )
+
+    async def _prefilter_subscription_items(
+        self,
+        *,
+        sub: Subscription,
+        raw_items: list[NormalizedItem],
+        now_ts: int,
+    ) -> tuple[list[NormalizedItem], str, int]:
+        if not raw_items:
+            return [], "EMPTY", 0
+
+        raw_item_ids = [item.item_id for item in raw_items]
+        filtered_ids = await self.storage.get_filtered_item_ids(sub.id, raw_item_ids)
+        pending_items = [item for item in raw_items if item.item_id not in filtered_ids]
+        if not pending_items:
+            return [], "FILTERED_CACHE_HIT", len(filtered_ids)
+
+        existing_map = await self.storage.get_items_by_ids(
+            sub.id,
+            [item.item_id for item in pending_items],
+        )
+        kept_items, filter_mode = await self.recommender.prefilter_items(
+            umo=sub.umo,
+            keyword=sub.keyword,
+            items=pending_items,
+        )
+        kept_ids = {item.item_id for item in kept_items}
+        rejected_new_items = [
+            item
+            for item in pending_items
+            if item.item_id not in kept_ids and item.item_id not in existing_map
+        ]
+        await self.storage.upsert_filtered_items_bulk(
+            sub.id,
+            rejected_new_items,
+            now_ts,
+        )
+        return kept_items, filter_mode, len(filtered_ids)
 
     async def _process_items(
         self,

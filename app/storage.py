@@ -133,6 +133,31 @@ class SubscriptionStorage:
             )
             await conn.execute("PRAGMA user_version = 1;")
             await conn.commit()
+            version = 1
+
+        if version < 2:
+            await conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS filtered_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sub_id INTEGER NOT NULL,
+                    item_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    publish_time INTEGER DEFAULT NULL,
+                    first_filtered_at INTEGER NOT NULL,
+                    last_filtered_at INTEGER NOT NULL,
+                    FOREIGN KEY(sub_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_filtered_items_sub_item
+                    ON filtered_items (sub_id, item_id);
+                CREATE INDEX IF NOT EXISTS idx_filtered_items_sub_last_filtered
+                    ON filtered_items (sub_id, last_filtered_at DESC);
+                """
+            )
+            await conn.execute("PRAGMA user_version = 2;")
+            await conn.commit()
 
     @staticmethod
     def _row_to_subscription(row: aiosqlite.Row) -> Subscription:
@@ -498,6 +523,24 @@ class SubscriptionStorage:
             )
         return result
 
+    async def get_filtered_item_ids(self, sub_id: int, item_ids: list[str]) -> set[str]:
+        if not item_ids:
+            return set()
+        conn = self._conn_or_raise()
+        deduped_ids = list(dict.fromkeys(item_ids))
+        placeholders = ",".join("?" for _ in deduped_ids)
+        rows = await (
+            await conn.execute(
+                f"""
+                SELECT item_id
+                FROM filtered_items
+                WHERE sub_id = ? AND item_id IN ({placeholders})
+                """,
+                (sub_id, *deduped_ids),
+            )
+        ).fetchall()
+        return {str(row["item_id"]) for row in rows}
+
     async def list_items_by_snapshot(
         self,
         *,
@@ -599,6 +642,44 @@ class SubscriptionStorage:
                     publish_time = COALESCE(excluded.publish_time, items.publish_time),
                     last_seen_at = excluded.last_seen_at,
                     last_price = excluded.last_price
+                """,
+                records,
+            )
+            await conn.commit()
+
+    async def upsert_filtered_items_bulk(
+        self,
+        sub_id: int,
+        items: list[NormalizedItem],
+        now_ts: int,
+    ) -> None:
+        if not items:
+            return
+        conn = self._conn_or_raise()
+        records = [
+            (
+                sub_id,
+                item.item_id,
+                item.title,
+                item.url,
+                item.publish_time,
+                now_ts,
+                now_ts,
+            )
+            for item in items
+        ]
+        async with self._write_lock:
+            await conn.executemany(
+                """
+                INSERT INTO filtered_items (
+                    sub_id, item_id, title, url, publish_time,
+                    first_filtered_at, last_filtered_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sub_id, item_id) DO UPDATE SET
+                    title = excluded.title,
+                    url = excluded.url,
+                    publish_time = COALESCE(excluded.publish_time, filtered_items.publish_time),
+                    last_filtered_at = excluded.last_filtered_at
                 """,
                 records,
             )

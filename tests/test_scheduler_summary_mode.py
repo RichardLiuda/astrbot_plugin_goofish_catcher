@@ -73,6 +73,7 @@ def _make_settings(tmp_path: Path) -> PluginSettings:
 class _FakeStorage:
     def __init__(self):
         self.items: dict[tuple[int, str], ExistingItem] = {}
+        self.filtered_items: set[tuple[int, str]] = set()
         self.notifications: set[tuple[int, str, str, str]] = set()
         self.recommendations_written = 0
 
@@ -103,6 +104,13 @@ class _FakeStorage:
             if (sub_id, item_id) in self.items
         }
 
+    async def get_filtered_item_ids(self, sub_id: int, item_ids: list[str]) -> set[str]:
+        return {
+            item_id
+            for item_id in item_ids
+            if (sub_id, item_id) in self.filtered_items
+        }
+
     async def insert_item(self, sub_id: int, item: NormalizedItem, now_ts: int) -> None:
         self.items[(sub_id, item.item_id)] = ExistingItem(
             sub_id=sub_id,
@@ -123,6 +131,12 @@ class _FakeStorage:
                 await self.update_item(sub_id, item, now_ts)
             else:
                 await self.insert_item(sub_id, item, now_ts)
+
+    async def upsert_filtered_items_bulk(
+        self, sub_id: int, items: list[NormalizedItem], now_ts: int
+    ) -> None:
+        for item in items:
+            self.filtered_items.add((sub_id, item.item_id))
 
     async def update_item(self, sub_id: int, item: NormalizedItem, now_ts: int) -> None:
         old = self.items[(sub_id, item.item_id)]
@@ -216,7 +230,11 @@ class _FakeNotifier:
 
 
 class _FakeRecommender:
+    def __init__(self):
+        self.prefilter_calls = 0
+
     async def prefilter_items(self, *, umo: str, keyword: str, items: list):
+        self.prefilter_calls += 1
         return items, "TEST"
 
     async def analyze(self, *, umo: str, keyword: str, candidates: list, top_k: int):
@@ -239,6 +257,18 @@ class _FakeRecommender:
             used_llm=False,
             fallback_reason="TEST",
         )
+
+
+class _RejectingRecommender:
+    def __init__(self):
+        self.prefilter_calls = 0
+
+    async def prefilter_items(self, *, umo: str, keyword: str, items: list):
+        self.prefilter_calls += 1
+        return [], "REJECT_ALL"
+
+    async def analyze(self, *, umo: str, keyword: str, candidates: list, top_k: int):
+        raise AssertionError("analyze should not be called when all items are filtered")
 
 
 @pytest.mark.asyncio
@@ -315,3 +345,44 @@ async def test_scheduler_does_not_write_notifications_when_summary_send_fails(
 
     assert notifier.summary_calls == 1
     assert len(storage.notifications) == 0
+
+
+@pytest.mark.asyncio
+async def test_scheduler_skips_prefilter_for_previously_rejected_new_items(
+    tmp_path: Path,
+):
+    storage = _FakeStorage()
+    provider = _FakeProvider()
+    notifier = _FakeNotifier()
+    recommender = _RejectingRecommender()
+    scheduler = MonitoringScheduler(
+        context=object(),
+        settings=_make_settings(tmp_path),
+        storage=storage,
+        provider=provider,
+        notifier=notifier,
+        recommender=recommender,
+    )
+    sub = Subscription(
+        id=1,
+        umo="webchat:test",
+        keyword="camera",
+        interval_sec=600,
+        pages=1,
+        drop_abs=50.0,
+        drop_pct=0.05,
+        new_window_sec=3600,
+        cooldown_sec=3600,
+        enabled=True,
+        paused_reason=None,
+        last_run_at=None,
+        next_run_at=None,
+        consecutive_failures=0,
+    )
+
+    await scheduler._process_subscription(sub, worker_idx=0)
+    await scheduler._process_subscription(sub, worker_idx=0)
+
+    assert recommender.prefilter_calls == 1
+    assert notifier.summary_calls == 0
+    assert (sub.id, "1001") in storage.filtered_items

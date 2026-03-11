@@ -23,6 +23,8 @@ DEFAULT_LLM_RECOMMEND_PROMPT = (
     "关键词: $keyword\n"
     "候选条目（最多推荐 $top_k 条）:\n"
     "$candidates_json\n\n"
+    "请优先保证结果真正符合条件，宁缺毋滥，不要为了凑满 $top_k 而强行推荐。"
+    "如果只有少量条目符合条件，可以少于 $top_k 条；如果没有任何条目符合条件，可以返回 0 条。"
     "请输出 JSON，字段必须包含 summary 和 top。"
 )
 

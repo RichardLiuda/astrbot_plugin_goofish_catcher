@@ -165,3 +165,35 @@ async def test_snapshot_items_sorted_by_price_asc(tmp_path: Path):
     assert snapshot_total == 2
     assert [item.item_id for item in snapshot_items] == ["2002", "2001"]
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_filtered_items_roundtrip(tmp_path: Path):
+    db_path = tmp_path / "test.db"
+    storage = SubscriptionStorage(db_path)
+    await storage.initialize()
+
+    sub, _ = await storage.upsert_subscription(
+        umo="qq:group:123",
+        keyword="camera",
+        interval_sec=600,
+        pages=1,
+        drop_abs=50.0,
+        drop_pct=0.05,
+        new_window_sec=1800,
+        cooldown_sec=3600,
+    )
+    now_ts = int(time.time())
+    item = NormalizedItem(
+        item_id="3001",
+        title="Camera Body",
+        price=5000.0,
+        url="https://www.goofish.com/item?id=3001",
+        publish_time=now_ts,
+    )
+
+    await storage.upsert_filtered_items_bulk(sub.id, [item], now_ts)
+    filtered_ids = await storage.get_filtered_item_ids(sub.id, ["3001", "9999"])
+
+    assert filtered_ids == {"3001"}
+    await storage.close()
