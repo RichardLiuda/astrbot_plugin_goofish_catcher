@@ -57,6 +57,12 @@
       "json"
     ]
   },
+  "playwright_executable_path": {
+    "type": "string",
+    "description": "浏览器可执行文件",
+    "hint": "只在本地模式使用；可填写系统 Chrome/Chromium 路径，留空时使用 Playwright 自带 Chromium，例如 `C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`",
+    "default": ""
+  },
   "playwright_block_assets": {
     "type": "bool",
     "description": "拦截资源",

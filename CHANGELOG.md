@@ -2,6 +2,24 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.0.3] - 2026-03-12
+
+### Added
+
+- 新增本地模式 `playwright_executable_path` 配置项，可指定系统 Chrome / Chromium / Edge 可执行文件路径。
+- 远程 Worker 新增 `executable_path` 配置项与 `GOOFISH_WORKER_EXECUTABLE_PATH` 环境变量，支持指定浏览器可执行文件路径。
+
+### Changed
+
+- Playwright Provider 现在会在显式配置浏览器路径时使用 `executable_path` 启动浏览器。
+- `save_state.py` 现在会优先复用本地 WebUI 配置的 `playwright_executable_path`，并在远程模式下兼容 Worker 的浏览器路径配置。
+- README 与 `REMOTE_SETUP.md` 补充自定义浏览器路径配置说明与示例。
+
+### Fixed
+
+- 修复 `save_state.py` 无法跟随本地模式 WebUI 浏览器路径配置的问题。
+- 修复 `save_state.py` 读取带 UTF-8 BOM 的 AstrBot 插件配置文件时可能失败的问题。
+
 ## [1.0.2] - 2026-03-11
 
 ### Added

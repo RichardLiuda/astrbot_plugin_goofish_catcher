@@ -57,6 +57,8 @@ uv run python save_state.py
 mv ./storage_state.json ./worker_data/storage_state.json
 ```
 
+如果已经配置 `worker_config.json` 的 `executable_path`，或者设置了 `GOOFISH_WORKER_EXECUTABLE_PATH`，`save_state.py` 会优先使用同一个浏览器路径。
+
 执行 `save_state.py` 后会打开浏览器，需要在远程主机手动登录闲鱼。
 
 登录态最终建议放在：
@@ -73,6 +75,7 @@ mv ./storage_state.json ./worker_data/storage_state.json
 {
   "data_dir": "./worker_data",
   "storage_state_file": "storage_state.json",
+  "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "max_pages": 2,
   "fetch_timeout_sec": 20,
   "block_assets": true,
@@ -91,9 +94,12 @@ mv ./storage_state.json ./worker_data/storage_state.json
 ```json
 {
   "data_dir": "./worker_data",
-  "storage_state_file": "/Users/yourname/Documents/Code/astrbot_plugin_goofish_catcher/worker_data/storage_state.json"
+  "storage_state_file": "/Users/yourname/Documents/Code/astrbot_plugin_goofish_catcher/worker_data/storage_state.json",
+  "executable_path": "/usr/bin/google-chrome"
 }
 ```
+
+如果你希望 worker 使用系统 Chrome/Chromium 而不是 Playwright 自带 Chromium，请配置 `executable_path` 或环境变量 `GOOFISH_WORKER_EXECUTABLE_PATH`。建议使用绝对路径；显式配置后如果路径不存在或浏览器无法启动，worker 会直接报错，不会回退到 Playwright 自带 Chromium。
 
 ## 五、启动远程 Worker
 
@@ -110,12 +116,20 @@ export GOOFISH_WORKER_CONFIG="/absolute/path/to/worker_config.json"
 uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 ```
 
+如果你不用 `worker_config.json`，也可以直接用环境变量指定浏览器路径：
+
+```bash
+export GOOFISH_WORKER_EXECUTABLE_PATH="/usr/bin/google-chrome"
+uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
+```
+
 如果之前设置过旧环境变量，建议先清掉，避免覆盖 JSON：
 
 ```bash
 unset GOOFISH_WORKER_API_KEY
 unset GOOFISH_WORKER_CF_ACCESS_CLIENT_ID
 unset GOOFISH_WORKER_CF_ACCESS_CLIENT_SECRET
+unset GOOFISH_WORKER_EXECUTABLE_PATH
 unset GOOFISH_WORKER_CONFIG
 ```
 

@@ -66,6 +66,15 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _as_optional_path(value: Any) -> Path | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
+
+
 def _first_file(raw_value: Any) -> str | None:
     if isinstance(raw_value, list) and raw_value:
         first = raw_value[0]
@@ -144,6 +153,7 @@ class PluginSettings:
     default_drop_pct: float
     default_cooldown_sec: int
     playwright_storage_state_path: Path | None
+    playwright_executable_path: Path | None
     playwright_headless: bool
     playwright_block_assets: bool
     playwright_force_direct: bool
@@ -236,6 +246,9 @@ def load_plugin_settings(
     webhook_url = str(raw.get("webhook_url", "")).strip() or None
     remote_base_url = str(raw.get("remote_base_url", "")).strip() or None
     remote_api_key = str(raw.get("remote_api_key", "")).strip() or None
+    playwright_executable_path = _as_optional_path(
+        raw.get("playwright_executable_path")
+    )
     remote_headers_json = _normalize_remote_headers(raw, plugin_name=plugin_name)
     llm_provider_id = str(raw.get("llm_provider_id", "")).strip() or None
     llm_prefilter_provider_id = (
@@ -277,6 +290,7 @@ def load_plugin_settings(
         default_drop_pct=max(0.0, _as_float(raw.get("default_drop_pct"), 0.05)),
         default_cooldown_sec=max(60, _as_int(raw.get("default_cooldown_sec"), 21600)),
         playwright_storage_state_path=storage_state_path,
+        playwright_executable_path=playwright_executable_path,
         playwright_headless=False,
         playwright_block_assets=_as_bool(raw.get("playwright_block_assets"), True),
         playwright_force_direct=_as_bool(raw.get("playwright_force_direct"), True),

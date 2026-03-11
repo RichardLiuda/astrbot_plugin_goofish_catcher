@@ -75,6 +75,11 @@ def build_worker_settings_from_env() -> PluginSettings:
             storage_state_path = plugin_data_dir / storage_state_path
     else:
         storage_state_path = plugin_data_dir / "storage_state.json"
+    executable_path = _cfg_optional_str(
+        config,
+        "executable_path",
+        "GOOFISH_WORKER_EXECUTABLE_PATH",
+    )
 
     return PluginSettings(
         plugin_name="goofish_worker",
@@ -103,6 +108,9 @@ def build_worker_settings_from_env() -> PluginSettings:
         default_drop_pct=0.05,
         default_cooldown_sec=21600,
         playwright_storage_state_path=storage_state_path,
+        playwright_executable_path=(
+            Path(executable_path).expanduser() if executable_path else None
+        ),
         playwright_headless=False,
         playwright_block_assets=_cfg_bool(
             config,

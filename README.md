@@ -71,6 +71,8 @@ uv run python -m playwright install chromium chromium-headless-shell
 
 3. 启动 AstrBot，插件会自动加载
 
+如果你希望本地模式改用系统 Chrome/Chromium，可在插件配置里填写 `playwright_executable_path`。
+
 ## 远程 Worker（`remote_rest`）
 
 远程模式下，AstrBot 插件只负责调度与通知，浏览器、登录态和抓取都放在远端 worker 上。
@@ -86,6 +88,8 @@ uv run python -m playwright install chromium chromium-headless-shell
 ```powershell
 uv run python .\save_state.py
 ```
+
+如果已经配置了 `worker_config.json` 里的 `executable_path`，或者设置了 `GOOFISH_WORKER_EXECUTABLE_PATH`，`save_state.py` 会优先使用同一个浏览器路径。
 
 建议把生成的 `storage_state.json` 放到单独目录，例如：
 
@@ -104,6 +108,7 @@ Move-Item .\storage_state.json .\worker_data\storage_state.json -Force
 {
   "data_dir": "./worker_data",
   "storage_state_file": "./worker_data/storage_state.json",
+  "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "cf_access_client_id": "<your-cf-client-id>",
   "cf_access_client_secret": "<your-cf-client-secret>",
   "max_pages": 2,
@@ -131,6 +136,7 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 ```powershell
 $env:GOOFISH_WORKER_DATA_DIR = ".\worker_data"
 $env:GOOFISH_WORKER_STORAGE_STATE_FILE = "storage_state.json"
+$env:GOOFISH_WORKER_EXECUTABLE_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
 $env:GOOFISH_WORKER_CF_ACCESS_CLIENT_ID = "<your-cf-client-id>"
 $env:GOOFISH_WORKER_CF_ACCESS_CLIENT_SECRET = "<your-cf-client-secret>"
 uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
@@ -196,6 +202,8 @@ CF-Access-Client-Secret: <your-cf-client-secret>
 uv run python .\save_state.py
 ```
 
+如果 worker 侧已经配置 `executable_path` / `GOOFISH_WORKER_EXECUTABLE_PATH`，这个脚本也会优先使用相同浏览器。
+
 2. 移动到插件数据目录（可选但推荐）
 
 ```powershell
@@ -211,12 +219,24 @@ Move-Item .\storage_state.json .\data\plugin_data\astrbot_plugin_goofish_catcher
 uv run python ./save_state.py
 ```
 
+如果 worker 侧已经配置 `executable_path` / `GOOFISH_WORKER_EXECUTABLE_PATH`，这个脚本也会优先使用相同浏览器。
+
 2. 移动到插件数据目录（可选但推荐）
 
 ```bash
 mkdir -p ./data/plugin_data/astrbot_plugin_goofish_catcher
 mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storage_state.json
 ```
+
+### 如需改用系统 Chrome / Chromium
+
+在 WebUI 中额外设置 `playwright_executable_path`，建议填写绝对路径。
+
+- Windows 示例：`C:\Program Files\Google\Chrome\Application\chrome.exe`
+- macOS 示例：`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+- Linux 示例：`/usr/bin/google-chrome`
+
+如果显式配置了这个路径，但路径不存在或浏览器启动失败，插件会直接报错，不会静默回退到 Playwright 自带 Chromium。
 
 ### 在 WebUI 中生效
 
@@ -297,6 +317,7 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 | ------------------------------- | ------------- | ------ |
 | `provider_mode`                 | 抓取模式，支持本地或远程  | `"playwright_local"` |
 | `playwright_storage_state_file` | 登录态 JSON 文件   | `[]`   |
+| `playwright_executable_path`    | 本地浏览器可执行文件路径 | `""`   |
 | `playwright_block_assets`       | 是否拦截图片/字体/媒体  | `true` |
 | `playwright_force_direct`       | 是否强制直连禁用代理    | `true` |
 | `webhook_url`                   | 可选 Webhook 地址 | `""`   |

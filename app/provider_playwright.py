@@ -18,6 +18,7 @@ except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 from .config import PluginSettings
+from .provider import ProviderConfigurationError
 from .types import NormalizedItem, ProviderError, ProviderErrorCode
 
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
@@ -31,6 +32,7 @@ class PlaywrightSearchProvider:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._init_lock = asyncio.Lock()
+        self._configured_executable_path = self._validate_executable_path()
 
     def _build_launch_args(self) -> list[str]:
         args = ["--disable-blink-features=AutomationControlled"]
@@ -44,6 +46,35 @@ class PlaywrightSearchProvider:
                 ]
             )
         return args
+
+    def _validate_executable_path(self) -> Path | None:
+        executable_path = self.settings.playwright_executable_path
+        if executable_path is None:
+            return None
+
+        candidate = executable_path.expanduser()
+        if not candidate.exists():
+            raise ProviderConfigurationError(
+                f"playwright_executable_path does not exist: {candidate}"
+            )
+        if not candidate.is_file():
+            raise ProviderConfigurationError(
+                f"playwright_executable_path is not a file: {candidate}"
+            )
+        return candidate
+
+    def _build_launch_kwargs(
+        self,
+        *,
+        executable_path: Path | str | None = None,
+    ) -> dict[str, Any]:
+        launch_kwargs: dict[str, Any] = {
+            "headless": self.settings.playwright_headless,
+            "args": self._build_launch_args(),
+        }
+        if executable_path is not None:
+            launch_kwargs["executable_path"] = str(executable_path)
+        return launch_kwargs
 
     async def close(self) -> None:
         if self._browser is not None:
@@ -70,11 +101,20 @@ class PlaywrightSearchProvider:
 
             try:
                 browser = await playwright.chromium.launch(
-                    headless=self.settings.playwright_headless,
-                    args=self._build_launch_args(),
+                    **self._build_launch_kwargs(
+                        executable_path=self._configured_executable_path
+                    )
                 )
             except PlaywrightError as exc:
                 message = str(exc)
+                if self._configured_executable_path is not None:
+                    await playwright.stop()
+                    raise ProviderError(
+                        ProviderErrorCode.DEPENDENCY_MISSING,
+                        "failed to launch configured playwright executable: "
+                        f"{self._configured_executable_path}: {message}",
+                        retry_after_sec=1800,
+                    ) from exc
                 if (
                     self.settings.playwright_headless
                     and "Executable doesn't exist" in message
@@ -84,9 +124,9 @@ class PlaywrightSearchProvider:
                     if chromium_exec and Path(chromium_exec).exists():
                         try:
                             browser = await playwright.chromium.launch(
-                                headless=self.settings.playwright_headless,
-                                executable_path=chromium_exec,
-                                args=self._build_launch_args(),
+                                **self._build_launch_kwargs(
+                                    executable_path=chromium_exec
+                                )
                             )
                         except PlaywrightError as fallback_exc:
                             await playwright.stop()
