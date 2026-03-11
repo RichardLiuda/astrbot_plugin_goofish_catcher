@@ -39,11 +39,6 @@
 - 查询命令支持空格关键词与 `--pages/-p` 参数
 - WebUI 配置项支持推荐模型与初筛模型下拉选择
 
-### 暂未实现
-
-- 插件直连远程 Playwright/CDP（如 `playwright_remote_cdp`）
-- 订阅级更细粒度策略（例如更复杂的过滤模板）
-
 ### 当前无法实现
 
 - 经检验当前无法稳定支持 **无头模式抓取闲鱼**，因此本版本强制使用有头浏览器。
@@ -135,7 +130,7 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 
 ```powershell
 $env:GOOFISH_WORKER_DATA_DIR = ".\worker_data"
-$env:GOOFISH_WORKER_STORAGE_STATE_FILE = ".\worker_data\storage_state.json"
+$env:GOOFISH_WORKER_STORAGE_STATE_FILE = "storage_state.json"
 $env:GOOFISH_WORKER_CF_ACCESS_CLIENT_ID = "<your-cf-client-id>"
 $env:GOOFISH_WORKER_CF_ACCESS_CLIENT_SECRET = "<your-cf-client-secret>"
 uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
@@ -383,5 +378,5 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 - 闲鱼页面结构变化可能导致 `PARSE_ERROR`。
 - 高频抓取可能触发风控，建议低并发 + 合理间隔。
 - 本插件没做验证码绕过。
-  - 欢迎大佬狠狠pr（欧尼该）
+  - 欢迎大佬狠狠用pr灌注鼠鼠（欧尼该）
 
