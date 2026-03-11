@@ -7,20 +7,12 @@
 ### Added
 
 - 新增 `filtered_items` 持久化表，用于缓存“首次出现且被筛掉”的商品。
-- 新增订阅轮询回归测试，覆盖“首次被筛掉后后续直接跳过”的行为。
-- 新增存储层测试，覆盖 `filtered_items` 的写入与查询。
 
 ### Changed
 
 - 订阅轮询现在会先跳过已被筛掉的新商品，避免重复进入 `prefilter`。
 - `llm_recommend_prompt` 默认示例改为明确要求“优先返回真正符合条件的结果”，可少于 `top_k`，也可返回 `0` 条。
 - 轮询成功日志补充 `cached_skip` 统计，便于观察被缓存跳过的条目数量。
-
-### Tested
-
-- `uv run pytest -q tests/test_scheduler_summary_mode.py`
-- `uv run pytest -q tests/test_storage.py`
-- `uv run pytest -q tests/test_provider_behaviors.py`
 
 ## [1.0.1] - 2026-03-09
 
@@ -78,7 +70,6 @@
 
 - 新增 `playwright_force_direct` 配置项，支持 Playwright 强制直连并禁用系统代理。
 - 新增登录态脚本 `save_state.py`，可直接生成 `storage_state.json`。
-- 补充查询参数和 Playwright 行为测试，覆盖 `-p/--pages` 多种写法与直连参数。
 
 ### Changed
 

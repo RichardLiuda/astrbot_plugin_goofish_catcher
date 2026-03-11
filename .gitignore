@@ -212,9 +212,6 @@ ai-report.md
 deep-research-report.md
 test
 test/
+tests/
 storage_state.json
 worker_config.json
-
-# Local-only tests
-tests/test_remote_runtime.py
-tests/test_worker_server.py

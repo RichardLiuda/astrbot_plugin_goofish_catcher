@@ -12,23 +12,17 @@
 - 里面有涉及到Cloudflare Zero Trust的相关配置，用于内网穿透，如果有公网ip就不需要配置（不过既然都有公网ip的服务器能跑playright的话，感觉也不需要用到这个功能吧）
 - 如果有不懂的地方或者表达不清晰之处，可以先尝试问ai，或者直接提交issue，鼠鼠看到会第一时间帮助解答的喵
 
-鼠鼠的linux服务器太垃圾了，带不动，所以linux和mac环境下的本地`playwright`暂时还没进行完整测试，请见谅！
-
 如果有大佬能贡献一下pr的话，感激不尽！
 
 如果觉得插件有帮助，欢迎star！Ciallo～(∠・ω< )⌒★
 
-
-
 ## 环境要求
-
 
 | 依赖         | 建议版本    | 说明                   |
 | ---------- | ------- | -------------------- |
 | Python     | >= 3.10 | 与 AstrBot 运行环境一致     |
 | AstrBot    | >= 4.x  | 需要指令系统 + Provider 能力 |
 | Playwright | 最新稳定版   | 用于闲鱼页面抓取             |
-
 
 ## 版本进度（TODO）
 
@@ -241,7 +235,6 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 
 ## 指令说明（AstrBot 行为）
 
-
 | 指令                                    | 作用      | 行为说明                                       |
 | ------------------------------------- | ------- | ------------------------------------------ |
 | `/闲鱼 订阅 <关键词> [interval_sec] [pages]` | 新建/更新订阅 | 保存订阅后会自动触发一次检查入队                           |
@@ -253,7 +246,6 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 | `/闲鱼 查询 <关键词...> [--pages N]`         | 免订阅查询   | 直接抓取并返回推荐；支持空格关键词，末尾可用 `--pages`/`-p` 指定页数 |
 | `/闲鱼 明细 <关键词> [limit]`                | 查看缓存明细  | 读取该订阅最近一次缓存快照，不重新抓取                        |
 | `/闲鱼 状态`                              | 运行状态    | 查看调度器、队列、Provider、DB 与当前会话订阅概况             |
-
 
 ## 关键行为规则
 
@@ -282,7 +274,6 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 
 ### 抓取与调度
 
-
 | 配置项                    | 说明            | 默认值   |
 | ---------------------- | ------------- | ----- |
 | `default_interval_sec` | 默认轮询间隔（秒）     | `600` |
@@ -296,9 +287,7 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 | `retry_base_sec`       | 重试基础退避（秒）     | `30`  |
 | `retry_max_sec`        | 重试最大退避（秒）     | `900` |
 
-
 ### 事件阈值
-
 
 | 配置项                      | 说明          | 默认值     |
 | ------------------------ | ----------- | ------- |
@@ -307,9 +296,7 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 | `default_drop_pct`       | 相对降价阈值（0-1） | `0.05`  |
 | `default_cooldown_sec`   | 同类通知冷却（秒）   | `21600` |
 
-
 ### Playwright 与通知
-
 
 | 配置项                             | 说明            | 默认值    |
 | ------------------------------- | ------------- | ------ |
@@ -321,7 +308,6 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 
 ### 远程 Provider
 
-
 | 配置项                           | 说明                                      | 默认值    |
 | ----------------------------- | --------------------------------------- | ------ |
 | `remote_base_url`             | 远程 worker 的基础地址                          | `""`   |
@@ -331,9 +317,7 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 | `remote_healthcheck_on_init`  | 初始化时是否先探测远程 `/health`                   | `true` |
 | `remote_healthcheck_timeout_sec` | 初始化远程健康检查超时（秒）                       | `10`   |
 
-
 ### LLM 推荐
-
 
 | 配置项                         | 说明             | 默认值    |
 | --------------------------- | -------------- | ------ |
@@ -346,7 +330,6 @@ mv ./storage_state.json ./data/plugin_data/astrbot_plugin_goofish_catcher/storag
 | `llm_prefilter_enabled`     | 是否启用 LLM 初筛    | `true` |
 | `llm_prefilter_timeout_sec` | 初筛超时（秒）        | `6`    |
 | `llm_prefilter_max_items`   | 初筛最大商品数        | `30`   |
-
 
 ## 数据落盘位置
 

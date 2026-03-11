@@ -123,7 +123,7 @@ unset GOOFISH_WORKER_CONFIG
 
 ## 六、验证本地 Worker 是否正常
 
-先在远程主机本机测试：
+先在远程主机本机验证：
 
 ```bash
 curl http://127.0.0.1:8787/health
@@ -298,7 +298,7 @@ AstrBot WebUI 中找到插件 `astrbot_plugin_goofish_catcher`，填写：
 - `远程地址：https://worker.example.com`
 - `远程健康详情：ok=True, provider=playwright_local, auth=disabled, storage_state=yes`
 
-然后再测试一次实际搜索：
+然后再验证一次实际搜索：
 
 ```text
 /闲鱼 查询 iPhone
