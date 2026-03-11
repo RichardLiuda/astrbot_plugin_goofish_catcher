@@ -251,7 +251,7 @@ class PlaywrightSearchProvider:
                 captured_payloads.append(payload)
 
         page.on("response", on_response)
-        search_url = self._build_search_url(keyword=keyword, page_index=page_index)
+        search_url = self._build_search_url(keyword=keyword)
 
         try:
             await page.goto(
@@ -270,6 +270,22 @@ class PlaywrightSearchProvider:
                     ProviderErrorCode.CAPTCHA,
                     "captcha detected on goofish page",
                 )
+
+            if page_index > 1:
+                # Goofish keeps the browser URL stable and drives pagination
+                # through the bottom pager + search API payload pageNumber.
+                await self._wait_for_items_ready(
+                    page=page,
+                    captured_payloads=captured_payloads,
+                    timeout_ms=timeout_ms,
+                )
+                captured_payloads.clear()
+                await self._navigate_to_page_index(
+                    page=page,
+                    page_index=page_index,
+                    timeout_ms=timeout_ms,
+                )
+                await self._maybe_wait_for_network_idle(page, timeout_ms)
 
             items = await self._wait_for_items_ready(
                 page=page,
@@ -330,11 +346,62 @@ class PlaywrightSearchProvider:
                 exc,
             )
 
-    def _build_search_url(self, *, keyword: str, page_index: int) -> str:
-        base = f"{self.BASE_URL}/search?q={quote(keyword)}"
-        if page_index > 1:
-            base = f"{base}&page={page_index}"
-        return base
+    def _build_search_url(self, *, keyword: str) -> str:
+        return f"{self.BASE_URL}/search?q={quote(keyword)}"
+
+    async def _navigate_to_page_index(
+        self,
+        *,
+        page,
+        page_index: int,
+        timeout_ms: int,
+    ) -> None:
+        pager_timeout_ms = max(2500, min(10000, timeout_ms // 2))
+        await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+        await page.wait_for_timeout(600)
+        await page.wait_for_selector(
+            "div[class*='search-pagination-page-box'], "
+            "input[class*='search-pagination-to-page-input']",
+            timeout=pager_timeout_ms,
+        )
+
+        target_text = str(page_index)
+        page_boxes = page.locator("div[class*='search-pagination-page-box']")
+        target = None
+        for idx in range(await page_boxes.count()):
+            candidate = page_boxes.nth(idx)
+            try:
+                if (await candidate.inner_text()).strip() == target_text:
+                    target = candidate
+                    break
+            except Exception:
+                continue
+
+        if target is not None:
+            await target.click(timeout=pager_timeout_ms)
+        else:
+            page_input = page.locator(
+                "input[class*='search-pagination-to-page-input']"
+            ).first
+            confirm_button = page.locator(
+                "button[class*='search-pagination-to-page-confirm-button']"
+            ).first
+            await page_input.fill(target_text, timeout=pager_timeout_ms)
+            await confirm_button.click(timeout=pager_timeout_ms)
+
+        await page.wait_for_function(
+            """
+            (pageIndex) => {
+              const active = document.querySelector(
+                "div[class*='search-pagination-page-box-active']"
+              );
+              return active && active.innerText.trim() === String(pageIndex);
+            }
+            """,
+            arg=page_index,
+            timeout=pager_timeout_ms,
+        )
+        await page.wait_for_timeout(600)
 
     async def _extract_items_from_dom(self, page) -> list[NormalizedItem]:
         try:
