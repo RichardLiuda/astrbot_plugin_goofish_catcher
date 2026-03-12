@@ -297,12 +297,15 @@ class GoofishRecommender:
                 continue
             cand = by_id[item_id]
             score = _safe_float(row.get("score"), default=0.0)
+            score = max(0.0, min(100.0, score))
+            if score < self.settings.llm_min_score:
+                continue
             reason = str(row.get("reason", "")).strip() or "模型未提供理由。"
             risk = str(row.get("risk", "")).strip() or "未提供风险提示。"
             top.append(
                 RecommendationItem(
                     item_id=item_id,
-                    score=max(0.0, min(100.0, score)),
+                    score=score,
                     reason=reason,
                     risk=risk,
                     title=cand.title,
@@ -346,6 +349,8 @@ class GoofishRecommender:
 
         top: list[RecommendationItem] = []
         for cand, score, reason, risk in scored[:top_k]:
+            if score < self.settings.llm_min_score:
+                continue
             top.append(
                 RecommendationItem(
                     item_id=cand.item_id,

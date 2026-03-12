@@ -170,6 +170,7 @@ class PluginSettings:
     llm_prefilter_provider_id: str | None
     llm_timeout_sec: int
     llm_top_k: int
+    llm_min_score: float
     llm_max_candidates: int
     llm_prefilter_enabled: bool
     llm_prefilter_timeout_sec: int
@@ -313,6 +314,7 @@ def load_plugin_settings(
         llm_prefilter_provider_id=llm_prefilter_provider_id,
         llm_timeout_sec=max(5, _as_int(raw.get("llm_timeout_sec"), 25)),
         llm_top_k=max(1, _as_int(raw.get("llm_top_k"), 3)),
+        llm_min_score=max(0.0, min(100.0, _as_float(raw.get("llm_min_score"), 0.0))),
         llm_max_candidates=max(1, _as_int(raw.get("llm_max_candidates"), 20)),
         llm_recommend_prompt=llm_recommend_prompt,
         llm_prefilter_enabled=_as_bool(raw.get("llm_prefilter_enabled"), True),

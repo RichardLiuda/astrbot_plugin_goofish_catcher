@@ -371,11 +371,12 @@ class GoofishCatcherPlugin(Star):
                     candidates=candidates,
                     top_k=self.settings.llm_top_k,
                 )
-                await self.scheduler.persist_notifications(
-                    sub_id=sub.id,
-                    candidates=candidates,
-                    sent_at=now_ts,
-                )
+                if recommendation.top:
+                    await self.scheduler.persist_notifications(
+                        sub_id=sub.id,
+                        candidates=candidates,
+                        sent_at=now_ts,
+                    )
                 yield event.plain_result(_render_recommendation_preview(recommendation))
                 return
             except asyncio.TimeoutError:

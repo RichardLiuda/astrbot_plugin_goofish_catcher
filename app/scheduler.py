@@ -295,20 +295,27 @@ class MonitoringScheduler:
                     candidates=candidates,
                     top_k=self.settings.llm_top_k,
                 )
-                sent = await self.notifier.send_recommendation_summary(
-                    umo=sub.umo,
-                    recommendation=recommendation,
-                )
-                if sent:
-                    await self.persist_notifications(
-                        sub_id=sub.id,
-                        candidates=candidates,
-                        sent_at=now_ts,
+                if recommendation.top:
+                    sent = await self.notifier.send_recommendation_summary(
+                        umo=sub.umo,
+                        recommendation=recommendation,
                     )
+                    if sent:
+                        await self.persist_notifications(
+                            sub_id=sub.id,
+                            candidates=candidates,
+                            sent_at=now_ts,
+                        )
+                    else:
+                        logger.warning(
+                            "[goofish_catcher] sub=%s summary send failed, skip notification dedupe write",
+                            sub.id,
+                        )
                 else:
-                    logger.warning(
-                        "[goofish_catcher] sub=%s summary send failed, skip notification dedupe write",
+                    logger.info(
+                        "[goofish_catcher] sub=%s no recommendation above min_score=%s, skip push",
                         sub.id,
+                        self.settings.llm_min_score,
                     )
             logger.info(
                 "[goofish_catcher] worker=%s sub=%s success raw=%s filtered=%s cached_skip=%s candidates=%s prefilter=%s",

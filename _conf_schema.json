@@ -197,6 +197,12 @@
     "hint": "建议 3-5，过大可读性会变差",
     "default": 3
   },
+  "llm_min_score": {
+    "type": "float",
+    "description": "最低推荐分",
+    "hint": "低于该分数的商品不会出现在最终推荐中；0 表示不过滤，建议范围 0-100",
+    "default": 0.0
+  },
   "llm_max_candidates": {
     "type": "int",
     "description": "参与推荐分析的最大候选数",

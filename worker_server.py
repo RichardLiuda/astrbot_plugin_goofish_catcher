@@ -137,6 +137,7 @@ def build_worker_settings_from_env() -> PluginSettings:
         llm_prefilter_provider_id=None,
         llm_timeout_sec=25,
         llm_top_k=3,
+        llm_min_score=0.0,
         llm_max_candidates=20,
         llm_prefilter_enabled=False,
         llm_prefilter_timeout_sec=6,
