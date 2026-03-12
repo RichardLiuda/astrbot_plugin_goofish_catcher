@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Any
 from datetime import datetime
+from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
+from .app.admin_server import AdminWebuiServer
 from .app.config import PROVIDER_MODE_REMOTE_REST, PluginSettings, load_plugin_settings
 from .app.notifier import Notifier
 from .app.provider import (
@@ -54,12 +55,126 @@ class GoofishCatcherPlugin(Star):
         self._provider_health_checked_at: int | None = None
         self._ready = False
         self._loaded = False
+        self._admin_webui = AdminWebuiServer(self)
         self._start_lock = asyncio.Lock()
+        self._reload_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        self.storage = SubscriptionStorage(self.settings.db_path)
-        await self.storage.initialize()
+        async with self._reload_lock:
+            self.settings = load_plugin_settings(
+                self.config,
+                PLUGIN_NAME,
+                plugin_data_dir=StarTools.get_data_dir(PLUGIN_NAME),
+            )
+            self.storage = SubscriptionStorage(self.settings.db_path)
+            await self.storage.initialize()
+            await self._configure_runtime()
+        await self._ensure_admin_webui_started()
 
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self) -> None:
+        self._loaded = True
+        async with self._start_lock:
+            if not self._ready:
+                logger.warning("[goofish_catcher] skip start, plugin not ready")
+                return
+            if self._provider_error:
+                logger.warning(
+                    "[goofish_catcher] skip scheduler start, provider unavailable: %s",
+                    self._provider_error,
+                )
+                return
+            if self.scheduler is None:
+                logger.warning("[goofish_catcher] skip start, scheduler is missing")
+                return
+            await self.scheduler.start()
+
+    async def terminate(self) -> None:
+        await self._safe_close("admin_webui", self._admin_webui.stop)
+        await self._close_runtime(close_storage=True)
+        self._ready = False
+        self._loaded = False
+
+    async def reload_runtime(self) -> dict[str, Any]:
+        async with self._reload_lock:
+            previous_admin = (
+                self.settings.admin_webui_enabled,
+                self.settings.admin_webui_host,
+                self.settings.admin_webui_port,
+            )
+            await self._close_runtime(close_storage=False)
+            self.settings = load_plugin_settings(
+                self.config,
+                PLUGIN_NAME,
+                plugin_data_dir=StarTools.get_data_dir(PLUGIN_NAME),
+            )
+            if self.storage is None:
+                self.storage = SubscriptionStorage(self.settings.db_path)
+                await self.storage.initialize()
+            await self._configure_runtime()
+            await self._ensure_admin_webui_started(allow_stop=False)
+            current_admin = (
+                self.settings.admin_webui_enabled,
+                self.settings.admin_webui_host,
+                self.settings.admin_webui_port,
+            )
+            return {
+                "reloaded": True,
+                "provider_mode": self.settings.provider_mode,
+                "provider_error": self._provider_error,
+                "admin_server_restart_required": previous_admin != current_admin,
+                "admin_url": self.admin_webui_url,
+            }
+
+    async def refresh_provider_health(
+        self,
+        *,
+        force: bool = False,
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        if self.provider is None:
+            if force:
+                self._provider_health = None
+                self._provider_health_checked_at = int(time.time())
+            return self._provider_health, self._provider_health_checked_at
+        if self.settings.provider_mode != PROVIDER_MODE_REMOTE_REST:
+            if force:
+                self._provider_health = None
+                self._provider_health_checked_at = int(time.time())
+            return self._provider_health, self._provider_health_checked_at
+        try:
+            (
+                self._provider_health,
+                self._provider_health_checked_at,
+            ) = await _run_remote_provider_healthcheck(
+                self.provider,
+                self.settings,
+                ignore_disabled=force,
+            )
+        except ProviderError as exc:
+            self._provider_health = {
+                "ok": False,
+                "provider": self.settings.provider_mode,
+                "provider_error": exc.message,
+            }
+            self._provider_health_checked_at = int(time.time())
+            raise
+        return self._provider_health, self._provider_health_checked_at
+
+    @property
+    def admin_webui_url(self) -> str | None:
+        if not self.settings.admin_webui_enabled:
+            return None
+        return (
+            f"http://{self.settings.admin_webui_host}:"
+            f"{self.settings.admin_webui_port}"
+        )
+
+    async def _configure_runtime(self) -> None:
+        self._provider_error = None
+        self._provider_health = None
+        self._provider_health_checked_at = None
+        self.provider = None
+        self.scheduler = None
         self.notifier = Notifier(
             context=self.context,
             webhook_url=self.settings.webhook_url,
@@ -81,7 +196,7 @@ class GoofishCatcherPlugin(Star):
         except (ProviderDependencyError, ProviderConfigurationError, ProviderError) as exc:
             self._provider_error = str(exc)
             if self.provider is not None:
-                await self.provider.close()
+                await self._safe_close("provider", self.provider.close)
                 self.provider = None
             self._ready = True
             logger.error(
@@ -92,7 +207,7 @@ class GoofishCatcherPlugin(Star):
         except Exception as exc:
             self._provider_error = str(exc)
             if self.provider is not None:
-                await self.provider.close()
+                await self._safe_close("provider", self.provider.close)
                 self.provider = None
             self._ready = True
             logger.error(
@@ -102,6 +217,8 @@ class GoofishCatcherPlugin(Star):
             )
             return
 
+        if self.storage is None:
+            raise RuntimeError("storage is not initialized")
         self.scheduler = MonitoringScheduler(
             context=self.context,
             settings=self.settings,
@@ -119,46 +236,39 @@ class GoofishCatcherPlugin(Star):
         if self._loaded:
             await self._ensure_scheduler_started()
 
-    @filter.on_astrbot_loaded()
-    async def on_astrbot_loaded(self) -> None:
-        self._loaded = True
-        async with self._start_lock:
-            if not self._ready:
-                logger.warning("[goofish_catcher] skip start, plugin not ready")
-                return
-            if self._provider_error:
-                logger.warning(
-                    "[goofish_catcher] skip scheduler start, provider unavailable: %s",
-                    self._provider_error,
-                )
-                return
-            if self.scheduler is None:
-                logger.warning("[goofish_catcher] skip start, scheduler is missing")
-                return
-            await self.scheduler.start()
-
-    async def terminate(self) -> None:
-        async def _safe_close(name: str, closer) -> None:
-            try:
-                await closer()
-            except Exception as exc:
-                logger.error(
-                    "[goofish_catcher] failed to close %s: %s",
-                    name,
-                    exc,
-                    exc_info=True,
-                )
-
+    async def _close_runtime(self, *, close_storage: bool) -> None:
         if self.scheduler is not None:
-            await _safe_close("scheduler", self.scheduler.stop)
+            await self._safe_close("scheduler", self.scheduler.stop)
         if self.notifier is not None:
-            await _safe_close("notifier", self.notifier.close)
+            await self._safe_close("notifier", self.notifier.close)
         if self.provider is not None:
-            await _safe_close("provider", self.provider.close)
-        if self.storage is not None:
-            await _safe_close("storage", self.storage.close)
+            await self._safe_close("provider", self.provider.close)
+        if close_storage and self.storage is not None:
+            await self._safe_close("storage", self.storage.close)
+            self.storage = None
+        self.scheduler = None
+        self.notifier = None
+        self.provider = None
+        self.recommender = None
         self._ready = False
-        self._loaded = False
+
+    async def _ensure_admin_webui_started(self, *, allow_stop: bool = True) -> None:
+        if self.settings.admin_webui_enabled:
+            await self._admin_webui.start()
+            return
+        if allow_stop and self._admin_webui.running:
+            await self._admin_webui.stop()
+
+    async def _safe_close(self, name: str, closer) -> None:
+        try:
+            await closer()
+        except Exception as exc:
+            logger.error(
+                "[goofish_catcher] failed to close %s: %s",
+                name,
+                exc,
+                exc_info=True,
+            )
 
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):
@@ -573,6 +683,7 @@ class GoofishCatcherPlugin(Star):
             f"- Provider 可用：{self._provider_error is None}",
             f"- Provider 错误：{self._provider_error or '-'}",
             f"- DB：{self.settings.db_path}",
+            f"- Admin WebUI：{self.admin_webui_url or '-'}",
         ]
         lines.extend(
             _render_remote_status_lines(
@@ -610,10 +721,12 @@ def _format_ts(ts: int | None) -> str:
 async def _run_remote_provider_healthcheck(
     provider: SearchProvider,
     settings: PluginSettings,
+    *,
+    ignore_disabled: bool = False,
 ) -> tuple[dict[str, Any] | None, int | None]:
     if settings.provider_mode != PROVIDER_MODE_REMOTE_REST:
         return None, None
-    if not settings.remote_healthcheck_on_init:
+    if not ignore_disabled and not settings.remote_healthcheck_on_init:
         return None, None
 
     healthcheck = getattr(provider, "healthcheck", None)

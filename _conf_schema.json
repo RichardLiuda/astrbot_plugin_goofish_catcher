@@ -238,5 +238,29 @@
     "description": "筛选提示词",
     "hint": "结果筛选阶段使用；支持 `$keyword`、`$items_json` 两个占位符",
     "default": "关键词: $keyword\n商品列表: $items_json\n请只做“商品相关性筛选”，忽略价格、功能优劣、成色。\n输出 JSON: {\"keep_item_ids\": [\"...\"]}"
+  },
+  "admin_webui_enabled": {
+    "type": "bool",
+    "description": "启用管理后台",
+    "hint": "开启后会在插件进程内启动 WebUI 管理端口",
+    "default": false
+  },
+  "admin_webui_host": {
+    "type": "string",
+    "description": "后台监听地址",
+    "hint": "默认绑定 `127.0.0.1`，建议通过反向代理或隧道暴露",
+    "default": "127.0.0.1"
+  },
+  "admin_webui_port": {
+    "type": "int",
+    "description": "后台监听端口",
+    "hint": "默认 `8790`，避免与现有 worker 端口冲突",
+    "default": 8790
+  },
+  "admin_webui_api_key": {
+    "type": "string",
+    "description": "后台 API Key",
+    "hint": "登录 WebUI 使用；启用后台时建议务必配置",
+    "default": ""
   }
 }

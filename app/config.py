@@ -18,6 +18,9 @@ SUPPORTED_PROVIDER_MODES = {
     PROVIDER_MODE_PLAYWRIGHT_LOCAL,
     PROVIDER_MODE_REMOTE_REST,
 }
+ADMIN_RUNTIME_CONFIG_NAME = "admin_runtime_config.json"
+DEFAULT_ADMIN_WEBUI_HOST = "127.0.0.1"
+DEFAULT_ADMIN_WEBUI_PORT = 8790
 
 DEFAULT_LLM_RECOMMEND_PROMPT = (
     "关键词: $keyword\n"
@@ -168,15 +171,64 @@ class PluginSettings:
     llm_enabled: bool
     llm_provider_id: str | None
     llm_prefilter_provider_id: str | None
-    llm_timeout_sec: int
-    llm_top_k: int
-    llm_min_score: float
-    llm_max_candidates: int
-    llm_prefilter_enabled: bool
-    llm_prefilter_timeout_sec: int
-    llm_prefilter_max_items: int
+    llm_timeout_sec: int = 25
+    llm_top_k: int = 3
+    llm_min_score: float = 0.0
+    llm_max_candidates: int = 20
+    llm_prefilter_enabled: bool = True
+    llm_prefilter_timeout_sec: int = 6
+    llm_prefilter_max_items: int = 30
     llm_recommend_prompt: str = DEFAULT_LLM_RECOMMEND_PROMPT
     llm_prefilter_prompt: str = DEFAULT_LLM_PREFILTER_PROMPT
+    admin_webui_enabled: bool = False
+    admin_webui_host: str = DEFAULT_ADMIN_WEBUI_HOST
+    admin_webui_port: int = DEFAULT_ADMIN_WEBUI_PORT
+    admin_webui_api_key: str | None = None
+
+
+def get_runtime_override_path(plugin_data_dir: Path) -> Path:
+    return Path(plugin_data_dir) / ADMIN_RUNTIME_CONFIG_NAME
+
+
+def load_runtime_overrides(plugin_data_dir: Path) -> dict[str, Any]:
+    path = get_runtime_override_path(plugin_data_dir)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error(
+            "[goofish_catcher] failed to load admin runtime config %s: %s",
+            path,
+            exc,
+        )
+        return {}
+    if not isinstance(payload, dict):
+        logger.error(
+            "[goofish_catcher] ignore admin runtime config %s because root is not an object",
+            path,
+        )
+        return {}
+    return payload
+
+
+def save_runtime_overrides(plugin_data_dir: Path, overrides: dict[str, Any]) -> Path:
+    path = get_runtime_override_path(plugin_data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(overrides, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def load_effective_raw_config(
+    config: dict[str, Any] | None,
+    plugin_data_dir: Path,
+) -> dict[str, Any]:
+    raw = dict(config or {})
+    raw.update(load_runtime_overrides(plugin_data_dir))
+    return raw
 
 
 def load_plugin_settings(
@@ -184,10 +236,9 @@ def load_plugin_settings(
     plugin_name: str,
     plugin_data_dir: Path,
 ) -> PluginSettings:
-    raw = dict(config or {})
-
     plugin_data_dir = Path(plugin_data_dir)
     plugin_data_dir.mkdir(parents=True, exist_ok=True)
+    raw = load_effective_raw_config(config, plugin_data_dir)
     db_path = plugin_data_dir / "goofish_catcher.db"
 
     requested_provider_mode = str(
@@ -263,6 +314,15 @@ def load_plugin_settings(
         str(raw.get("llm_prefilter_prompt", "")).strip()
         or DEFAULT_LLM_PREFILTER_PROMPT
     )
+    admin_webui_host = (
+        str(raw.get("admin_webui_host", DEFAULT_ADMIN_WEBUI_HOST)).strip()
+        or DEFAULT_ADMIN_WEBUI_HOST
+    )
+    admin_webui_api_key = str(raw.get("admin_webui_api_key", "")).strip() or None
+    admin_webui_port = max(
+        1,
+        min(65535, _as_int(raw.get("admin_webui_port"), DEFAULT_ADMIN_WEBUI_PORT)),
+    )
 
     default_interval_sec = max(30, _as_int(raw.get("default_interval_sec"), 600))
     default_pages = max(1, _as_int(raw.get("default_pages"), 1))
@@ -323,4 +383,8 @@ def load_plugin_settings(
         ),
         llm_prefilter_max_items=max(1, _as_int(raw.get("llm_prefilter_max_items"), 30)),
         llm_prefilter_prompt=llm_prefilter_prompt,
+        admin_webui_enabled=_as_bool(raw.get("admin_webui_enabled"), False),
+        admin_webui_host=admin_webui_host,
+        admin_webui_port=admin_webui_port,
+        admin_webui_api_key=admin_webui_api_key,
     )
