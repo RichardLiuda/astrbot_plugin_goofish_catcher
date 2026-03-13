@@ -259,6 +259,50 @@ class GoofishCatcherPlugin(Star):
         if allow_stop and self._admin_webui.running:
             await self._admin_webui.stop()
 
+    async def _run_immediate_subscription_check(
+        self,
+        *,
+        umo: str,
+        sub,
+    ) -> RecommendationResult:
+        if self.scheduler is None:
+            raise RuntimeError("调度器未启动。")
+
+        acquired = await self.scheduler.try_acquire_subscription(sub.id)
+        if not acquired:
+            raise RuntimeError("该订阅当前正在执行，请稍后重试。")
+
+        try:
+            items = await asyncio.wait_for(
+                self.provider.search(
+                    keyword=sub.keyword,
+                    pages=max(1, min(sub.pages, self.settings.max_pages)),
+                    timeout_sec=self.settings.fetch_timeout_sec,
+                ),
+                timeout=max(self.settings.fetch_timeout_sec + 30, 45),
+            )
+            now_ts = int(time.time())
+            candidates = await self.scheduler.process_manual_fetch(
+                sub=sub,
+                items=items,
+                now_ts=now_ts,
+            )
+            recommendation = await self.recommender.analyze(
+                umo=umo,
+                keyword=sub.keyword,
+                candidates=candidates,
+                top_k=self.settings.llm_top_k,
+            )
+            if recommendation.top:
+                await self.scheduler.persist_notifications(
+                    sub_id=sub.id,
+                    candidates=candidates,
+                    sent_at=now_ts,
+                )
+            return recommendation
+        finally:
+            await self.scheduler.release_subscription(sub.id)
+
     async def _safe_close(self, name: str, closer) -> None:
         try:
             await closer()
@@ -454,39 +498,11 @@ class GoofishCatcherPlugin(Star):
                     f"订阅 {keyword} 当前处于暂停状态（{sub.paused_reason or 'manual'}），请先执行 /闲鱼 恢复 {keyword}"
                 )
                 return
-            acquired = await self.scheduler.try_acquire_subscription(sub.id)
-            if not acquired:
-                yield event.plain_result(
-                    "没有任务被加入队列（可能已在执行或队列已满）。"
-                )
-                return
             try:
-                items = await asyncio.wait_for(
-                    self.provider.search(
-                        keyword=sub.keyword,
-                        pages=max(1, min(sub.pages, self.settings.max_pages)),
-                        timeout_sec=self.settings.fetch_timeout_sec,
-                    ),
-                    timeout=max(self.settings.fetch_timeout_sec + 30, 45),
-                )
-                now_ts = int(time.time())
-                candidates = await self.scheduler.process_manual_fetch(
-                    sub=sub,
-                    items=items,
-                    now_ts=now_ts,
-                )
-                recommendation = await self.recommender.analyze(
+                recommendation = await self._run_immediate_subscription_check(
                     umo=event.unified_msg_origin,
-                    keyword=sub.keyword,
-                    candidates=candidates,
-                    top_k=self.settings.llm_top_k,
+                    sub=sub,
                 )
-                if recommendation.top:
-                    await self.scheduler.persist_notifications(
-                        sub_id=sub.id,
-                        candidates=candidates,
-                        sent_at=now_ts,
-                    )
                 yield event.plain_result(_render_recommendation_preview(recommendation))
                 return
             except asyncio.TimeoutError:
@@ -508,23 +524,61 @@ class GoofishCatcherPlugin(Star):
             except Exception as exc:
                 yield event.plain_result(f"立即检查失败：{exc}")
                 return
-            finally:
-                await self.scheduler.release_subscription(sub.id)
 
-        enqueued = 0
+        checked_count = 0
+        result_sections: list[str] = []
         subscriptions = await self.storage.list_subscriptions_by_umo(
             event.unified_msg_origin
         )
         for sub in subscriptions:
             if not sub.enabled:
                 continue
-            if await self.scheduler.enqueue_manual_check(sub.id):
-                enqueued += 1
+            checked_count += 1
+            try:
+                recommendation = await self._run_immediate_subscription_check(
+                    umo=event.unified_msg_origin,
+                    sub=sub,
+                )
+                result_sections.append(_render_recommendation_preview(recommendation))
+            except asyncio.TimeoutError:
+                result_sections.append(
+                    _render_manual_check_error(
+                        keyword=sub.keyword,
+                        message=(
+                            f"立即检查超时（>{max(self.settings.fetch_timeout_sec + 30, 45)}s），请稍后重试。"
+                        ),
+                    )
+                )
+            except ProviderError as exc:
+                if exc.code in {
+                    ProviderErrorCode.DEPENDENCY_MISSING,
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    ProviderErrorCode.CAPTCHA,
+                }:
+                    await self.storage.pause_subscription(sub.id, exc.code.value)
+                result_sections.append(
+                    _render_manual_check_error(
+                        keyword=sub.keyword,
+                        message=f"立即检查失败：{exc.code.value}\n{exc.message}",
+                    )
+                )
+            except Exception as exc:
+                result_sections.append(
+                    _render_manual_check_error(
+                        keyword=sub.keyword,
+                        message=f"立即检查失败：{exc}",
+                    )
+                )
 
-        if enqueued == 0:
-            yield event.plain_result("没有任务被加入队列（可能已在执行或队列已满）。")
+        if checked_count == 0:
+            yield event.plain_result("没有可执行的订阅，请先创建并启用订阅。")
             return
-        yield event.plain_result(f"已提交 {enqueued} 个任务到检查队列。")
+        yield event.plain_result(
+            _render_batch_manual_check_results(
+                total_subscriptions=checked_count,
+                sections=result_sections,
+            )
+        )
 
     @goofish.command("查询", alias={"query", "search", "inspect"})
     async def query_once(
@@ -806,6 +860,27 @@ def _render_recommendation_preview(recommendation: RecommendationResult) -> str:
         lines.append(f"   链接：{item.url}")
     lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
     return "\n".join(lines)
+
+
+def _render_manual_check_error(keyword: str, message: str) -> str:
+    return f"【立即检查】关键词：{keyword}\n{message}"
+
+
+def _render_batch_manual_check_results(
+    *,
+    total_subscriptions: int,
+    sections: list[str],
+) -> str:
+    if not sections:
+        return "没有可展示的立即检查结果。"
+    if len(sections) == 1:
+        return sections[0]
+    return "\n\n".join(
+        [
+            f"【立即检查】共执行 {total_subscriptions} 个订阅，结果如下：",
+            *sections,
+        ]
+    )
 
 
 def _build_query_candidates(
