@@ -14,6 +14,8 @@ from .admin_types import (
     OverviewAlert,
     PriceHistoryPoint,
     RelatedSubscription,
+    SubscriptionItemSummary,
+    SubscriptionOption,
     TrendBucket,
 )
 from .types import ExistingItem, NormalizedItem, Subscription
@@ -42,6 +44,44 @@ class SubscriptionStorage:
         if self._conn is None:
             raise RuntimeError("storage is not initialized")
         return self._conn
+
+    @staticmethod
+    def _normalize_sort_order(sort_order: str) -> str:
+        return "ASC" if str(sort_order).lower() == "asc" else "DESC"
+
+    def _item_summary_order_clause(self, sort_by: str, sort_order: str) -> str:
+        direction = self._normalize_sort_order(sort_order)
+        mapping = {
+            "price": f"price {direction}, last_seen_at DESC, item_id DESC",
+            "publish_time": f"publish_time {direction}, last_seen_at DESC, item_id DESC",
+            "title": f"title {direction}, last_seen_at DESC, item_id DESC",
+            "subscription_count": (
+                f"subscription_count {direction}, last_seen_at DESC, item_id DESC"
+            ),
+            "last_seen_at": f"last_seen_at {direction}, item_id DESC",
+        }
+        return mapping.get(sort_by, mapping["last_seen_at"])
+
+    def _subscription_item_order_clause(self, sort_by: str, sort_order: str) -> str:
+        direction = self._normalize_sort_order(sort_order)
+        mapping = {
+            "price": (
+                f"s.enabled DESC, i.last_price {direction}, i.last_seen_at DESC, "
+                "s.id DESC, i.id DESC"
+            ),
+            "publish_time": (
+                f"s.enabled DESC, i.publish_time {direction}, i.last_seen_at DESC, "
+                "s.id DESC, i.id DESC"
+            ),
+            "title": (
+                f"s.enabled DESC, i.title {direction}, i.last_seen_at DESC, "
+                "s.id DESC, i.id DESC"
+            ),
+            "last_seen_at": (
+                f"s.enabled DESC, i.last_seen_at {direction}, s.id DESC, i.id DESC"
+            ),
+        }
+        return mapping.get(sort_by, mapping["last_seen_at"])
 
     async def _apply_migrations(self) -> None:
         conn = self._conn_or_raise()
@@ -1001,89 +1041,163 @@ class SubscriptionStorage:
         self,
         *,
         search: str = "",
+        sub_id: int | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        sort_by: str = "last_seen_at",
+        sort_order: str = "desc",
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[ItemSummary], int]:
         conn = self._conn_or_raise()
         text = search.strip()
-        where_sql = ""
+        where_parts: list[str] = []
         params: list[object] = []
         if text:
-            where_sql = """
-                WHERE item_id LIKE ?
-                   OR title LIKE ?
-                   OR url LIKE ?
-            """
+            where_parts.append(
+                """
+                (
+                    item_id LIKE ?
+                    OR title LIKE ?
+                    OR url LIKE ?
+                )
+                """
+            )
             like = f"%{text}%"
             params.extend([like, like, like])
+        if sub_id is not None:
+            where_parts.append("sub_id = ?")
+            params.append(sub_id)
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        summary_filters: list[str] = []
+        summary_params: list[object] = []
+        if min_price is not None:
+            summary_filters.append("price >= ?")
+            summary_params.append(min_price)
+        if max_price is not None:
+            summary_filters.append("price <= ?")
+            summary_params.append(max_price)
+        summary_where_sql = (
+            f"WHERE {' AND '.join(summary_filters)}" if summary_filters else ""
+        )
+        order_clause = self._item_summary_order_clause(sort_by, sort_order)
 
         count_row = await (
             await conn.execute(
                 f"""
-                SELECT COUNT(*) AS cnt
-                FROM (
-                    SELECT item_id
-                    FROM items
+                WITH item_summary AS (
+                    SELECT
+                        base.item_id AS item_id,
+                        (
+                            SELECT i2.title
+                            FROM items i2
+                            WHERE i2.item_id = base.item_id
+                            ORDER BY i2.last_seen_at DESC, i2.id DESC
+                            LIMIT 1
+                        ) AS title,
+                        (
+                            SELECT i2.url
+                            FROM items i2
+                            WHERE i2.item_id = base.item_id
+                            ORDER BY i2.last_seen_at DESC, i2.id DESC
+                            LIMIT 1
+                        ) AS url,
+                        COALESCE(
+                            (
+                                SELECT i2.last_price
+                                FROM items i2
+                                WHERE i2.item_id = base.item_id
+                                ORDER BY i2.last_seen_at DESC, i2.id DESC
+                                LIMIT 1
+                            ),
+                            0
+                        ) AS price,
+                        (
+                            SELECT i2.publish_time
+                            FROM items i2
+                            WHERE i2.item_id = base.item_id
+                            ORDER BY i2.last_seen_at DESC, i2.id DESC
+                            LIMIT 1
+                        ) AS publish_time,
+                        MIN(base.first_seen_at) AS first_seen_at,
+                        MAX(base.last_seen_at) AS last_seen_at,
+                        COUNT(DISTINCT base.sub_id) AS subscription_count,
+                        (
+                            SELECT n.event_type
+                            FROM notifications n
+                            WHERE n.item_id = base.item_id
+                            ORDER BY n.sent_at DESC, n.id DESC
+                            LIMIT 1
+                        ) AS latest_event_type
+                    FROM items base
                     {where_sql}
-                    GROUP BY item_id
-                ) grouped
+                    GROUP BY base.item_id
+                )
+                SELECT COUNT(*) AS cnt
+                FROM item_summary
+                {summary_where_sql}
                 """,
-                tuple(params),
+                (*params, *summary_params),
             )
         ).fetchone()
         rows = await (
             await conn.execute(
                 f"""
-                SELECT
-                    base.item_id AS item_id,
-                    (
-                        SELECT i2.title
-                        FROM items i2
-                        WHERE i2.item_id = base.item_id
-                        ORDER BY i2.last_seen_at DESC, i2.id DESC
-                        LIMIT 1
-                    ) AS title,
-                    (
-                        SELECT i2.url
-                        FROM items i2
-                        WHERE i2.item_id = base.item_id
-                        ORDER BY i2.last_seen_at DESC, i2.id DESC
-                        LIMIT 1
-                    ) AS url,
-                    COALESCE(
+                WITH item_summary AS (
+                    SELECT
+                        base.item_id AS item_id,
                         (
-                            SELECT i2.last_price
+                            SELECT i2.title
                             FROM items i2
                             WHERE i2.item_id = base.item_id
                             ORDER BY i2.last_seen_at DESC, i2.id DESC
                             LIMIT 1
-                        ),
-                        0
-                    ) AS price,
-                    (
-                        SELECT i2.publish_time
-                        FROM items i2
-                        WHERE i2.item_id = base.item_id
-                        ORDER BY i2.last_seen_at DESC, i2.id DESC
-                        LIMIT 1
-                    ) AS publish_time,
-                    MIN(base.first_seen_at) AS first_seen_at,
-                    MAX(base.last_seen_at) AS last_seen_at,
-                    COUNT(DISTINCT base.sub_id) AS subscription_count,
-                    (
-                        SELECT n.event_type
-                        FROM notifications n
-                        WHERE n.item_id = base.item_id
-                        ORDER BY n.sent_at DESC, n.id DESC
-                        LIMIT 1
-                    ) AS latest_event_type
-                FROM items base
-                {where_sql}
-                GROUP BY base.item_id
-                ORDER BY MAX(base.last_seen_at) DESC, base.item_id DESC
+                        ) AS title,
+                        (
+                            SELECT i2.url
+                            FROM items i2
+                            WHERE i2.item_id = base.item_id
+                            ORDER BY i2.last_seen_at DESC, i2.id DESC
+                            LIMIT 1
+                        ) AS url,
+                        COALESCE(
+                            (
+                                SELECT i2.last_price
+                                FROM items i2
+                                WHERE i2.item_id = base.item_id
+                                ORDER BY i2.last_seen_at DESC, i2.id DESC
+                                LIMIT 1
+                            ),
+                            0
+                        ) AS price,
+                        (
+                            SELECT i2.publish_time
+                            FROM items i2
+                            WHERE i2.item_id = base.item_id
+                            ORDER BY i2.last_seen_at DESC, i2.id DESC
+                            LIMIT 1
+                        ) AS publish_time,
+                        MIN(base.first_seen_at) AS first_seen_at,
+                        MAX(base.last_seen_at) AS last_seen_at,
+                        COUNT(DISTINCT base.sub_id) AS subscription_count,
+                        (
+                            SELECT n.event_type
+                            FROM notifications n
+                            WHERE n.item_id = base.item_id
+                            ORDER BY n.sent_at DESC, n.id DESC
+                            LIMIT 1
+                        ) AS latest_event_type
+                    FROM items base
+                    {where_sql}
+                    GROUP BY base.item_id
+                )
+                SELECT *
+                FROM item_summary
+                {summary_where_sql}
+                ORDER BY {order_clause}
                 LIMIT ? OFFSET ?
                 """,
-                (*params, max(1, limit), max(0, offset)),
+                (*params, *summary_params, max(1, limit), max(0, offset)),
             )
         ).fetchall()
         total = int(count_row["cnt"]) if count_row else 0
@@ -1097,6 +1211,145 @@ class SubscriptionStorage:
                 first_seen_at=int(row["first_seen_at"]),
                 last_seen_at=int(row["last_seen_at"]),
                 subscription_count=int(row["subscription_count"]),
+                latest_event_type=row["latest_event_type"],
+            )
+            for row in rows
+        ]
+        return items, total
+
+    async def list_subscription_options(
+        self,
+        *,
+        enabled: bool | None = None,
+    ) -> list[SubscriptionOption]:
+        conn = self._conn_or_raise()
+        where_sql = ""
+        params: list[object] = []
+        if enabled is not None:
+            where_sql = "WHERE enabled = ?"
+            params.append(1 if enabled else 0)
+        rows = await (
+            await conn.execute(
+                f"""
+                SELECT id, keyword, umo, enabled, paused_reason
+                FROM subscriptions
+                {where_sql}
+                ORDER BY enabled DESC, keyword COLLATE NOCASE ASC, id DESC
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        return [
+            SubscriptionOption(
+                id=int(row["id"]),
+                keyword=str(row["keyword"]),
+                umo=str(row["umo"]),
+                enabled=bool(row["enabled"]),
+                paused_reason=row["paused_reason"],
+            )
+            for row in rows
+        ]
+
+    async def list_items_by_subscription(
+        self,
+        *,
+        search: str = "",
+        sub_id: int | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        sort_by: str = "last_seen_at",
+        sort_order: str = "desc",
+        limit: int = 120,
+        offset: int = 0,
+    ) -> tuple[list[SubscriptionItemSummary], int]:
+        conn = self._conn_or_raise()
+        text = search.strip()
+        where_parts: list[str] = []
+        params: list[object] = []
+        if text:
+            where_parts.append(
+                """
+                (
+                    i.item_id LIKE ?
+                    OR i.title LIKE ?
+                    OR i.url LIKE ?
+                    OR s.keyword LIKE ?
+                    OR s.umo LIKE ?
+                )
+                """
+            )
+            like = f"%{text}%"
+            params.extend([like, like, like, like, like])
+        if sub_id is not None:
+            where_parts.append("s.id = ?")
+            params.append(sub_id)
+        if min_price is not None:
+            where_parts.append("COALESCE(i.last_price, 0) >= ?")
+            params.append(min_price)
+        if max_price is not None:
+            where_parts.append("COALESCE(i.last_price, 0) <= ?")
+            params.append(max_price)
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        order_clause = self._subscription_item_order_clause(sort_by, sort_order)
+
+        count_row = await (
+            await conn.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM items i
+                JOIN subscriptions s ON s.id = i.sub_id
+                {where_sql}
+                """,
+                tuple(params),
+            )
+        ).fetchone()
+        rows = await (
+            await conn.execute(
+                f"""
+                SELECT
+                    s.id AS sub_id,
+                    s.keyword AS keyword,
+                    s.umo AS umo,
+                    s.enabled AS enabled,
+                    s.paused_reason AS paused_reason,
+                    i.item_id AS item_id,
+                    i.title AS title,
+                    i.url AS url,
+                    COALESCE(i.last_price, 0) AS price,
+                    i.publish_time AS publish_time,
+                    i.first_seen_at AS first_seen_at,
+                    i.last_seen_at AS last_seen_at,
+                    (
+                        SELECT n.event_type
+                        FROM notifications n
+                        WHERE n.sub_id = s.id AND n.item_id = i.item_id
+                        ORDER BY n.sent_at DESC, n.id DESC
+                        LIMIT 1
+                    ) AS latest_event_type
+                FROM items i
+                JOIN subscriptions s ON s.id = i.sub_id
+                {where_sql}
+                ORDER BY {order_clause}
+                LIMIT ? OFFSET ?
+                """,
+                (*params, max(1, limit), max(0, offset)),
+            )
+        ).fetchall()
+        total = int(count_row["cnt"]) if count_row else 0
+        items = [
+            SubscriptionItemSummary(
+                sub_id=int(row["sub_id"]),
+                keyword=str(row["keyword"]),
+                umo=str(row["umo"]),
+                enabled=bool(row["enabled"]),
+                paused_reason=row["paused_reason"],
+                item_id=str(row["item_id"]),
+                title=str(row["title"]),
+                url=str(row["url"]),
+                price=float(row["price"] or 0.0),
+                publish_time=row["publish_time"],
+                first_seen_at=int(row["first_seen_at"]),
+                last_seen_at=int(row["last_seen_at"]),
                 latest_event_type=row["latest_event_type"],
             )
             for row in rows

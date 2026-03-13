@@ -350,9 +350,69 @@ a {
   padding-bottom: 20px;
 }
 
+.managed-table table {
+  width: 100%;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.managed-table .table-primary-cell {
+  width: 32%;
+  min-width: 0;
+}
+
+.table-primary-copy {
+  min-width: 0;
+}
+
+.item-primary-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  max-height: 4.9rem;
+  overflow: hidden;
+}
+
+.table-primary-title,
+.table-primary-meta {
+  display: block;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.item-primary-title {
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.table-primary-meta {
+  margin-top: 4px;
+}
+
 .compact-table .MuiTableCell-root {
   padding-top: 14px;
   padding-bottom: 14px;
+}
+
+.managed-table .table-action-cell {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  white-space: nowrap;
+  background: rgba(253, 250, 244, 0.98);
+  box-shadow: -10px 0 18px rgba(112, 93, 60, 0.06);
+}
+
+.managed-table .MuiTableHead .table-action-cell {
+  z-index: 3;
+  background: rgba(249, 244, 233, 0.98);
+}
+
+.managed-table .MuiTableBody .MuiTableRow-hover:hover .table-action-cell {
+  background: rgba(248, 243, 234, 0.98);
 }
 
 .table-actions {
@@ -648,6 +708,10 @@ a {
 
   .table-actions {
     justify-content: flex-start;
+  }
+
+  .managed-table .table-primary-cell {
+    width: auto;
   }
 }
 

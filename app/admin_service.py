@@ -201,15 +201,59 @@ class AdminService:
         preview = await self._run_query(keyword=keyword, page_count=page_count)
         return {"preview": preview}
 
+    async def list_subscription_options(self) -> dict[str, Any]:
+        options = await self.storage.list_subscription_options()
+        return {
+            "items": [asdict(option) for option in options],
+            "total": len(options),
+        }
+
     async def list_items(
         self,
         *,
         search: str = "",
+        sub_id: int | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        sort_by: str = "last_seen_at",
+        sort_order: str = "desc",
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
         items, total = await self.storage.list_item_summaries(
             search=search,
+            sub_id=sub_id,
+            min_price=min_price,
+            max_price=max_price,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "items": [asdict(item) for item in items],
+            "total": total,
+        }
+
+    async def list_items_by_subscription(
+        self,
+        *,
+        search: str = "",
+        sub_id: int | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        sort_by: str = "last_seen_at",
+        sort_order: str = "desc",
+        limit: int = 120,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        items, total = await self.storage.list_items_by_subscription(
+            search=search,
+            sub_id=sub_id,
+            min_price=min_price,
+            max_price=max_price,
+            sort_by=sort_by,
+            sort_order=sort_order,
             limit=limit,
             offset=offset,
         )

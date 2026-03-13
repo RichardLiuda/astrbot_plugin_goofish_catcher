@@ -1234,19 +1234,25 @@ function SubscriptionsPage({ notify }) {
 				${items.length
 					? html`
 							<${TableContainer}
-								className="table-wrap relaxed-table"
+								className="table-wrap relaxed-table managed-table"
 							>
 								<${Table} size="small">
 									<${TableHead}>
 										<${TableRow}>
-											<${TableCell}>关键词<//>
+											<${TableCell} className="table-primary-cell"
+												>关键词<//>
 											<${TableCell}>UMO<//>
 											<${TableCell}>状态<//>
 											<${TableCell}>频率<//>
 											<${TableCell}>规则<//>
 											<${TableCell}>最近执行<//>
 											<${TableCell}>失败<//>
-											<${TableCell} align="right">操作<//>
+											<${TableCell}
+												align="right"
+												className="table-action-cell"
+											>
+												操作
+											<//>
 										<//>
 									<//>
 									<${TableBody}>
@@ -1260,17 +1266,23 @@ function SubscriptionsPage({ notify }) {
 													key=${item.id}
 													hover=${true}
 												>
-													<${TableCell}>
-														<${Typography}
-															variant="subtitle2"
-															>${item.keyword}<//
-														>
-														<${Typography}
-															variant="caption"
-															color="text.secondary"
-														>
-															#${item.id}
-														<//>
+													<${TableCell}
+														className="table-primary-cell"
+													>
+														<div className="table-primary-copy">
+															<${Typography}
+																variant="subtitle2"
+																className="table-primary-title"
+																>${item.keyword}<//
+															>
+															<${Typography}
+																variant="caption"
+																color="text.secondary"
+																className="table-primary-meta"
+															>
+																#${item.id}
+															<//>
+														</div>
 													<//>
 													<${TableCell}
 														>${item.umo}<//
@@ -1343,7 +1355,10 @@ function SubscriptionsPage({ notify }) {
 													<${TableCell}
 														>${item.consecutive_failures}<//
 													>
-													<${TableCell} align="right">
+													<${TableCell}
+														align="right"
+														className="table-action-cell"
+													>
 														<div
 															className="table-actions"
 														>
@@ -1429,7 +1444,7 @@ function SubscriptionsPage({ notify }) {
 	`
 }
 
-function ItemsPage({ notify }) {
+function LegacyItemsPage({ notify }) {
 	const [search, setSearch] = useState('')
 	const [items, setItems] = useState([])
 	const [total, setTotal] = useState(0)
@@ -1501,17 +1516,23 @@ function ItemsPage({ notify }) {
 				${items.length
 					? html`
 							<${TableContainer}
-								className="table-wrap relaxed-table"
+								className="table-wrap relaxed-table managed-table"
 							>
 								<${Table} size="small">
 									<${TableHead}>
 										<${TableRow}>
-											<${TableCell}>商品<//>
+											<${TableCell} className="table-primary-cell"
+												>商品<//>
 											<${TableCell}>价格<//>
 											<${TableCell}>最近发现<//>
 											<${TableCell}>订阅数<//>
 											<${TableCell}>最新事件<//>
-											<${TableCell} align="right">详情<//>
+											<${TableCell}
+												align="right"
+												className="table-action-cell"
+											>
+												详情
+											<//>
 										<//>
 									<//>
 									<${TableBody}>
@@ -1521,17 +1542,23 @@ function ItemsPage({ notify }) {
 													key=${item.item_id}
 													hover=${true}
 												>
-													<${TableCell}>
-														<${Typography}
-															variant="subtitle2"
-															>${item.title}<//
-														>
-														<${Typography}
-															variant="caption"
-															color="text.secondary"
-														>
-															${item.item_id}
-														<//>
+													<${TableCell}
+														className="table-primary-cell"
+													>
+														<div className="table-primary-copy">
+															<${Typography}
+																variant="subtitle2"
+																className="table-primary-title"
+																>${item.title}<//
+															>
+															<${Typography}
+																variant="caption"
+																color="text.secondary"
+																className="table-primary-meta"
+															>
+																${item.item_id}
+															<//>
+														</div>
 													<//>
 													<${TableCell}
 														>${formatMoney(
@@ -1550,7 +1577,10 @@ function ItemsPage({ notify }) {
 														>${item.latest_event_type ||
 														'-'}<//
 													>
-													<${TableCell} align="right">
+													<${TableCell}
+														align="right"
+														className="table-action-cell"
+													>
 														<${Button}
 															size="small"
 															onClick=${() =>
@@ -1944,6 +1974,1019 @@ function ItemsPage({ notify }) {
 																			`
 																		}
 																	)}
+															<//>
+														<//>
+													<//>
+												`
+											: html`<${EmptyState}
+													title="暂无抓取记录"
+													description="开始抓取后这里会展示每次执行的结果。"
+												/>`}
+									<//>
+								<//>
+							`
+						: html`
+								<${Box}
+									sx=${{
+										display: 'grid',
+										placeItems: 'center',
+										minHeight: 240
+									}}
+								>
+									<${CircularProgress} />
+								<//>
+							`}
+				<//>
+			<//>
+		<//>
+	`
+}
+
+function ItemsPage({ notify }) {
+	const [filters, setFilters] = useState({
+		search: '',
+		subId: '',
+		view: 'flat',
+		minPrice: '',
+		maxPrice: '',
+		sortBy: 'last_seen_at',
+		sortOrder: 'desc'
+	})
+	const [items, setItems] = useState([])
+	const [total, setTotal] = useState(0)
+	const [loading, setLoading] = useState(true)
+	const [detail, setDetail] = useState(null)
+	const [drawerOpen, setDrawerOpen] = useState(false)
+	const [subscriptionOptions, setSubscriptionOptions] = useState([])
+
+	const deferredSearch = useDeferredValue(filters.search)
+
+	async function loadSubscriptionOptions() {
+		try {
+			const payload = await api('/api/subscriptions/options')
+			startTransition(() => {
+				setSubscriptionOptions(payload.items || [])
+			})
+		} catch (error) {
+			notify(error.message, 'error')
+		}
+	}
+
+	async function load() {
+		try {
+			const params = new URLSearchParams({
+				search: deferredSearch,
+				sort_by: filters.sortBy,
+				sort_order: filters.sortOrder
+			})
+			if (filters.subId) {
+				params.set('sub_id', filters.subId)
+			}
+			if (filters.minPrice !== '') {
+				params.set('min_price', filters.minPrice)
+			}
+			if (filters.maxPrice !== '') {
+				params.set('max_price', filters.maxPrice)
+			}
+			const endpoint =
+				filters.view === 'by_subscription'
+					? '/api/items/by-subscription'
+					: '/api/items'
+			const payload = await api(`${endpoint}?${params.toString()}`)
+			startTransition(() => {
+				setItems(payload.items || [])
+				setTotal(payload.total || 0)
+			})
+		} catch (error) {
+			notify(error.message, 'error')
+		} finally {
+			setLoading(false)
+		}
+	}
+
+	useEffect(() => {
+		loadSubscriptionOptions()
+	}, [])
+
+	useEffect(() => {
+		if (
+			filters.view === 'by_subscription' &&
+			filters.sortBy === 'subscription_count'
+		) {
+			setFilters((current) => ({
+				...current,
+				sortBy: 'last_seen_at'
+			}))
+		}
+	}, [filters.view, filters.sortBy])
+
+	useEffect(() => {
+		setLoading(true)
+		load()
+	}, [
+		deferredSearch,
+		filters.subId,
+		filters.view,
+		filters.minPrice,
+		filters.maxPrice,
+		filters.sortBy,
+		filters.sortOrder
+	])
+
+	async function loadItemDetail(itemId, reset = false) {
+		if (reset) {
+			setDetail(null)
+		}
+		const payload = await api(`/api/items/${itemId}`)
+		startTransition(() => setDetail(payload.item))
+		return payload.item
+	}
+
+	async function openDetail(itemId) {
+		setDrawerOpen(true)
+		try {
+			await loadItemDetail(itemId, true)
+		} catch (error) {
+			setDrawerOpen(false)
+			notify(error.message, 'error')
+		}
+	}
+
+	async function runSubscriptionAction(subId, action, itemId = '') {
+		try {
+			await api(`/api/subscriptions/${subId}/${action}`, {
+				method: 'POST'
+			})
+			await loadSubscriptionOptions()
+			await load()
+			if (itemId) {
+				await loadItemDetail(itemId)
+			}
+			notify(
+				action === 'check' ? '订阅已执行检查' : '订阅状态已更新',
+				'success'
+			)
+		} catch (error) {
+			notify(error.message, 'error')
+		}
+	}
+
+	function focusSubscription(subId) {
+		setFilters((current) => ({
+			...current,
+			subId: String(subId),
+			view: 'by_subscription'
+		}))
+	}
+
+	const groupedItems = []
+	if (filters.view === 'by_subscription') {
+		const groups = new Map()
+		for (const entry of items) {
+			if (!groups.has(entry.sub_id)) {
+				const chip = statusChipProps(
+					entry.enabled,
+					entry.paused_reason
+				)
+				const group = {
+					sub_id: entry.sub_id,
+					keyword: entry.keyword,
+					umo: entry.umo,
+					enabled: entry.enabled,
+					paused_reason: entry.paused_reason,
+					statusLabel: chip.label,
+					statusColor: chip.color,
+					statusVariant: chip.variant,
+					last_seen_at: entry.last_seen_at,
+					items: []
+				}
+				groups.set(entry.sub_id, group)
+				groupedItems.push(group)
+			}
+			const group = groups.get(entry.sub_id)
+			group.items.push(entry)
+			group.last_seen_at = Math.max(
+				group.last_seen_at || 0,
+				entry.last_seen_at || 0
+			)
+		}
+	}
+
+	const detailItem = detail?.item
+	const selectedSubscription =
+		subscriptionOptions.find(
+			(option) => String(option.id) === String(filters.subId || '')
+		) || null
+	const hasCustomFilters = Boolean(
+		filters.search.trim() ||
+			filters.subId ||
+			filters.view !== 'flat' ||
+			filters.minPrice !== '' ||
+			filters.maxPrice !== '' ||
+			filters.sortBy !== 'last_seen_at' ||
+			filters.sortOrder !== 'desc'
+	)
+
+	return html`
+		<${Stack} spacing=${UI.pageGap} className="page-enter page-stack">
+			<${PageHeader}
+				title="商品中心"
+				description="集中查看商品、按订阅分类浏览，并在商品上下文里直接处理关联订阅。"
+			/>
+
+			<${SurfaceCard}
+				title="筛选"
+				description=${`当前共 ${total} 条${
+					filters.view === 'by_subscription'
+						? '订阅商品记录'
+						: '聚合商品记录'
+				}`}
+				action=${hasCustomFilters
+					? html`
+							<${Button}
+								variant="outlined"
+								size="small"
+								onClick=${() =>
+									setFilters({
+										search: '',
+										subId: '',
+										view: 'flat',
+										minPrice: '',
+										maxPrice: '',
+										sortBy: 'last_seen_at',
+										sortOrder: 'desc'
+									})}
+							>
+								重置
+							<//>
+						`
+					: null}
+			>
+				<div className="filter-grid">
+					<${AppTextField}
+						label="搜索商品标题或商品 ID"
+						value=${filters.search}
+						onChange=${(event) =>
+							setFilters((current) => ({
+								...current,
+								search: event.target.value
+							}))}
+						hint="支持标题关键词、商品 ID，也支持在按订阅视图里匹配关键词和 UMO。"
+					/>
+					<${AppTextField}
+						select=${true}
+						label="视图模式"
+						value=${filters.view}
+						onChange=${(event) =>
+							setFilters((current) => ({
+								...current,
+								view: event.target.value
+							}))}
+						wrapperSx=${{ width: { xs: '100%', md: 220 } }}
+						hint="聚合商品用于去重查看；按订阅分类用于围绕监控条目管理。"
+					>
+						<${MenuItem} value="flat">聚合商品<//>
+						<${MenuItem} value="by_subscription"
+							>按订阅分类<//>
+					<//>
+					<${AppTextField}
+						select=${true}
+						label="订阅条目"
+						value=${filters.subId}
+						onChange=${(event) =>
+							setFilters((current) => ({
+								...current,
+								subId: event.target.value
+							}))}
+						wrapperSx=${{ width: { xs: '100%', md: 320 } }}
+						hint=${selectedSubscription
+							? `当前订阅：#${selectedSubscription.id} ${selectedSubscription.keyword}`
+							: '可选，按某条订阅聚焦商品。'}
+					>
+						<${MenuItem} value="">全部订阅<//>
+						${subscriptionOptions.map((option) => {
+							const suffix = option.enabled ? '' : '（已暂停）'
+							return html`
+								<${MenuItem}
+									key=${option.id}
+									value=${String(option.id)}
+								>
+									${`#${option.id} ${option.keyword} · ${option.umo}${suffix}`}
+								<//>
+							`
+						})}
+					<//>
+					<${AppTextField}
+						label="最低价格"
+						type="number"
+						value=${filters.minPrice}
+						onChange=${(event) =>
+							setFilters((current) => ({
+								...current,
+								minPrice: event.target.value
+							}))}
+						wrapperSx=${{ width: { xs: '100%', md: 180 } }}
+						hint="留空表示不限。"
+					/>
+					<${AppTextField}
+						label="最高价格"
+						type="number"
+						value=${filters.maxPrice}
+						onChange=${(event) =>
+							setFilters((current) => ({
+								...current,
+								maxPrice: event.target.value
+							}))}
+						wrapperSx=${{ width: { xs: '100%', md: 180 } }}
+						hint="留空表示不限。"
+					/>
+					<${AppTextField}
+						select=${true}
+						label="排序字段"
+						value=${filters.sortBy}
+						onChange=${(event) =>
+							setFilters((current) => ({
+								...current,
+								sortBy: event.target.value
+							}))}
+						wrapperSx=${{ width: { xs: '100%', md: 220 } }}
+					>
+						<${MenuItem} value="last_seen_at">最近发现<//>
+						<${MenuItem} value="price">价格<//>
+						<${MenuItem} value="publish_time">发布时间<//>
+						<${MenuItem} value="title">标题<//>
+						${filters.view === 'flat'
+							? html`<${MenuItem}
+									value="subscription_count"
+								>
+									订阅数
+								<//>`
+							: null}
+					<//>
+					<${AppTextField}
+						select=${true}
+						label="排序方向"
+						value=${filters.sortOrder}
+						onChange=${(event) =>
+							setFilters((current) => ({
+								...current,
+								sortOrder: event.target.value
+							}))}
+						wrapperSx=${{ width: { xs: '100%', md: 180 } }}
+					>
+						<${MenuItem} value="desc">降序<//>
+						<${MenuItem} value="asc">升序<//>
+					<//>
+				</div>
+			<//>
+
+			${filters.view === 'by_subscription'
+				? html`
+						<${SurfaceCard}
+							title="按订阅分类"
+							description="把商品还原到具体订阅条目下，便于逐条管理和快速检查。"
+						>
+							${loading ? html`<${LinearProgress} sx=${{ mb: 2 }} />` : null}
+							${groupedItems.length
+								? html`
+										<${Stack} spacing=${UI.sectionGap}>
+											${groupedItems.map(
+												(group) => html`
+													<${SurfaceCard}
+														key=${group.sub_id}
+														title=${`#${group.sub_id} ${group.keyword}`}
+														description=${`${group.umo} · ${group.items.length} 条商品 · 最近发现 ${formatTs(group.last_seen_at)}`}
+														action=${html`
+															<div className="header-actions">
+																<${Chip}
+																	size="small"
+																	label=${group.statusLabel}
+																	color=${group.statusColor}
+																	variant=${group.statusVariant}
+																/>
+																<${Button}
+																	size="small"
+																	onClick=${() =>
+																		runSubscriptionAction(
+																			group.sub_id,
+																			'check'
+																		)}
+																>
+																	立即检查
+																<//>
+																<${Button}
+																	size="small"
+																	onClick=${() =>
+																		runSubscriptionAction(
+																			group.sub_id,
+																			group.enabled
+																				? 'pause'
+																				: 'resume'
+																		)}
+																>
+																	${group.enabled
+																		? '暂停'
+																		: '恢复'}
+																<//>
+																${String(filters.subId || '') !== String(group.sub_id)
+																	? html`
+																			<${Button}
+																				size="small"
+																				onClick=${() =>
+																					focusSubscription(
+																						group.sub_id
+																					)}
+																			>
+																				仅看此订阅
+																			<//>
+																		`
+																	: null}
+															</div>
+														`}
+													>
+														<${TableContainer}
+															className="table-wrap compact-table managed-table"
+														>
+															<${Table} size="small">
+																<${TableHead}>
+																	<${TableRow}>
+																		<${TableCell}
+																			className="table-primary-cell"
+																		>
+																			商品
+																		<//>
+																		<${TableCell}>价格<//>
+																		<${TableCell}>最近发现<//>
+																		<${TableCell}>最新事件<//>
+																		<${TableCell}
+																			align="right"
+																			className="table-action-cell"
+																		>
+																			操作
+																		<//>
+																	<//>
+																<//>
+																<${TableBody}>
+																	${group.items.map(
+																		(item) => html`
+																			<${TableRow}
+																				key=${`${group.sub_id}-${item.item_id}`}
+																				hover=${true}
+																			>
+																				<${TableCell}
+																					className="table-primary-cell"
+																				>
+																					<div className="table-primary-copy item-primary-copy">
+																						<${Typography}
+																							variant="subtitle2"
+																							className="table-primary-title item-primary-title"
+																						>
+																							${item.title}
+																						<//>
+																						<${Typography}
+																							variant="caption"
+																							color="text.secondary"
+																							className="table-primary-meta"
+																						>
+																							${item.item_id}
+																						<//>
+																					</div>
+																				<//>
+																				<${TableCell}
+																					>${formatMoney(item.price)}<//
+																				>
+																				<${TableCell}
+																					>${formatTs(item.last_seen_at)}<//
+																				>
+																				<${TableCell}
+																					>${item.latest_event_type || '-'}<//
+																				>
+																				<${TableCell}
+																					align="right"
+																					className="table-action-cell"
+																				>
+																					<div className="table-actions">
+																						<${Button}
+																							size="small"
+																							onClick=${() =>
+																								openDetail(
+																									item.item_id
+																								)}
+																						>
+																							查看详情
+																						<//>
+																						<${Button}
+																							size="small"
+																							variant="outlined"
+																							href=${item.url}
+																							target="_blank"
+																						>
+																							打开商品
+																						<//>
+																					</div>
+																				<//>
+																			<//>
+																		`
+																	)}
+																<//>
+															<//>
+														<//>
+													<//>
+												`
+											)}
+										<//>
+									`
+								: html`
+										<${EmptyState}
+											title="没有匹配的订阅商品记录"
+											description="可以切换回聚合商品视图，或缩小搜索条件后再试。"
+										/>
+									`}
+						<//>
+					`
+				: html`
+						<${SurfaceCard}
+							title="商品列表"
+							description="按商品维度聚合去重，便于先快速看盘，再进入明细处理。"
+						>
+							${loading ? html`<${LinearProgress} sx=${{ mb: 2 }} />` : null}
+							${items.length
+								? html`
+										<${TableContainer}
+											className="table-wrap relaxed-table managed-table"
+										>
+											<${Table} size="small">
+												<${TableHead}>
+													<${TableRow}>
+														<${TableCell} className="table-primary-cell"
+															>商品<//>
+														<${TableCell}>价格<//>
+														<${TableCell}>最近发现<//>
+														<${TableCell}>订阅数<//>
+														<${TableCell}>最新事件<//>
+														<${TableCell}
+															align="right"
+															className="table-action-cell"
+														>
+															详情
+														<//>
+													<//>
+												<//>
+												<${TableBody}>
+													${items.map(
+														(item) => html`
+															<${TableRow}
+																key=${item.item_id}
+																hover=${true}
+															>
+																<${TableCell}
+																	className="table-primary-cell"
+																>
+																	<div className="table-primary-copy item-primary-copy">
+																		<${Typography}
+																			variant="subtitle2"
+																			className="table-primary-title item-primary-title"
+																		>
+																			${item.title}
+																		<//>
+																		<${Typography}
+																			variant="caption"
+																			color="text.secondary"
+																			className="table-primary-meta"
+																		>
+																			${item.item_id}
+																		<//>
+																	</div>
+																<//>
+																<${TableCell}
+																	>${formatMoney(item.price)}<//
+																>
+																<${TableCell}
+																	>${formatTs(item.last_seen_at)}<//
+																>
+																<${TableCell}
+																	>${item.subscription_count}<//
+																>
+																<${TableCell}
+																	>${item.latest_event_type || '-'}<//
+																>
+																<${TableCell}
+																	align="right"
+																	className="table-action-cell"
+																>
+																	<${Button}
+																		size="small"
+																		onClick=${() =>
+																			openDetail(
+																				item.item_id
+																			)}
+																	>
+																		查看详情
+																	<//>
+																<//>
+															<//>
+														`
+													)}
+												<//>
+											<//>
+										<//>
+									`
+								: html`
+										<${EmptyState}
+											title="没有匹配的商品"
+											description="输入标题关键词、商品 ID，或切换到按订阅分类视图继续查看。"
+										/>
+									`}
+						<//>
+					`}
+
+			<${Drawer}
+				anchor="right"
+				open=${drawerOpen}
+				onClose=${() => setDrawerOpen(false)}
+				PaperProps=${{ sx: { width: { xs: '100%', md: 760 } } }}
+			>
+				<${Box} className="detail-drawer">
+					${detail
+						? html`
+								<${Stack} spacing=${UI.pageGap}>
+									<${Box}>
+										<${Typography} variant="h5"
+											>${detailItem?.title || '-'}<//
+										>
+										<${Typography}
+											variant="body2"
+											color="text.secondary"
+											sx=${{ mt: 0.75 }}
+										>
+											${detailItem?.item_id || '-'}
+										<//>
+									<//>
+
+									<div className="chip-row">
+										<${Chip}
+											label=${formatMoney(detailItem?.price)}
+											color="primary"
+										/>
+										<${Chip}
+											label=${detailItem?.latest_event_type || '无事件'}
+											variant="outlined"
+										/>
+										<${Button}
+											variant="outlined"
+											href=${detailItem?.url}
+											target="_blank"
+										>
+											打开商品页
+										<//>
+									</div>
+
+									<${SurfaceCard} title="基本信息">
+										<${InfoList}
+											items=${[
+												{
+													label: '商品 ID',
+													value: detailItem?.item_id || '-'
+												},
+												{
+													label: '发布时间',
+													value: formatTs(
+														detailItem?.publish_time
+													)
+												},
+												{
+													label: '首次发现',
+													value: formatTs(
+														detailItem?.first_seen_at
+													)
+												},
+												{
+													label: '最近发现',
+													value: formatTs(
+														detailItem?.last_seen_at
+													)
+												},
+												{
+													label: '关联订阅数',
+													value: String(
+														detailItem?.subscription_count ||
+															0
+													)
+												}
+											]}
+										/>
+									<//>
+
+									<${SurfaceCard}
+										title="关联订阅"
+										description="在商品上下文里直接筛选、检查或暂停关联订阅。"
+									>
+										${detail.subscriptions?.length
+											? html`
+													<${TableContainer}
+														className="table-wrap compact-table managed-table"
+													>
+														<${Table} size="small">
+															<${TableHead}>
+																<${TableRow}>
+																	<${TableCell}
+																		className="table-primary-cell"
+																	>
+																		关键词
+																	<//>
+																	<${TableCell}>UMO<//>
+																	<${TableCell}>状态<//>
+																	<${TableCell}>最后价格<//>
+																	<${TableCell}
+																		>最后关联时间<//
+																	>
+																	<${TableCell}
+																		align="right"
+																		className="table-action-cell"
+																	>
+																		操作
+																	<//>
+																<//>
+															<//>
+															<${TableBody}>
+																${detail.subscriptions.map(
+																	(item) => {
+																		const chip =
+																			statusChipProps(
+																				item.enabled,
+																				item.paused_reason
+																			)
+																		return html`
+																			<${TableRow}
+																				key=${item.sub_id}
+																				hover=${true}
+																			>
+																				<${TableCell}
+																					className="table-primary-cell"
+																				>
+																					<div className="table-primary-copy">
+																						<${Typography}
+																							variant="subtitle2"
+																							className="table-primary-title"
+																						>
+																							${item.keyword}
+																						<//>
+																						<${Typography}
+																							variant="caption"
+																							color="text.secondary"
+																							className="table-primary-meta"
+																						>
+																							#${item.sub_id}
+																						<//>
+																					</div>
+																				<//>
+																				<${TableCell}
+																					>${item.umo}<//
+																				>
+																				<${TableCell}>
+																					<${Chip}
+																						size="small"
+																						label=${chip.label}
+																						color=${chip.color}
+																						variant=${chip.variant}
+																					/>
+																				<//>
+																				<${TableCell}
+																					>${formatMoney(
+																						item.last_price
+																					)}<//
+																				>
+																				<${TableCell}
+																					>${formatTs(
+																						item.last_seen_at
+																					)}<//
+																				>
+																				<${TableCell}
+																					align="right"
+																					className="table-action-cell"
+																				>
+																					<div className="table-actions">
+																						<${Button}
+																							size="small"
+																							onClick=${() =>
+																								focusSubscription(
+																									item.sub_id
+																								)}
+																						>
+																							按此查看
+																						<//>
+																						<${Button}
+																							size="small"
+																							onClick=${() =>
+																								runSubscriptionAction(
+																									item.sub_id,
+																									'check',
+																									detailItem?.item_id ||
+																										''
+																								)}
+																						>
+																							检查
+																						<//>
+																						<${Button}
+																							size="small"
+																							onClick=${() =>
+																								runSubscriptionAction(
+																									item.sub_id,
+																									item.enabled
+																										? 'pause'
+																										: 'resume',
+																									detailItem?.item_id ||
+																										''
+																								)}
+																						>
+																							${item.enabled
+																								? '暂停'
+																								: '恢复'}
+																						<//>
+																					</div>
+																				<//>
+																			<//>
+																		`
+																	}
+																)}
+															<//>
+														<//>
+													<//>
+												`
+											: html`<${EmptyState}
+													title="没有关联订阅"
+													description="这个商品还没有命中过任何订阅条目。"
+												/>`}
+									<//>
+
+									<${SurfaceCard}
+										title="价格历史"
+										description="默认展示最近 20 条价格记录。"
+									>
+										${detail.price_history?.length
+											? html`
+													<${TableContainer}
+														className="table-wrap compact-table"
+													>
+														<${Table} size="small">
+															<${TableHead}>
+																<${TableRow}>
+																	<${TableCell}>时间<//>
+																	<${TableCell}>价格<//>
+																	<${TableCell}>来源<//>
+																	<${TableCell}>关键词<//>
+																<//>
+															<//>
+															<${TableBody}>
+																${detail.price_history
+																	.slice(0, 20)
+																	.map(
+																		(
+																			item,
+																			index
+																		) => html`
+																			<${TableRow}
+																				key=${`${item.observed_at}-${index}`}
+																			>
+																				<${TableCell}
+																					>${formatTs(
+																						item.observed_at
+																					)}<//
+																				>
+																				<${TableCell}
+																					>${formatMoney(
+																						item.price
+																					)}<//
+																				>
+																				<${TableCell}
+																					>${item.source || '-'}<//
+																				>
+																				<${TableCell}
+																					>${item.keyword || '-'}<//
+																				>
+																			<//>
+																		`
+																	)}
+															<//>
+														<//>
+													<//>
+												`
+											: html`<${EmptyState}
+													title="暂无价格历史"
+													description="抓到同一商品的价格变化后会显示在这里。"
+												/>`}
+									<//>
+
+									<${SurfaceCard}
+										title="通知记录"
+										description="默认展示最近 15 条通知。"
+									>
+										${detail.notifications?.length
+											? html`
+													<${TableContainer}
+														className="table-wrap compact-table"
+													>
+														<${Table} size="small">
+															<${TableHead}>
+																<${TableRow}>
+																	<${TableCell}>时间<//>
+																	<${TableCell}>事件<//>
+																	<${TableCell}>关键词<//>
+																	<${TableCell}>UMO<//>
+																<//>
+															<//>
+															<${TableBody}>
+																${detail.notifications
+																	.slice(0, 15)
+																	.map(
+																		(
+																			item,
+																			index
+																		) => html`
+																			<${TableRow}
+																				key=${`${item.sent_at}-${index}`}
+																			>
+																				<${TableCell}
+																					>${formatTs(
+																						item.sent_at
+																					)}<//
+																				>
+																				<${TableCell}
+																					>${item.event_type || '-'}<//
+																				>
+																				<${TableCell}
+																					>${item.keyword || '-'}<//
+																				>
+																				<${TableCell}
+																					>${item.umo || '-'}<//
+																				>
+																			<//>
+																		`
+																	)}
+															<//>
+														<//>
+													<//>
+												`
+											: html`<${EmptyState}
+													title="暂无通知记录"
+													description="发送过通知后会显示在这里。"
+												/>`}
+									<//>
+
+									<${SurfaceCard}
+										title="抓取记录"
+										description="默认展示最近 15 次抓取结果。"
+									>
+										${detail.fetch_runs?.length
+											? html`
+													<${TableContainer}
+														className="table-wrap compact-table"
+													>
+														<${Table} size="small">
+															<${TableHead}>
+																<${TableRow}>
+																	<${TableCell}
+																		>开始时间<//
+																	>
+																	<${TableCell}>状态<//>
+																	<${TableCell}>商品数<//>
+																	<${TableCell}>错误<//>
+																<//>
+															<//>
+															<${TableBody}>
+																${detail.fetch_runs
+																	.slice(0, 15)
+																	.map((item) => {
+																		const chip =
+																			fetchRunChipProps(
+																				item.status
+																			)
+																		return html`
+																			<${TableRow}
+																				key=${item.id}
+																			>
+																				<${TableCell}
+																					>${formatTs(
+																						item.started_at
+																					)}<//
+																				>
+																				<${TableCell}>
+																					<${Chip}
+																						size="small"
+																						label=${chip.label}
+																						color=${chip.color}
+																						variant=${chip.variant}
+																					/>
+																				<//>
+																				<${TableCell}
+																					>${item.items_count}<//
+																				>
+																				<${TableCell}
+																					>${item.err_msg || '-'}<//
+																				>
+																			<//>
+																		`
+																	})}
 															<//>
 														<//>
 													<//>

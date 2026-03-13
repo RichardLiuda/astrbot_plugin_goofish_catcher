@@ -60,6 +60,15 @@ class SubscriptionSummary:
 
 
 @dataclass(slots=True)
+class SubscriptionOption:
+    id: int
+    umo: str
+    keyword: str
+    enabled: bool
+    paused_reason: str | None
+
+
+@dataclass(slots=True)
 class NotificationRecord:
     sub_id: int
     keyword: str
@@ -105,6 +114,23 @@ class ItemSummary:
     first_seen_at: int
     last_seen_at: int
     subscription_count: int
+    latest_event_type: str | None
+
+
+@dataclass(slots=True)
+class SubscriptionItemSummary:
+    sub_id: int
+    keyword: str
+    umo: str
+    enabled: bool
+    paused_reason: str | None
+    item_id: str
+    title: str
+    url: str
+    price: float
+    publish_time: int | None
+    first_seen_at: int
+    last_seen_at: int
     latest_event_type: str | None
 
 

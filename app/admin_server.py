@@ -170,6 +170,10 @@ def create_admin_app(plugin: Any) -> FastAPI:
             offset=offset,
         )}
 
+    @app.get("/api/subscriptions/options")
+    async def list_subscription_options(_: None = Depends(require_admin)):
+        return {"ok": True, **await service.list_subscription_options()}
+
     @app.post("/api/subscriptions")
     async def create_subscription(payload: SubscriptionRequest, _: None = Depends(require_admin)):
         return {"ok": True, **await service.create_subscription(payload.model_dump(exclude_none=True))}
@@ -205,11 +209,54 @@ def create_admin_app(plugin: Any) -> FastAPI:
     @app.get("/api/items")
     async def list_items(
         search: str = "",
+        sub_id: int | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        sort_by: str = "last_seen_at",
+        sort_order: str = "desc",
         limit: int = 50,
         offset: int = 0,
         _: None = Depends(require_admin),
     ):
-        return {"ok": True, **await service.list_items(search=search, limit=limit, offset=offset)}
+        return {
+            "ok": True,
+            **await service.list_items(
+                search=search,
+                sub_id=sub_id,
+                min_price=min_price,
+                max_price=max_price,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                limit=limit,
+                offset=offset,
+            ),
+        }
+
+    @app.get("/api/items/by-subscription")
+    async def list_items_by_subscription(
+        search: str = "",
+        sub_id: int | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        sort_by: str = "last_seen_at",
+        sort_order: str = "desc",
+        limit: int = 120,
+        offset: int = 0,
+        _: None = Depends(require_admin),
+    ):
+        return {
+            "ok": True,
+            **await service.list_items_by_subscription(
+                search=search,
+                sub_id=sub_id,
+                min_price=min_price,
+                max_price=max_price,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                limit=limit,
+                offset=offset,
+            ),
+        }
 
     @app.get("/api/items/{item_id}")
     async def get_item_detail(item_id: str, _: None = Depends(require_admin)):
