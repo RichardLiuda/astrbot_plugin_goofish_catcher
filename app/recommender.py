@@ -316,9 +316,6 @@ class GoofishRecommender:
             if len(top) >= top_k:
                 break
 
-        if not top:
-            return None
-
         summary = str(parsed.get("summary", "")).strip()
         if not summary:
             summary = f"共 {len(candidates)} 个候选，模型推荐前 {len(top)} 个。"

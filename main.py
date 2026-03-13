@@ -794,6 +794,7 @@ def _render_recommendation_preview(recommendation: RecommendationResult) -> str:
         lines.append(f"回退原因：{recommendation.fallback_reason}")
 
     if not recommendation.top:
+        lines.append("本次检查已完成，未命中可推荐条目。")
         lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
         return "\n".join(lines)
 
