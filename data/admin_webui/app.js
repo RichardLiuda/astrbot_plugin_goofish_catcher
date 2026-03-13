@@ -2577,12 +2577,6 @@ function App() {
 										`
 									: null}
 								<${Box} sx=${{ flex: 1, minWidth: 0 }}>
-									<${Typography}
-										variant="body2"
-										color="text.secondary"
-									>
-										闲鱼监控管理后台
-									<//>
 									<${Typography} variant="h6"
 										>${currentNav.label}<//
 									>

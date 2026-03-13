@@ -298,8 +298,17 @@ a {
 }
 
 .config-groups {
-  display: grid;
-  gap: var(--space-3);
+  column-count: 1;
+  column-gap: var(--space-3);
+}
+
+.config-groups > .MuiCard-root {
+  display: inline-block;
+  width: 100%;
+  margin-bottom: var(--space-3);
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  -moz-column-break-inside: avoid;
 }
 
 .field-shell {
@@ -581,7 +590,7 @@ a {
   }
 
   .config-groups {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-count: 2;
   }
 }
 
