@@ -1067,7 +1067,6 @@ function DashboardPage({ notify }) {
 function SubscriptionsPage({ notify }) {
 	const [filters, setFilters] = useState({
 		keyword: '',
-		umo: '',
 		status: 'all'
 	})
 	const [items, setItems] = useState([])
@@ -1078,13 +1077,10 @@ function SubscriptionsPage({ notify }) {
 	const [preview, setPreview] = useState(null)
 
 	const deferredKeyword = useDeferredValue(filters.keyword)
-	const deferredUmo = useDeferredValue(filters.umo)
-
 	async function load() {
 		try {
 			const params = new URLSearchParams({
 				keyword: deferredKeyword,
-				umo: deferredUmo,
 				status: filters.status
 			})
 			const payload = await api(`/api/subscriptions?${params.toString()}`)
@@ -1102,7 +1098,7 @@ function SubscriptionsPage({ notify }) {
 	useEffect(() => {
 		setLoading(true)
 		load()
-	}, [deferredKeyword, deferredUmo, filters.status])
+	}, [deferredKeyword, filters.status])
 
 	async function save(form) {
 		const body = {
@@ -1200,15 +1196,6 @@ function SubscriptionsPage({ notify }) {
 							}))}
 					/>
 					<${AppTextField}
-						label="UMO"
-						value=${filters.umo}
-						onChange=${(event) =>
-							setFilters((current) => ({
-								...current,
-								umo: event.target.value
-							}))}
-					/>
-					<${AppTextField}
 						select=${true}
 						label="状态"
 						value=${filters.status}
@@ -1241,7 +1228,6 @@ function SubscriptionsPage({ notify }) {
 										<${TableRow}>
 											<${TableCell} className="table-primary-cell"
 												>关键词<//>
-											<${TableCell}>UMO<//>
 											<${TableCell}>状态<//>
 											<${TableCell}>频率<//>
 											<${TableCell}>规则<//>
@@ -1280,13 +1266,10 @@ function SubscriptionsPage({ notify }) {
 																color="text.secondary"
 																className="table-primary-meta"
 															>
-																#${item.id}
+																${`#${item.id} · UMO ${item.umo}`}
 															<//>
 														</div>
 													<//>
-													<${TableCell}
-														>${item.umo}<//
-													>
 													<${TableCell}>
 														<${Chip}
 															size="small"
@@ -2355,7 +2338,7 @@ function ItemsPage({ notify }) {
 													<${SurfaceCard}
 														key=${group.sub_id}
 														title=${`#${group.sub_id} ${group.keyword}`}
-														description=${`${group.umo} · ${group.items.length} 条商品 · 最近发现 ${formatTs(group.last_seen_at)}`}
+														description=${`${group.items.length} 条商品 · 最近发现 ${formatTs(group.last_seen_at)}`}
 														action=${html`
 															<div className="header-actions">
 																<${Chip}
@@ -2694,7 +2677,6 @@ function ItemsPage({ notify }) {
 																	>
 																		关键词
 																	<//>
-																	<${TableCell}>UMO<//>
 																	<${TableCell}>状态<//>
 																	<${TableCell}>最后价格<//>
 																	<${TableCell}
@@ -2736,13 +2718,10 @@ function ItemsPage({ notify }) {
 																							color="text.secondary"
 																							className="table-primary-meta"
 																						>
-																							#${item.sub_id}
+																							${`#${item.sub_id} · UMO ${item.umo}`}
 																						<//>
 																					</div>
 																				<//>
-																				<${TableCell}
-																					>${item.umo}<//
-																				>
 																				<${TableCell}>
 																					<${Chip}
 																						size="small"
@@ -2891,8 +2870,11 @@ function ItemsPage({ notify }) {
 																<${TableRow}>
 																	<${TableCell}>时间<//>
 																	<${TableCell}>事件<//>
-																	<${TableCell}>关键词<//>
-																	<${TableCell}>UMO<//>
+																	<${TableCell}
+																		className="table-primary-cell"
+																	>
+																		关键词
+																	<//>
 																<//>
 															<//>
 															<${TableBody}>
@@ -2915,10 +2897,23 @@ function ItemsPage({ notify }) {
 																					>${item.event_type || '-'}<//
 																				>
 																				<${TableCell}
-																					>${item.keyword || '-'}<//
+																					className="table-primary-cell"
 																				>
-																				<${TableCell}
-																					>${item.umo || '-'}<//
+																					<div className="table-primary-copy">
+																						<${Typography}
+																							variant="body2"
+																							className="table-primary-title"
+																						>
+																							${item.keyword || '-'}
+																						<//>
+																						<${Typography}
+																							variant="caption"
+																							color="text.secondary"
+																							className="table-primary-meta"
+																						>
+																							${item.umo || '-'}
+																						<//>
+																					</div>
 																				>
 																			<//>
 																		`
@@ -3147,7 +3142,6 @@ function RuntimePage({ notify }) {
 										<${TableHead}>
 											<${TableRow}>
 												<${TableCell}>关键词<//>
-												<${TableCell}>UMO<//>
 												<${TableCell}>状态<//>
 												<${TableCell}>开始 / 结束<//>
 												<${TableCell}>商品数<//>
@@ -3162,10 +3156,23 @@ function RuntimePage({ notify }) {
 												return html`
 													<${TableRow} key=${item.id}>
 														<${TableCell}
-															>${item.keyword}<//
+															className="table-primary-cell"
 														>
-														<${TableCell}
-															>${item.umo}<//
+															<div className="table-primary-copy">
+																<${Typography}
+																	variant="body2"
+																	className="table-primary-title"
+																>
+																	${item.keyword}
+																<//>
+																<${Typography}
+																	variant="caption"
+																	color="text.secondary"
+																	className="table-primary-meta"
+																>
+																	${item.umo}
+																<//>
+															</div>
 														>
 														<${TableCell}>
 															<${Chip}
