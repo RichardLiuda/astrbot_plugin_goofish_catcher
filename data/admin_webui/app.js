@@ -217,7 +217,7 @@ function App() {
 							position="sticky"
 							elevation=${0}
 							className="topbar"
-							sx=${{ top: 0 }}
+							sx=${{ top: { xs: 10, md: 14 } }}
 						>
 							<${Toolbar}
 								sx=${{ minHeight: 78, px: { xs: 2.25, md: 3 } }}

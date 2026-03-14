@@ -45,14 +45,15 @@ function createAppTheme(mode) {
 					root: {
 						borderRadius: 24,
 						background: isDark
-							? 'rgba(31, 26, 20, 0.9)'
-							: 'rgba(253, 250, 244, 0.9)',
+							? 'rgba(31, 26, 20, 0.78)'
+							: 'rgba(253, 250, 244, 0.82)',
 						color: isDark ? '#f4ead8' : '#30261a',
 						border: `1px solid ${isDark ? 'rgba(212, 176, 111, 0.16)' : 'rgba(167, 145, 102, 0.16)'}`,
 						boxShadow: isDark
-							? '0 12px 30px rgba(0, 0, 0, 0.28)'
-							: '0 12px 30px rgba(112, 93, 60, 0.07)',
-						backdropFilter: 'blur(18px)'
+							? '0 18px 40px rgba(0, 0, 0, 0.3)'
+							: '0 18px 40px rgba(112, 93, 60, 0.09)',
+						backdropFilter: 'blur(22px) saturate(180%)',
+						WebkitBackdropFilter: 'blur(22px) saturate(180%)'
 					}
 				}
 			},
