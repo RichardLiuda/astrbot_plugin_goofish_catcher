@@ -2214,7 +2214,7 @@ function ItemsPage({ notify }) {
 								...current,
 								search: event.target.value
 							}))}
-						hint="支持标题关键词、商品 ID，也支持在按订阅视图里匹配关键词和 UMO。"
+						hint="支持标题关键词、商品 ID，也支持在按订阅视图里匹配订阅关键词。"
 					/>
 					<${AppTextField}
 						select=${true}
@@ -2254,7 +2254,7 @@ function ItemsPage({ notify }) {
 									key=${option.id}
 									value=${String(option.id)}
 								>
-									${`#${option.id} ${option.keyword} · ${option.umo}${suffix}`}
+									${`#${option.id} ${option.keyword}${suffix}`}
 								<//>
 							`
 						})}
