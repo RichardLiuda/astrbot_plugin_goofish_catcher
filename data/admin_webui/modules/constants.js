@@ -20,34 +20,34 @@ export const FIELD_CONTROL_SX = {
 	'& .MuiInputBase-root': {
 		alignItems: 'flex-start',
 		borderRadius: '16px',
-		border: '1px solid rgba(167, 145, 102, 0.16)',
-		backgroundColor: 'rgba(250, 246, 239, 0.92)',
+		border: '1px solid var(--field-border)',
+		backgroundColor: 'var(--field-bg)',
 		transition:
 			'background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease',
 		paddingInline: '14px',
 		boxShadow: 'none',
 		'&:hover': {
-			backgroundColor: 'rgba(252, 248, 242, 0.98)',
-			borderColor: 'rgba(159, 133, 80, 0.24)'
+			backgroundColor: 'var(--field-bg-hover)',
+			borderColor: 'var(--field-border-hover)'
 		},
 		'&.Mui-focused': {
-			backgroundColor: 'rgba(255, 252, 247, 0.98)',
-			borderColor: 'rgba(159, 133, 80, 0.34)',
-			boxShadow: '0 0 0 3px rgba(159, 133, 80, 0.08)'
+			backgroundColor: 'var(--field-bg-focus)',
+			borderColor: 'var(--field-border-focus)',
+			boxShadow: 'var(--field-focus-ring)'
 		},
 		'&.Mui-error': {
-			borderColor: 'rgba(220, 38, 38, 0.28)',
-			boxShadow: '0 0 0 3px rgba(220, 38, 38, 0.06)'
+			borderColor: 'var(--field-error-border)',
+			boxShadow: 'var(--field-error-ring)'
 		}
 	},
 	'& .MuiInputBase-input': {
 		padding: '15px 0',
 		fontSize: '0.95rem',
 		lineHeight: 1.55,
-		color: '#30261a'
+		color: 'var(--text)'
 	},
 	'& .MuiInputBase-input::placeholder': {
-		color: 'rgba(123, 109, 90, 0.72)',
+		color: 'var(--field-placeholder)',
 		opacity: 1
 	},
 	'& .MuiInputBase-inputMultiline': {
@@ -58,6 +58,6 @@ export const FIELD_CONTROL_SX = {
 		padding: '15px 26px 15px 0 !important'
 	},
 	'& .MuiSvgIcon-root': {
-		color: '#8b7650'
+		color: 'var(--field-icon)'
 	}
 }

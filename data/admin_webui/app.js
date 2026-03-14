@@ -26,7 +26,7 @@ import {
 	RuntimePage,
 	SubscriptionsPage
 } from './modules/pages/index.js'
-import { theme } from './modules/theme.js'
+import { darkTheme, lightTheme } from './modules/theme.js'
 import { api, cx, getRoute, setRoute } from './modules/utils.js'
 
 function App() {
@@ -41,7 +41,13 @@ function App() {
 		message: '',
 		severity: 'success'
 	})
-	const isMobile = useMediaQuery(theme.breakpoints.down('lg'))
+	const prefersDarkMode = useMediaQuery('(prefers-color-scheme: dark)')
+	const activeTheme = prefersDarkMode ? darkTheme : lightTheme
+	const isMobile = useMediaQuery(activeTheme.breakpoints.down('lg'))
+
+	useEffect(() => {
+		document.documentElement.dataset.theme = prefersDarkMode ? 'dark' : 'light'
+	}, [prefersDarkMode])
 
 	function notify(message, severity = 'success') {
 		setSnack({ open: true, message, severity })
@@ -97,7 +103,7 @@ function App() {
 
 	if (booting) {
 		return html`
-			<${ThemeProvider} theme=${theme}>
+			<${ThemeProvider} theme=${activeTheme}>
 				<${CssBaseline} />
 				<${Box}
 					sx=${{
@@ -114,7 +120,7 @@ function App() {
 
 	if (!authenticated) {
 		return html`
-			<${ThemeProvider} theme=${theme}>
+			<${ThemeProvider} theme=${activeTheme}>
 				<${CssBaseline} />
 				<${LoginView}
 					loading=${loginLoading}
@@ -176,7 +182,7 @@ function App() {
 	`
 
 	return html`
-		<${ThemeProvider} theme=${theme}>
+		<${ThemeProvider} theme=${activeTheme}>
 			<${CssBaseline} />
 			<div className="app-shell">
 				${isMobile
