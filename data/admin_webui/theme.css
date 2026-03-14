@@ -201,6 +201,13 @@ a {
 
 .mobile-sidebar {
   min-height: auto;
+  pointer-events: auto;
+  backdrop-filter: blur(26px) saturate(185%);
+  -webkit-backdrop-filter: blur(26px) saturate(185%);
+  background: var(--surface);
+  box-shadow:
+    0 24px 56px rgba(112, 93, 60, 0.14),
+    0 10px 24px rgba(112, 93, 60, 0.08);
 }
 
 .app-main {

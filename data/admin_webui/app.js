@@ -192,11 +192,36 @@ function App() {
 							<${Drawer}
 								open=${drawerOpen}
 								onClose=${() => setDrawerOpen(false)}
+								hideBackdrop=${true}
+								ModalProps=${{
+									keepMounted: true,
+									disableAutoFocus: true,
+									disableEnforceFocus: true,
+									disableRestoreFocus: true,
+									disableScrollLock: true
+								}}
+								sx=${{
+									pointerEvents: 'none'
+								}}
 								PaperProps=${{
 									sx: {
-										width: { xs: '100%', sm: 320 },
+										width: {
+											xs: 'calc(100vw - 32px)',
+											sm: 320
+										},
 										maxWidth: '100vw',
-										p: 2
+										top: { xs: 16, sm: 20 },
+										left: { xs: 16, sm: 20 },
+										right: 'auto',
+										bottom: 'auto',
+										height: 'auto',
+										maxHeight: 'calc(100vh - 32px)',
+										background: 'transparent',
+										border: 'none',
+										boxShadow: 'none',
+										overflow: 'visible',
+										pointerEvents: 'none',
+										p: 0
 									}
 								}}
 							>
@@ -217,7 +242,7 @@ function App() {
 							position="sticky"
 							elevation=${0}
 							className="topbar"
-							sx=${{ top: { xs: 10, md: 14 } }}
+							sx=${{ top: { xs: 16, sm: 20, lg: 32 } }}
 						>
 							<${Toolbar}
 								sx=${{ minHeight: 78, px: { xs: 2.25, md: 3 } }}
@@ -228,10 +253,10 @@ function App() {
 												variant="outlined"
 												size="small"
 												onClick=${() =>
-													setDrawerOpen(true)}
+													setDrawerOpen((current) => !current)}
 												sx=${{ mr: 1.5 }}
 											>
-												导航
+												${drawerOpen ? '收起导航' : '导航'}
 											<//>
 										`
 									: null}
