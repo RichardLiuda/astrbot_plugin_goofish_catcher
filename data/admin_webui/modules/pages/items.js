@@ -15,6 +15,7 @@ import {
 	startTransition,
 	useDeferredValue,
 	useEffect,
+	useMediaQuery,
 	useState
 } from '../deps.js'
 import { UI } from '../constants.js'
@@ -27,7 +28,7 @@ import {
 	statusChipProps
 } from '../utils.js'
 import { AppTextField, EmptyState, PageHeader, SurfaceCard } from '../components.js'
-import { ItemDetailDrawer } from './items-detail-drawer.js'
+import { ItemDetailContent, ItemDetailDrawer } from './items-detail-drawer.js'
 
 export function ItemsPage({ notify }) {
 	const [filters, setFilters] = useState({
@@ -46,6 +47,7 @@ export function ItemsPage({ notify }) {
 	const [detail, setDetail] = useState(null)
 	const [drawerOpen, setDrawerOpen] = useState(false)
 	const [subscriptionOptions, setSubscriptionOptions] = useState([])
+	const isNarrowScreen = useMediaQuery('(max-width: 720px)')
 
 	const deferredSearch = useDeferredValue(filters.search)
 
@@ -160,6 +162,7 @@ export function ItemsPage({ notify }) {
 	}
 
 	function focusSubscription(subId) {
+		setDrawerOpen(false)
 		setFilters((current) => ({
 			...current,
 			subId: String(subId),
@@ -217,6 +220,31 @@ export function ItemsPage({ notify }) {
 			filters.sortBy !== 'last_seen_at' ||
 			filters.sortOrder !== 'desc'
 	)
+
+	if (isNarrowScreen && drawerOpen) {
+		return html`
+			<${Stack} spacing=${UI.pageGap} className="page-enter page-stack">
+				<${PageHeader}
+					title="商品详情"
+					description="窄屏下切换为单页详情视图，返回后继续保留当前筛选条件。"
+					action=${html`
+						<${Button}
+							variant="outlined"
+							onClick=${() => setDrawerOpen(false)}
+						>
+							返回列表
+						<//>
+					`}
+				/>
+
+				<${ItemDetailContent}
+					detail=${detail}
+					onFocusSubscription=${focusSubscription}
+					onRunSubscriptionAction=${runSubscriptionAction}
+				/>
+			<//>
+		`
+	}
 
 	return html`
 		<${Stack} spacing=${UI.pageGap} className="page-enter page-stack">
@@ -651,13 +679,17 @@ export function ItemsPage({ notify }) {
 						<//>
 					`}
 
-			<${ItemDetailDrawer}
-				open=${drawerOpen}
-				detail=${detail}
-				onClose=${() => setDrawerOpen(false)}
-				onFocusSubscription=${focusSubscription}
-				onRunSubscriptionAction=${runSubscriptionAction}
-			/>
+			${!isNarrowScreen
+				? html`
+						<${ItemDetailDrawer}
+							open=${drawerOpen}
+							detail=${detail}
+							onClose=${() => setDrawerOpen(false)}
+							onFocusSubscription=${focusSubscription}
+							onRunSubscriptionAction=${runSubscriptionAction}
+						/>
+					`
+				: null}
 		<//>
 	`
 }
