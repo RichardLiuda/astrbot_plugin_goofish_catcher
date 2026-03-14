@@ -29,6 +29,8 @@ import {
 import { darkTheme, lightTheme } from './modules/theme.js'
 import { api, cx, getRoute, setRoute } from './modules/utils.js'
 
+const SHELL_MOBILE_QUERY = '(max-width: 1119px)'
+
 function App() {
 	const [route, setRouteState] = useState(getRoute())
 	const [authenticated, setAuthenticated] = useState(false)
@@ -43,7 +45,7 @@ function App() {
 	})
 	const prefersDarkMode = useMediaQuery('(prefers-color-scheme: dark)')
 	const activeTheme = prefersDarkMode ? darkTheme : lightTheme
-	const isMobile = useMediaQuery(activeTheme.breakpoints.down('lg'))
+	const isMobile = useMediaQuery(SHELL_MOBILE_QUERY)
 
 	useEffect(() => {
 		document.documentElement.dataset.theme = prefersDarkMode ? 'dark' : 'light'
@@ -190,7 +192,13 @@ function App() {
 							<${Drawer}
 								open=${drawerOpen}
 								onClose=${() => setDrawerOpen(false)}
-								PaperProps=${{ sx: { width: 320, p: 2 } }}
+								PaperProps=${{
+									sx: {
+										width: { xs: '100%', sm: 320 },
+										maxWidth: '100vw',
+										p: 2
+									}
+								}}
 							>
 								<div className="app-sidebar mobile-sidebar">
 									${sidebarContent}
