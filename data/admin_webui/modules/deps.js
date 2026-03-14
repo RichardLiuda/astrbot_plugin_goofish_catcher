@@ -9,7 +9,7 @@ import htm from 'https://esm.sh/htm@3.1.1'
 import {
 	ThemeProvider,
 	createTheme
-} from 'https://esm.sh/@mui/material@5.16.14/styles?deps=react@18.3.1,@emotion/react@11.14.0,@emotion/styled@11.14.1&target=es2022'
+} from 'https://esm.sh/@mui/material@5.16.14/styles?deps=@mui/system@5.16.14,@mui/utils@5.16.14,react@18.3.1,@emotion/react@11.14.0,@emotion/styled@11.14.1&target=es2022'
 import {
 	Alert,
 	AppBar,
@@ -40,7 +40,7 @@ import {
 	Toolbar,
 	Typography,
 	useMediaQuery
-} from 'https://esm.sh/@mui/material@5.16.14?deps=react@18.3.1,@emotion/react@11.14.0,@emotion/styled@11.14.1&target=es2022'
+} from 'https://esm.sh/@mui/material@5.16.14?deps=@mui/system@5.16.14,@mui/utils@5.16.14,react@18.3.1,@emotion/react@11.14.0,@emotion/styled@11.14.1&target=es2022'
 
 const html = htm.bind(React.createElement)
 
