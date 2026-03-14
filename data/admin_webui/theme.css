@@ -264,6 +264,46 @@ a {
   align-items: end;
 }
 
+.items-filter-layout {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.items-filter-section {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid rgba(135, 112, 74, 0.14);
+  border-radius: 18px;
+  background: rgba(247, 241, 230, 0.52);
+}
+
+.items-filter-section-secondary {
+  background: rgba(251, 247, 239, 0.82);
+}
+
+.items-filter-section-title {
+  color: var(--muted);
+  font-size: 0.83rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.items-filter-grid {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.items-filter-grid-compact {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+@media (min-width: 1080px) {
+  .items-filter-layout {
+    grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+    align-items: start;
+  }
+}
+
 .form-grid {
   display: grid;
   gap: var(--space-2);

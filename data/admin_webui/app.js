@@ -310,6 +310,37 @@ function toNumberOrNull(value) {
 	return Number.isFinite(next) ? next : null
 }
 
+function parseFilterTerms(value) {
+	return Array.from(
+		new Set(
+			String(value || '')
+				.split(/[\s,，]+/)
+				.map((item) => item.trim().toLowerCase())
+				.filter(Boolean)
+		)
+	)
+}
+
+function shouldHideItemByTerms(item, terms) {
+	if (!terms.length) {
+		return false
+	}
+	const haystack = [
+		item?.title,
+		item?.item_id,
+		item?.keyword,
+		item?.description,
+		item?.desc,
+		item?.seller_name,
+		item?.seller,
+		item?.latest_event_type
+	]
+		.filter(Boolean)
+		.join(' ')
+		.toLowerCase()
+	return terms.some((term) => haystack.includes(term))
+}
+
 async function api(path, options = {}) {
 	const config = {
 		method: options.method || 'GET',
@@ -1990,6 +2021,7 @@ function ItemsPage({ notify }) {
 		search: '',
 		subId: '',
 		view: 'flat',
+		blockedTerms: '',
 		minPrice: '',
 		maxPrice: '',
 		sortBy: 'last_seen_at',
@@ -2122,10 +2154,14 @@ function ItemsPage({ notify }) {
 		}))
 	}
 
+	const blockedTerms = parseFilterTerms(filters.blockedTerms)
+	const visibleItems = items.filter(
+		(item) => !shouldHideItemByTerms(item, blockedTerms)
+	)
 	const groupedItems = []
 	if (filters.view === 'by_subscription') {
 		const groups = new Map()
-		for (const entry of items) {
+		for (const entry of visibleItems) {
 			if (!groups.has(entry.sub_id)) {
 				const chip = statusChipProps(
 					entry.enabled,
@@ -2160,10 +2196,13 @@ function ItemsPage({ notify }) {
 		subscriptionOptions.find(
 			(option) => String(option.id) === String(filters.subId || '')
 		) || null
+	const hiddenByBlockedTerms = items.length - visibleItems.length
+	const visibleTotal = visibleItems.length
 	const hasCustomFilters = Boolean(
 		filters.search.trim() ||
 			filters.subId ||
 			filters.view !== 'flat' ||
+			filters.blockedTerms.trim() ||
 			filters.minPrice !== '' ||
 			filters.maxPrice !== '' ||
 			filters.sortBy !== 'last_seen_at' ||
@@ -2179,11 +2218,11 @@ function ItemsPage({ notify }) {
 
 			<${SurfaceCard}
 				title="筛选"
-				description=${`当前共 ${total} 条${
+				description=${`当前显示 ${visibleTotal} / ${total} 条${
 					filters.view === 'by_subscription'
 						? '订阅商品记录'
 						: '聚合商品记录'
-				}`}
+				}${hiddenByBlockedTerms ? `，已按屏蔽词隐藏 ${hiddenByBlockedTerms} 条` : ''}`}
 				action=${hasCustomFilters
 					? html`
 							<${Button}
@@ -2194,6 +2233,7 @@ function ItemsPage({ notify }) {
 										search: '',
 										subId: '',
 										view: 'flat',
+										blockedTerms: '',
 										minPrice: '',
 										maxPrice: '',
 										sortBy: 'last_seen_at',
@@ -2205,121 +2245,140 @@ function ItemsPage({ notify }) {
 						`
 					: null}
 			>
-				<div className="filter-grid">
-					<${AppTextField}
-						label="搜索商品标题或商品 ID"
-						value=${filters.search}
-						onChange=${(event) =>
-							setFilters((current) => ({
-								...current,
-								search: event.target.value
-							}))}
-						hint="支持标题关键词、商品 ID，也支持在按订阅视图里匹配订阅关键词。"
-					/>
-					<${AppTextField}
-						select=${true}
-						label="视图模式"
-						value=${filters.view}
-						onChange=${(event) =>
-							setFilters((current) => ({
-								...current,
-								view: event.target.value
-							}))}
-						wrapperSx=${{ width: { xs: '100%', md: 220 } }}
-						hint="聚合商品用于去重查看；按订阅分类用于围绕监控条目管理。"
-					>
-						<${MenuItem} value="flat">聚合商品<//>
-						<${MenuItem} value="by_subscription"
-							>按订阅分类<//>
-					<//>
-					<${AppTextField}
-						select=${true}
-						label="订阅条目"
-						value=${filters.subId}
-						onChange=${(event) =>
-							setFilters((current) => ({
-								...current,
-								subId: event.target.value
-							}))}
-						wrapperSx=${{ width: { xs: '100%', md: 320 } }}
-						hint=${selectedSubscription
-							? `当前订阅：#${selectedSubscription.id} ${selectedSubscription.keyword}`
-							: '可选，按某条订阅聚焦商品。'}
-					>
-						<${MenuItem} value="">全部订阅<//>
-						${subscriptionOptions.map((option) => {
-							const suffix = option.enabled ? '' : '（已暂停）'
-							return html`
-								<${MenuItem}
-									key=${option.id}
-									value=${String(option.id)}
-								>
-									${`#${option.id} ${option.keyword}${suffix}`}
-								<//>
-							`
-						})}
-					<//>
-					<${AppTextField}
-						label="最低价格"
-						type="number"
-						value=${filters.minPrice}
-						onChange=${(event) =>
-							setFilters((current) => ({
-								...current,
-								minPrice: event.target.value
-							}))}
-						wrapperSx=${{ width: { xs: '100%', md: 180 } }}
-						hint="留空表示不限。"
-					/>
-					<${AppTextField}
-						label="最高价格"
-						type="number"
-						value=${filters.maxPrice}
-						onChange=${(event) =>
-							setFilters((current) => ({
-								...current,
-								maxPrice: event.target.value
-							}))}
-						wrapperSx=${{ width: { xs: '100%', md: 180 } }}
-						hint="留空表示不限。"
-					/>
-					<${AppTextField}
-						select=${true}
-						label="排序字段"
-						value=${filters.sortBy}
-						onChange=${(event) =>
-							setFilters((current) => ({
-								...current,
-								sortBy: event.target.value
-							}))}
-						wrapperSx=${{ width: { xs: '100%', md: 220 } }}
-					>
-						<${MenuItem} value="last_seen_at">最近发现<//>
-						<${MenuItem} value="price">价格<//>
-						<${MenuItem} value="publish_time">发布时间<//>
-						<${MenuItem} value="title">标题<//>
-						${filters.view === 'flat'
-							? html`<${MenuItem}
-									value="subscription_count"
-								>
-									订阅数
-								<//>`
-							: null}
-					<//>
-					<${AppTextField}
-						select=${true}
-						label="排序方向"
-						value=${filters.sortOrder}
-						onChange=${(event) =>
-							setFilters((current) => ({
-								...current,
-								sortOrder: event.target.value
-							}))}
-						wrapperSx=${{ width: { xs: '100%', md: 180 } }}
-					>
-						<${MenuItem} value="desc">降序<//>
-						<${MenuItem} value="asc">升序<//>
-					<//>
+				<div className="items-filter-layout">
+					<div className="items-filter-section">
+						<div className="items-filter-section-title">检索与屏蔽</div>
+						<div className="filter-grid items-filter-grid">
+							<${AppTextField}
+								label="搜索商品标题或商品 ID"
+								value=${filters.search}
+								onChange=${(event) =>
+									setFilters((current) => ({
+										...current,
+										search: event.target.value
+									}))}
+								hint="支持标题关键词、商品 ID，也支持在按订阅视图里匹配订阅关键词。"
+								wrapperSx=${{ gridColumn: { xs: 'auto', xl: 'span 2' } }}
+							/>
+							<${AppTextField}
+								label="屏蔽词"
+								value=${filters.blockedTerms}
+								onChange=${(event) =>
+									setFilters((current) => ({
+										...current,
+										blockedTerms: event.target.value
+									}))}
+								hint=${hiddenByBlockedTerms
+									? `已按屏蔽词隐藏 ${hiddenByBlockedTerms} 条商品，多个词可用空格、逗号或换行分隔。`
+									: '命中标题、描述、卖家、订阅关键词时将隐藏，多个词可用空格、逗号或换行分隔。'}
+								wrapperSx=${{ gridColumn: { xs: 'auto', xl: 'span 2' } }}
+							/>
+							<${AppTextField}
+								select=${true}
+								label="订阅条目"
+								value=${filters.subId}
+								onChange=${(event) =>
+									setFilters((current) => ({
+										...current,
+										subId: event.target.value
+									}))}
+								wrapperSx=${{ gridColumn: { xs: 'auto', lg: 'span 2' } }}
+								hint=${selectedSubscription
+									? `当前订阅：#${selectedSubscription.id} ${selectedSubscription.keyword}`
+									: '可选，按某条订阅聚焦商品。'}
+							>
+								<${MenuItem} value="">全部订阅<//>
+								${subscriptionOptions.map((option) => {
+									const suffix = option.enabled ? '' : '（已暂停）'
+									return html`
+										<${MenuItem}
+											key=${option.id}
+											value=${String(option.id)}
+										>
+											${`#${option.id} ${option.keyword}${suffix}`}
+										<//>
+									`
+								})}
+							<//>
+						</div>
+					</div>
+					<div className="items-filter-section items-filter-section-secondary">
+						<div className="items-filter-section-title">视图与排序</div>
+						<div className="filter-grid items-filter-grid items-filter-grid-compact">
+							<${AppTextField}
+								select=${true}
+								label="视图模式"
+								value=${filters.view}
+								onChange=${(event) =>
+									setFilters((current) => ({
+										...current,
+										view: event.target.value
+									}))}
+								hint="聚合商品用于去重查看；按订阅分类用于围绕监控条目管理。"
+							>
+								<${MenuItem} value="flat">聚合商品<//>
+								<${MenuItem} value="by_subscription"
+									>按订阅分类<//>
+							<//>
+							<${AppTextField}
+								label="最低价格"
+								type="number"
+								value=${filters.minPrice}
+								onChange=${(event) =>
+									setFilters((current) => ({
+										...current,
+										minPrice: event.target.value
+									}))}
+								hint="留空表示不限。"
+							/>
+							<${AppTextField}
+								label="最高价格"
+								type="number"
+								value=${filters.maxPrice}
+								onChange=${(event) =>
+									setFilters((current) => ({
+										...current,
+										maxPrice: event.target.value
+									}))}
+								hint="留空表示不限。"
+							/>
+							<${AppTextField}
+								select=${true}
+								label="排序字段"
+								value=${filters.sortBy}
+								onChange=${(event) =>
+									setFilters((current) => ({
+										...current,
+										sortBy: event.target.value
+									}))}
+							>
+								<${MenuItem} value="last_seen_at">最近发现<//>
+								<${MenuItem} value="price">价格<//>
+								<${MenuItem} value="publish_time">发布时间<//>
+								<${MenuItem} value="title">标题<//>
+								${filters.view === 'flat'
+									? html`<${MenuItem}
+											value="subscription_count"
+										>
+											订阅数
+										<//>`
+									: null}
+							<//>
+							<${AppTextField}
+								select=${true}
+								label="排序方向"
+								value=${filters.sortOrder}
+								onChange=${(event) =>
+									setFilters((current) => ({
+										...current,
+										sortOrder: event.target.value
+									}))}
+							>
+								<${MenuItem} value="desc">降序<//>
+								<${MenuItem} value="asc">升序<//>
+							<//>
+						</div>
+					</div>
 				</div>
 			<//>
 
@@ -2493,7 +2552,7 @@ function ItemsPage({ notify }) {
 							description="按商品维度聚合去重，便于先快速看盘，再进入明细处理。"
 						>
 							${loading ? html`<${LinearProgress} sx=${{ mb: 2 }} />` : null}
-							${items.length
+							${visibleItems.length
 								? html`
 										<${TableContainer}
 											className="table-wrap relaxed-table managed-table"
@@ -2516,7 +2575,7 @@ function ItemsPage({ notify }) {
 													<//>
 												<//>
 												<${TableBody}>
-													${items.map(
+													${visibleItems.map(
 														(item) => html`
 															<${TableRow}
 																key=${item.item_id}
