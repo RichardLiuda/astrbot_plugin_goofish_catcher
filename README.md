@@ -190,6 +190,31 @@ CF-Access-Client-Secret: <your-cf-client-secret>
 - worker 返回 `AUTH_REQUIRED / CAPTCHA / RATE_LIMITED / TIMEOUT / PARSE_ERROR` 时，插件仍沿用现有暂停/退避逻辑
 - worker 自身鉴权失败或网络异常，会映射为 `NETWORK_ERROR`，不会误判成闲鱼登录态问题
 
+### 7. Cloudflare Tunnel 返回 502 的一次典型原因
+
+如果同时满足下面几个现象：
+
+- worker 主机本机访问 `http://127.0.0.1:8787/health` 正常，能返回 JSON
+- AstrBot 宿主机或其他外部机器访问 `https://<your-domain>/health` 时返回 `502`
+- `cloudflared` debug 日志里反复出现 `timeout: no recent network activity`、`failed to dial a quic connection`
+
+那么问题大概率不在插件、不在 `CF-Access-Client-Id / Secret`，而是在 `cloudflared` 默认使用的 QUIC/UDP 链路不稳定。表现上会像“worker 本机偶尔可用，其他机器持续 502”，或者不同地区/不同时间返回结果不一致。
+
+这种情况下，建议先强制把 tunnel 协议切到 HTTP/2：
+
+```bash
+cloudflared tunnel run --protocol http2 --token <your-tunnel-token>
+```
+
+如果恢复正常，再把常驻启动方式也改成 `--protocol http2`。另外建议顺手升级 `cloudflared`：
+
+```bash
+brew update
+brew upgrade cloudflared
+```
+
+这个场景下，`502` 的根因通常是 Tunnel 到 Cloudflare Edge 的 QUIC 连接频繁断开，而不是 worker 应用本身故障。
+
 ## 登录态准备（建议）
 
 闲鱼对未登录/风控会比较敏感，建议先准备 `storage_state.json` 并在 WebUI 配置 `playwright_storage_state_file`。
