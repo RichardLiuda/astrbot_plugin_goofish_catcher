@@ -75,7 +75,7 @@ class RemoteSearchProvider:
         except ValueError as exc:
             raise ProviderError(
                 ProviderErrorCode.PARSE_ERROR,
-                f"remote provider returned invalid json: {exc}",
+                _build_invalid_json_message(response=response, exc=exc),
             ) from exc
 
         return response, data
@@ -226,3 +226,36 @@ def _raise_for_remote_error(response: httpx.Response, data: Any) -> None:
         message,
         _safe_int(retry_after),
     )
+
+
+def _build_invalid_json_message(
+    *,
+    response: httpx.Response,
+    exc: ValueError,
+) -> str:
+    status = response.status_code
+    url = str(response.request.url)
+    content_type = response.headers.get("content-type", "").strip() or "-"
+    location = response.headers.get("location", "").strip()
+    body_preview = _response_body_preview(response)
+
+    parts = [
+        f"remote provider returned invalid json: {exc}",
+        f"status={status}",
+        f"url={url}",
+        f"content_type={content_type}",
+    ]
+    if location:
+        parts.append(f"location={location}")
+    parts.append(f"body={body_preview}")
+    return ", ".join(parts)
+
+
+def _response_body_preview(response: httpx.Response, limit: int = 160) -> str:
+    body = response.text.strip()
+    if not body:
+        return "<empty>"
+    compact = " ".join(body.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit]}..."
