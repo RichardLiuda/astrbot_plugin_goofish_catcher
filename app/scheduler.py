@@ -17,6 +17,7 @@ from .detector import (
     within_new_window,
 )
 from .notifier import Notifier
+from .activity_monitor import ActivityMonitor
 from .provider import SearchProvider
 from .recommender import GoofishRecommender
 from .storage import SubscriptionStorage
@@ -60,6 +61,7 @@ class MonitoringScheduler:
         provider: SearchProvider,
         notifier: Notifier,
         recommender: GoofishRecommender,
+        activity_monitor: ActivityMonitor,
     ) -> None:
         self.context = context
         self.settings = settings
@@ -67,6 +69,7 @@ class MonitoringScheduler:
         self.provider = provider
         self.notifier = notifier
         self.recommender = recommender
+        self.activity_monitor = activity_monitor
 
         self._running = False
         self._queue: asyncio.Queue[int] = asyncio.Queue(maxsize=settings.queue_max_size)
@@ -153,7 +156,7 @@ class MonitoringScheduler:
         sub: Subscription,
         items: list,
         now_ts: int,
-    ) -> list[RecommendationCandidate]:
+    ) -> tuple[list[RecommendationCandidate], int]:
         """Process externally fetched items and keep storage/state consistent."""
         filtered_items, filter_mode = await self.recommender.prefilter_items(
             umo=sub.umo,
@@ -169,7 +172,7 @@ class MonitoringScheduler:
         )
         candidates = await self._process_items(sub, filtered_items, now_ts)
         await self.storage.update_schedule_success(sub.id, now_ts, sub.interval_sec)
-        return candidates
+        return candidates, len(filtered_items)
 
     async def _enqueue_sub_id(self, sub_id: int) -> bool:
         async with self._inflight_lock:
@@ -256,6 +259,16 @@ class MonitoringScheduler:
     async def _process_subscription(self, sub: Subscription, worker_idx: int) -> None:
         started_at = int(time.time())
         run_id = await self.storage.create_fetch_run(sub.id, started_at)
+        activity_id = await self.activity_monitor.start_task(
+            source="subscription",
+            keyword=sub.keyword,
+            umo=sub.umo,
+            provider_mode=self.settings.provider_mode,
+            page_count=max(1, min(sub.pages, self.settings.max_pages)),
+            sub_id=sub.id,
+            worker_idx=worker_idx,
+            message="正在抓取闲鱼结果",
+        )
         logger.info(
             "[goofish_catcher] worker=%s sub=%s start keyword=%s",
             worker_idx,
@@ -274,6 +287,12 @@ class MonitoringScheduler:
                 timeout=max(self.settings.fetch_timeout_sec + 30, 45),
             )
             now_ts = int(time.time())
+            await self.activity_monitor.update_task(
+                activity_id,
+                phase="prefiltering",
+                raw_total=len(raw_items),
+                message=f"已抓取 {len(raw_items)} 条，正在预筛",
+            )
             items, filter_mode, skipped_filtered = await self._prefilter_subscription_items(
                 sub=sub,
                 raw_items=raw_items,
@@ -288,6 +307,17 @@ class MonitoringScheduler:
             )
             await self.storage.update_schedule_success(sub.id, now_ts, sub.interval_sec)
 
+            await self.activity_monitor.update_task(
+                activity_id,
+                phase="analyzing",
+                filtered_total=len(items),
+                candidate_total=len(candidates),
+                message=(
+                    f"已筛出 {len(candidates)} 个候选，正在分析推荐"
+                    if candidates
+                    else "没有候选商品，正在生成分析结果"
+                ),
+            )
             if candidates:
                 recommendation = await self.recommender.analyze(
                     umo=sub.umo,
@@ -421,6 +451,8 @@ class MonitoringScheduler:
                 exc,
                 exc_info=True,
             )
+        finally:
+            await self.activity_monitor.finish_task(activity_id)
 
     async def _prefilter_subscription_items(
         self,

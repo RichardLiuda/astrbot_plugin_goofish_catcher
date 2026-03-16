@@ -121,12 +121,15 @@ export function AppTextField({
 	children,
 	...props
 }) {
+	const helperText = error || hint || '\u00a0'
 	return html`
 		<${Box}
 			className=${cx('field-block', error && 'has-error')}
 			sx=${wrapperSx}
 		>
-			${label ? html`<div className="field-label">${label}</div>` : null}
+			${label
+				? html`<div className="field-label" title=${label}>${label}</div>`
+				: null}
 			<${TextField}
 				...${props}
 				fullWidth=${fullWidth}
@@ -146,11 +149,16 @@ export function AppTextField({
 			>
 				${children}
 			<//>
-			${error || hint
-				? html`<div className=${cx('field-hint', error && 'is-error')}>
-						${error || hint}
-					<//>`
-				: null}
+			<div
+				className=${cx(
+					'field-hint',
+					error && 'is-error',
+					!error && !hint && 'is-empty'
+				)}
+				title=${error || hint || undefined}
+			>
+				${helperText}
+			</div>
 		<//>
 	`
 }

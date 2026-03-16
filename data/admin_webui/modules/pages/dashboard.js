@@ -22,10 +22,13 @@ import {
 	TrendFeed
 } from '../components.js'
 
-export function DashboardPage({ notify }) {
+export function DashboardPage({
+	notify,
+	temporaryQuery,
+	onTemporaryQueryChange,
+	onRunTemporaryQuery
+}) {
 	const [overview, setOverview] = useState(null)
-	const [query, setQuery] = useState({ keyword: '', pages: 1 })
-	const [preview, setPreview] = useState(null)
 	const [loading, setLoading] = useState(true)
 
 	async function load() {
@@ -44,22 +47,6 @@ export function DashboardPage({ notify }) {
 		const timer = window.setInterval(load, 8000)
 		return () => window.clearInterval(timer)
 	}, [])
-
-	async function runQuery() {
-		try {
-			const payload = await api('/api/query', {
-				method: 'POST',
-				body: {
-					keyword: query.keyword,
-					pages: Number(query.pages || 1)
-				}
-			})
-			startTransition(() => setPreview(payload.preview))
-			notify('临时查询已完成', 'success')
-		} catch (error) {
-			notify(error.message, 'error')
-		}
-	}
 
 	if (loading && !overview) {
 		return html`
@@ -86,11 +73,7 @@ export function DashboardPage({ notify }) {
 		},
 		{
 			label: '认证状态',
-			value:
-				health.auth ||
-				(overview?.provider_mode === 'playwright_local'
-					? '本地模式'
-					: '-')
+			value: health.auth || '-'
 		},
 		{
 			label: '登录态文件',
@@ -147,39 +130,43 @@ export function DashboardPage({ notify }) {
 						<div className="filter-grid">
 							<${AppTextField}
 								label="关键词"
-								value=${query.keyword}
+								value=${temporaryQuery.keyword}
 								onChange=${(event) =>
-									setQuery((current) => ({
-										...current,
+									onTemporaryQueryChange({
 										keyword: event.target.value
-									}))}
+									})}
 								hint="输入你想临时分析的关键词"
 							/>
 							<${AppTextField}
 								label="页数"
 								type="number"
-								value=${query.pages}
+								value=${temporaryQuery.pages}
 								onChange=${(event) =>
-									setQuery((current) => ({
-										...current,
+									onTemporaryQueryChange({
 										pages: event.target.value
-									}))}
+									})}
 								wrapperSx=${{ width: { xs: '100%', md: 120 } }}
 							/>
 							<${Button}
 								variant="contained"
-								onClick=${runQuery}
-								disabled=${!query.keyword.trim()}
+								onClick=${onRunTemporaryQuery}
+								disabled=${temporaryQuery.loading || !temporaryQuery.keyword.trim()}
+								startIcon=${temporaryQuery.loading
+									? html`<${CircularProgress}
+											size=${16}
+											color="inherit"
+										/>`
+									: null}
 							>
-								开始分析
+								${temporaryQuery.loading ? '分析中...' : '开始分析'}
 							<//>
 						</div>
 
-						${preview
+						${temporaryQuery.preview
 							? html`<${Box} sx=${{ mt: 3 }}
 									><${QueryPreviewPanel}
 										title="查询结果"
-										preview=${preview}
+										preview=${temporaryQuery.preview}
 								/><//>`
 							: null}
 					<//>

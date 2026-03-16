@@ -20,6 +20,8 @@ from .admin_types import (
 from .config import (
     DEFAULT_ADMIN_WEBUI_HOST,
     DEFAULT_ADMIN_WEBUI_PORT,
+    PROVIDER_MODE_PLAYWRIGHT_LOCAL,
+    PROVIDER_MODE_REMOTE_REST,
     get_runtime_override_path,
     load_plugin_settings,
     save_runtime_overrides,
@@ -63,6 +65,10 @@ class AdminService:
         return recommender
 
     @property
+    def activity_monitor(self):
+        return self.plugin.activity_monitor
+
+    @property
     def scheduler(self):
         scheduler = self.plugin.scheduler
         if scheduler is None:
@@ -70,6 +76,7 @@ class AdminService:
         return scheduler
 
     async def get_overview(self) -> dict[str, Any]:
+        health_snapshot = await self._get_provider_health_snapshot(refresh=False)
         scheduler_status = {}
         if self.plugin.scheduler is not None:
             scheduler_status = await self.plugin.scheduler.get_status()
@@ -101,8 +108,8 @@ class AdminService:
                 since_ts=int(time.time()) - 7 * 86400,
                 limit_days=7,
             ),
-            provider_health=self.plugin._provider_health,
-            provider_health_checked_at=self.plugin._provider_health_checked_at,
+            provider_health=health_snapshot["details"],
+            provider_health_checked_at=health_snapshot["checked_at"],
         )
         return asdict(overview)
 
@@ -292,32 +299,101 @@ class AdminService:
             "total": total,
         }
 
+    async def get_activity_monitor(self) -> dict[str, Any]:
+        scheduler_status = {}
+        if self.plugin.scheduler is not None:
+            scheduler_status = await self.plugin.scheduler.get_status()
+        snapshot = await self.activity_monitor.snapshot()
+        snapshot["summary"].update(
+            {
+                "queue_size": int(scheduler_status.get("queue_size", 0)),
+                "inflight": int(scheduler_status.get("inflight", 0)),
+                "workers": int(scheduler_status.get("workers", 0)),
+                "scheduler_running": bool(scheduler_status.get("running", False)),
+            }
+        )
+        return snapshot
+
     async def get_provider_health(self, *, refresh: bool = False) -> dict[str, Any]:
-        if refresh:
-            await self.plugin.refresh_provider_health(force=True)
+        return await self._get_provider_health_snapshot(refresh=refresh)
+
+    async def _get_provider_health_snapshot(self, *, refresh: bool) -> dict[str, Any]:
+        await self._sync_provider_health(refresh=refresh)
+
         ok = self.plugin._provider_error is None
+        remote_details = self.plugin._provider_health or {}
+        storage_state = self._resolve_storage_state(remote_details)
         payload = ProviderHealthSnapshot(
             ok=ok,
             provider=self.settings.provider_mode,
-            auth=(
-                self.plugin._provider_health or {}
-            ).get("auth")
-            if self.settings.provider_mode == "remote_rest"
-            else None,
-            storage_state=(
-                self.plugin._provider_health or {}
-            ).get("storage_state")
-            if self.settings.provider_mode == "remote_rest"
-            else bool(
-                self.settings.playwright_storage_state_path
-                and self.settings.playwright_storage_state_path.exists()
-            ),
+            auth=self._resolve_auth_status(remote_details, storage_state=storage_state),
+            storage_state=storage_state,
             checked_at=self.plugin._provider_health_checked_at,
-            details=self.plugin._provider_health,
+            details=self._normalize_provider_health_details(
+                remote_details,
+                auth=self._resolve_auth_status(remote_details, storage_state=storage_state),
+                storage_state=storage_state,
+            ),
         )
         data = asdict(payload)
         data["provider_error"] = self.plugin._provider_error
         return data
+
+    async def _sync_provider_health(self, *, refresh: bool) -> None:
+        checked_at = int(self.plugin._provider_health_checked_at or 0)
+        now_ts = int(time.time())
+        should_refresh = refresh or checked_at <= 0 or (now_ts - checked_at >= 8)
+        if not should_refresh:
+            return
+        try:
+            await self.plugin.refresh_provider_health(force=True)
+        except ProviderError:
+            # refresh_provider_health already stores latest error snapshot on plugin
+            return
+
+    def _resolve_storage_state(self, remote_details: dict[str, Any]) -> bool | None:
+        if self.settings.provider_mode == PROVIDER_MODE_REMOTE_REST:
+            value = remote_details.get("storage_state")
+            return None if value is None else bool(value)
+        return bool(
+            self.settings.playwright_storage_state_path
+            and self.settings.playwright_storage_state_path.exists()
+        )
+
+    def _resolve_auth_status(
+        self,
+        remote_details: dict[str, Any],
+        *,
+        storage_state: bool | None,
+    ) -> str | None:
+        if self.settings.provider_mode == PROVIDER_MODE_REMOTE_REST:
+            auth = str(remote_details.get("auth") or "").strip()
+            if auth:
+                return auth
+            if storage_state is True:
+                return "远端登录态已就绪"
+            if storage_state is False:
+                return "远端登录态缺失"
+            return "-"
+
+        if self.settings.provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL:
+            return "本地登录态已就绪" if storage_state else "本地登录态缺失"
+
+        return "-"
+
+    def _normalize_provider_health_details(
+        self,
+        remote_details: dict[str, Any],
+        *,
+        auth: str | None,
+        storage_state: bool | None,
+    ) -> dict[str, Any]:
+        details = dict(remote_details or {})
+        details["auth"] = auth
+        details["storage_state"] = storage_state
+        details.setdefault("provider", self.settings.provider_mode)
+        details.setdefault("ok", self.plugin._provider_error is None)
+        return details
 
     async def get_config(self) -> dict[str, Any]:
         schema = self._load_config_schema()
@@ -428,6 +504,15 @@ class AdminService:
         acquired = await self.scheduler.try_acquire_subscription(sub.id)
         if not acquired:
             raise RuntimeError("subscription is already running")
+        activity_id = await self.activity_monitor.start_task(
+            source="manual_check",
+            keyword=sub.keyword,
+            umo=sub.umo,
+            provider_mode=self.settings.provider_mode,
+            page_count=max(1, min(sub.pages, self.settings.max_pages)),
+            sub_id=sub.id,
+            message="正在抓取闲鱼结果",
+        )
         try:
             items = await self.provider.search(
                 keyword=sub.keyword,
@@ -435,10 +520,27 @@ class AdminService:
                 timeout_sec=self.settings.fetch_timeout_sec,
             )
             now_ts = int(time.time())
-            candidates = await self.scheduler.process_manual_fetch(
+            await self.activity_monitor.update_task(
+                activity_id,
+                phase="prefiltering",
+                raw_total=len(items),
+                message=f"已抓取 {len(items)} 条，正在预筛",
+            )
+            candidates, filtered_total = await self.scheduler.process_manual_fetch(
                 sub=sub,
                 items=items,
                 now_ts=now_ts,
+            )
+            await self.activity_monitor.update_task(
+                activity_id,
+                phase="analyzing",
+                filtered_total=filtered_total,
+                candidate_total=len(candidates),
+                message=(
+                    f"已筛出 {len(candidates)} 个候选，正在分析推荐"
+                    if candidates
+                    else "没有候选商品，正在生成分析结果"
+                ),
             )
             recommendation = await self.recommender.analyze(
                 umo=sub.umo,
@@ -456,51 +558,80 @@ class AdminService:
                 recommendation=recommendation,
                 page_count=sub.pages,
                 raw_total=len(items),
-                filtered_total=len(candidates),
+                filtered_total=filtered_total,
                 filter_mode="SUBSCRIPTION_CHECK",
             )
         finally:
+            await self.activity_monitor.finish_task(activity_id)
             await self.scheduler.release_subscription(sub.id)
 
     async def _run_query(self, *, keyword: str, page_count: int) -> dict[str, Any]:
         if self.plugin._provider_error:
             raise RuntimeError(self.plugin._provider_error)
-        raw_items = await self.provider.search(
+        activity_id = await self.activity_monitor.start_task(
+            source="temporary_query",
             keyword=keyword,
-            pages=page_count,
-            timeout_sec=self.settings.fetch_timeout_sec,
-        )
-        filtered_items, filter_mode = await self.recommender.prefilter_items(
             umo="__admin__",
-            keyword=keyword,
-            items=raw_items,
-        )
-        candidates = [
-            RecommendationCandidate(
-                event_type="NEW",
-                keyword=keyword,
-                item_id=item.item_id,
-                title=item.title,
-                price=item.price,
-                url=item.url,
-                publish_time=item.publish_time,
-                observed_at=int(time.time()),
-            )
-            for item in filtered_items
-        ]
-        recommendation = await self.recommender.analyze(
-            umo="__admin__",
-            keyword=keyword,
-            candidates=candidates,
-            top_k=self.settings.llm_top_k,
-        )
-        return self._recommendation_to_payload(
-            recommendation=recommendation,
+            provider_mode=self.settings.provider_mode,
             page_count=page_count,
-            raw_total=len(raw_items),
-            filtered_total=len(filtered_items),
-            filter_mode=filter_mode,
+            message="正在抓取闲鱼结果",
         )
+        try:
+            raw_items = await self.provider.search(
+                keyword=keyword,
+                pages=page_count,
+                timeout_sec=self.settings.fetch_timeout_sec,
+            )
+            await self.activity_monitor.update_task(
+                activity_id,
+                phase="prefiltering",
+                raw_total=len(raw_items),
+                message=f"已抓取 {len(raw_items)} 条，正在预筛",
+            )
+            filtered_items, filter_mode = await self.recommender.prefilter_items(
+                umo="__admin__",
+                keyword=keyword,
+                items=raw_items,
+            )
+            candidates = [
+                RecommendationCandidate(
+                    event_type="NEW",
+                    keyword=keyword,
+                    item_id=item.item_id,
+                    title=item.title,
+                    price=item.price,
+                    url=item.url,
+                    publish_time=item.publish_time,
+                    observed_at=int(time.time()),
+                )
+                for item in filtered_items
+            ]
+            await self.activity_monitor.update_task(
+                activity_id,
+                phase="analyzing",
+                filtered_total=len(filtered_items),
+                candidate_total=len(candidates),
+                message=(
+                    f"已筛出 {len(candidates)} 个候选，正在分析推荐"
+                    if candidates
+                    else "没有候选商品，正在生成分析结果"
+                ),
+            )
+            recommendation = await self.recommender.analyze(
+                umo="__admin__",
+                keyword=keyword,
+                candidates=candidates,
+                top_k=self.settings.llm_top_k,
+            )
+            return self._recommendation_to_payload(
+                recommendation=recommendation,
+                page_count=page_count,
+                raw_total=len(raw_items),
+                filtered_total=len(filtered_items),
+                filter_mode=filter_mode,
+            )
+        finally:
+            await self.activity_monitor.finish_task(activity_id)
 
     def _recommendation_to_payload(
         self,

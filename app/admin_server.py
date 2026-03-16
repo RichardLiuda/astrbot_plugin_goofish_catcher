@@ -271,6 +271,10 @@ def create_admin_app(plugin: Any) -> FastAPI:
     ):
         return {"ok": True, **await service.list_fetch_runs(status=status, limit=limit, offset=offset)}
 
+    @app.get("/api/activity-monitor")
+    async def get_activity_monitor(_: None = Depends(require_admin)):
+        return {"ok": True, **await service.get_activity_monitor()}
+
     @app.get("/api/provider/health")
     async def get_provider_health(refresh: bool = False, _: None = Depends(require_admin)):
         return {"ok": True, "health": await service.get_provider_health(refresh=refresh)}

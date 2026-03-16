@@ -11,6 +11,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
+from .app.activity_monitor import ActivityMonitor
 from .app.admin_server import AdminWebuiServer
 from .app.config import PROVIDER_MODE_REMOTE_REST, PluginSettings, load_plugin_settings
 from .app.notifier import Notifier
@@ -53,6 +54,7 @@ class GoofishCatcherPlugin(Star):
         self._provider_error: str | None = None
         self._provider_health: dict[str, Any] | None = None
         self._provider_health_checked_at: int | None = None
+        self.activity_monitor = ActivityMonitor()
         self._ready = False
         self._loaded = False
         self._admin_webui = AdminWebuiServer(self)
@@ -226,6 +228,7 @@ class GoofishCatcherPlugin(Star):
             provider=self.provider,
             notifier=self.notifier,
             recommender=self.recommender,
+            activity_monitor=self.activity_monitor,
         )
         self._ready = True
         logger.info(
