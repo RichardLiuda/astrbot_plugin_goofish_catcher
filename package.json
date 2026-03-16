@@ -1,0 +1,16 @@
+{
+  "name": "astrbot-plugin-goofish-catcher-webui",
+  "private": true,
+  "scripts": {
+    "build:webui": "esbuild data/admin_webui/app.js --bundle --minify --format=iife --platform=browser --target=es2020 --outfile=data/admin_webui/app.bundle.js"
+  },
+  "devDependencies": {
+    "@emotion/react": "11.14.0",
+    "@emotion/styled": "11.14.1",
+    "@mui/material": "5.16.14",
+    "esbuild": "0.25.10",
+    "htm": "3.1.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}
