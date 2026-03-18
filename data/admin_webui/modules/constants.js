@@ -11,20 +11,20 @@ export const NAV_ITEMS = [
 ]
 
 export const UI = {
-	cardPadding: { xs: 2.5, md: 3 },
-	pageGap: 3,
+	cardPadding: { xs: 2, md: 3 },
+	pageGap: { xs: 2.25, md: 3 },
 	sectionGap: 2.5
 }
 
 export const FIELD_CONTROL_SX = {
 	'& .MuiInputBase-root': {
 		alignItems: 'flex-start',
-		borderRadius: '16px',
+		borderRadius: { xs: '14px', md: '16px' },
 		border: '1px solid var(--field-border)',
 		backgroundColor: 'var(--field-bg)',
 		transition:
 			'background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease',
-		paddingInline: '14px',
+		paddingInline: { xs: '12px', md: '14px' },
 		boxShadow: 'none',
 		'&:hover': {
 			backgroundColor: 'var(--field-bg-hover)',
@@ -41,8 +41,8 @@ export const FIELD_CONTROL_SX = {
 		}
 	},
 	'& .MuiInputBase-input': {
-		padding: '15px 0',
-		fontSize: '0.95rem',
+		padding: { xs: '12px 0', md: '15px 0' },
+		fontSize: { xs: '0.9rem', md: '0.95rem' },
 		lineHeight: 1.55,
 		color: 'var(--text)'
 	},
@@ -51,11 +51,11 @@ export const FIELD_CONTROL_SX = {
 		opacity: 1
 	},
 	'& .MuiInputBase-inputMultiline': {
-		paddingBlock: '15px'
+		paddingBlock: { xs: '12px', md: '15px' }
 	},
 	'& .MuiSelect-select': {
 		minHeight: 'unset',
-		padding: '15px 26px 15px 0 !important'
+		padding: { xs: '12px 24px 12px 0 !important', md: '15px 26px 15px 0 !important' }
 	},
 	'& .MuiSvgIcon-root': {
 		color: 'var(--field-icon)'

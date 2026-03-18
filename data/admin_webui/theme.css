@@ -381,6 +381,40 @@ a {
   grid-template-columns: minmax(0, 1.12fr) minmax(320px, 0.88fr);
 }
 
+.runtime-grid {
+  grid-template-columns: minmax(320px, 0.7fr) minmax(620px, 1.3fr);
+  align-items: start;
+}
+
+.runtime-summary-card {
+  align-self: start;
+}
+
+.runtime-summary-card .MuiCardContent-root {
+  padding: 22px 24px;
+}
+
+.runtime-summary-card .MuiTypography-h6 {
+  line-height: 1.2;
+}
+
+.runtime-summary-card .MuiTypography-body2 {
+  font-size: 0.94rem;
+}
+
+.runtime-summary-card .info-row {
+  padding: 10px 0;
+}
+
+.runtime-summary-card .info-label {
+  font-size: 0.92rem;
+}
+
+.runtime-summary-card .info-value {
+  max-width: 52%;
+  font-size: 0.98rem;
+}
+
 .filter-grid {
   display: grid;
   gap: var(--space-2);
@@ -390,15 +424,15 @@ a {
 
 .items-filter-layout {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .items-filter-section {
   display: grid;
-  gap: 10px;
-  padding: 16px 18px;
+  gap: 8px;
+  padding: 14px 16px;
   border: 1px solid var(--section-border);
-  border-radius: 18px;
+  border-radius: 16px;
   background: var(--section-bg);
 }
 
@@ -408,9 +442,31 @@ a {
 
 .items-filter-section-title {
   color: var(--muted);
-  font-size: 0.83rem;
+  font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+
+.items-filter-section .filter-grid {
+  gap: 12px;
+}
+
+.items-filter-section .field-block {
+  grid-template-rows: minmax(2.25em, auto) auto minmax(2.7em, auto);
+  gap: 6px;
+}
+
+.items-filter-section .field-label {
+  font-size: 0.84rem;
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
+}
+
+.items-filter-section .field-hint {
+  font-size: 0.76rem;
+  min-height: calc(1.5em * 2);
+  line-height: 1.5;
+  -webkit-line-clamp: 2;
 }
 
 .items-filter-grid {
@@ -423,8 +479,14 @@ a {
 
 @media (min-width: 1080px) {
   .items-filter-layout {
-    grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+    grid-template-columns: minmax(0, 1.12fr) minmax(320px, 0.88fr);
     align-items: start;
+  }
+}
+
+@media (max-width: 1399px) {
+  .runtime-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -522,6 +584,7 @@ a {
 
 .table-wrap {
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .relaxed-table .MuiTableCell-root {
@@ -574,6 +637,30 @@ a {
 .compact-table .MuiTableCell-root {
   padding-top: 14px;
   padding-bottom: 14px;
+}
+
+.runtime-runs-table table {
+  min-width: 760px;
+}
+
+.runtime-runs-table .runtime-runs-keyword-cell {
+  width: 28%;
+  min-width: 220px;
+}
+
+.runtime-runs-table .table-primary-copy {
+  min-width: 180px;
+}
+
+.runtime-runs-table .table-primary-title,
+.runtime-runs-table .table-primary-meta,
+.runtime-runs-table .MuiTableCell-root {
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.runtime-runs-time {
+  min-width: 138px;
 }
 
 .managed-table .table-action-cell {
@@ -882,6 +969,14 @@ a {
   flex-shrink: 0;
 }
 
+.floating-monitor-copy {
+  min-width: 0;
+}
+
+.floating-monitor-action {
+  white-space: nowrap;
+}
+
 .floating-monitor-title {
   display: flex;
   align-items: center;
@@ -1077,6 +1172,10 @@ a {
     grid-template-columns: 1fr;
   }
 
+  .runtime-grid {
+    grid-template-columns: 1fr;
+  }
+
   .topbar-description {
     display: none;
   }
@@ -1097,22 +1196,116 @@ a {
 
 @media (max-width: 720px) {
   .app-shell {
-    padding: 16px;
-    gap: 16px;
+    padding: 12px;
+    gap: 12px;
   }
 
   .app-sidebar,
   .detail-drawer {
-    padding: 20px;
+    padding: 16px;
   }
 
   .surface-card .MuiCardContent-root {
-    padding: 20px;
+    padding: 16px;
+  }
+
+  .topbar {
+    margin-bottom: 12px;
+  }
+
+  .brand-row {
+    gap: 12px;
+  }
+
+  .brand-mark {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+  }
+
+  .nav-list {
+    gap: 8px;
+  }
+
+  .sidebar-nav-button {
+    padding: 12px 13px;
+    border-radius: 14px;
+  }
+
+  .sidebar-nav-title {
+    font-size: 0.96rem;
+  }
+
+  .sidebar-nav-desc {
+    font-size: 0.74rem;
+  }
+
+  .stats-grid,
+  .content-grid,
+  .items-filter-layout,
+  .form-grid {
+    gap: 12px;
+  }
+
+  .stat-card .MuiCardContent-root {
+    padding: 16px;
+  }
+
+  .stat-card .MuiTypography-h5 {
+    font-size: 1.28rem;
+  }
+
+  .page-header .MuiTypography-h4 {
+    font-size: 2rem;
+    line-height: 1.08;
+  }
+
+  .page-header .MuiTypography-body1 {
+    font-size: 0.96rem;
+  }
+
+  .items-filter-section,
+  .field-shell,
+  .alert-item,
+  .trend-item,
+  .summary-panel,
+  .result-card,
+  .empty-state {
+    padding: 14px;
+    border-radius: 16px;
+  }
+
+  .items-filter-section {
+    gap: 8px;
+  }
+
+  .items-filter-section .filter-grid,
+  .table-actions,
+  .chip-row,
+  .list-stack {
+    gap: 8px;
+  }
+
+  .field-block {
+    gap: 6px;
+    grid-template-rows: minmax(2.3em, auto) auto minmax(2.2em, auto);
+  }
+
+  .field-label {
+    font-size: 0.84rem;
+  }
+
+  .field-hint {
+    font-size: 0.74rem;
+    min-height: calc(1.5em * 2);
+    line-height: 1.5;
   }
 
   .info-row {
     flex-direction: column;
     align-items: flex-start;
+    gap: 6px;
+    padding: 10px 0;
   }
 
   .info-value {
@@ -1131,8 +1324,108 @@ a {
     justify-content: flex-start;
   }
 
+  .table-wrap {
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .table-wrap table {
+    width: max-content;
+    min-width: 100%;
+    table-layout: auto;
+  }
+
+  .compact-table table,
+  .relaxed-table table {
+    min-width: 640px;
+  }
+
+  .compact-table .MuiTableCell-root,
+  .relaxed-table .MuiTableCell-root {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .table-wrap .MuiTableCell-root {
+    overflow-wrap: normal;
+    word-break: normal;
+    hyphens: none;
+  }
+
+  .table-wrap .MuiTableCell-head {
+    white-space: nowrap;
+  }
+
+  .table-wrap .table-primary-cell {
+    min-width: 220px;
+  }
+
+  .table-wrap .table-primary-copy {
+    min-width: 168px;
+  }
+
+  .table-wrap .item-primary-copy {
+    width: min(54vw, 220px);
+    max-width: min(54vw, 220px);
+    max-height: 4.4rem;
+  }
+
+  .table-wrap .table-primary-title,
+  .table-wrap .table-primary-meta {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .table-wrap .item-primary-title {
+    line-height: 1.4;
+    -webkit-line-clamp: 2;
+  }
+
+  .table-actions .MuiButton-root {
+    white-space: nowrap;
+  }
+
+  .managed-table table {
+    min-width: 760px;
+    table-layout: auto;
+  }
+
   .managed-table .table-primary-cell {
     width: auto;
+  }
+
+  .managed-table .MuiTableCell-root:not(.table-primary-cell):not(.table-action-cell) {
+    min-width: 96px;
+  }
+
+  .managed-table .table-action-cell {
+    position: static;
+    right: auto;
+    min-width: 168px;
+    white-space: normal;
+    box-shadow: none;
+    background: transparent;
+  }
+
+  .managed-table .MuiTableBody .MuiTableRow-hover:hover .table-action-cell {
+    background: transparent;
+  }
+
+  .runtime-runs-table table {
+    min-width: 740px;
+  }
+
+  .runtime-runs-table .runtime-runs-keyword-cell {
+    min-width: 220px;
+  }
+
+  .runtime-runs-table .MuiTableCell-root:not(.runtime-runs-keyword-cell) {
+    min-width: 96px;
+  }
+
+  .runtime-runs-time {
+    min-width: 148px;
+    white-space: nowrap;
   }
 
   .page-content.has-live-monitor {
@@ -1170,9 +1463,47 @@ a {
     width: calc(100vw - 20px);
   }
 
+  .floating-monitor.is-collapsed .floating-monitor-shell {
+    max-height: none;
+    min-height: 0;
+    padding: 12px 14px;
+  }
+
+  .floating-monitor.is-collapsed .floating-monitor-head {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .floating-monitor.is-collapsed .floating-monitor-copy {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
   .floating-monitor.is-collapsed .floating-monitor-subtitle {
     max-width: 100%;
-    white-space: normal;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 3px;
+  }
+
+  .floating-monitor.is-collapsed .floating-monitor-actions {
+    width: auto;
+    margin-left: auto;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+  }
+
+  .floating-monitor.is-collapsed .floating-monitor-action-detail {
+    display: none;
+  }
+
+  .floating-monitor.is-collapsed .floating-monitor-action-toggle {
+    min-width: auto;
+    padding-inline: 10px;
   }
 
   .floating-monitor-stats {

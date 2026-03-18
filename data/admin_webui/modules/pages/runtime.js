@@ -127,8 +127,9 @@ export function RuntimePage({ notify }) {
 				/>
 			</div>
 
-			<div className="content-grid two-column">
+			<div className="content-grid runtime-grid">
 				<${SurfaceCard}
+					className="runtime-summary-card"
 					title="状态摘要"
 					description="快速确认当前是否可以正常抓取。"
 				>
@@ -146,13 +147,14 @@ export function RuntimePage({ notify }) {
 				<//>
 
 				<${SurfaceCard}
+					className="runtime-runs-card"
 					title="最近抓取记录"
 					description="展示最近 20 次抓取执行状态。"
 				>
 					${runs.length
 						? html`
 								<${TableContainer}
-									className="table-wrap compact-table"
+									className="table-wrap compact-table runtime-runs-table"
 								>
 									<${Table} size="small">
 										<${TableHead}>
@@ -172,7 +174,7 @@ export function RuntimePage({ notify }) {
 												return html`
 													<${TableRow} key=${item.id}>
 														<${TableCell}
-															className="table-primary-cell"
+															className="table-primary-cell runtime-runs-keyword-cell"
 														>
 															<div className="table-primary-copy">
 																<${Typography}
@@ -199,6 +201,7 @@ export function RuntimePage({ notify }) {
 															/>
 														<//>
 														<${TableCell}>
+															<div className="runtime-runs-time">
 															<${Typography}
 																variant="body2"
 																>${formatTs(
@@ -213,6 +216,7 @@ export function RuntimePage({ notify }) {
 																	item.finished_at
 																)}
 															<//>
+															</div>
 														<//>
 														<${TableCell}
 															>${item.items_count}<//

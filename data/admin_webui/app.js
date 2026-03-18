@@ -46,6 +46,9 @@ const DEFAULT_TEMP_QUERY = {
 	preview: null,
 	loading: false
 }
+const DEFAULT_MONITOR_COLLAPSED =
+	typeof window !== 'undefined' &&
+	window.matchMedia(SHELL_MOBILE_QUERY).matches
 
 function App() {
 	const [route, setRouteState] = useState(getRoute())
@@ -59,7 +62,9 @@ function App() {
 		message: '',
 		severity: 'success'
 	})
-	const [monitorCollapsed, setMonitorCollapsed] = useState(false)
+	const [monitorCollapsed, setMonitorCollapsed] = useState(
+		DEFAULT_MONITOR_COLLAPSED
+	)
 	const [temporaryQuery, setTemporaryQuery] = useState(DEFAULT_TEMP_QUERY)
 	const [liveMonitor, setLiveMonitor] = useState({
 		summary: null,
@@ -372,7 +377,7 @@ function App() {
 							sx=${{ top: { xs: 16, sm: 20, lg: 32 } }}
 						>
 							<${Toolbar}
-								sx=${{ minHeight: 78, px: { xs: 2.25, md: 3 } }}
+								sx=${{ minHeight: { xs: 64, md: 78 }, px: { xs: 1.75, md: 3 } }}
 							>
 								${isMobile
 									? html`
@@ -447,7 +452,7 @@ function App() {
 						>
 							<div className="floating-monitor-shell">
 								<div className="floating-monitor-head">
-									<div>
+									<div className="floating-monitor-copy">
 										<div className="floating-monitor-title">
 											<span className="monitor-pulse"></span>
 											检查进行中
@@ -462,6 +467,7 @@ function App() {
 									</div>
 									<div className="floating-monitor-actions">
 										<${Button}
+											className="floating-monitor-action floating-monitor-action-detail"
 											size="small"
 											variant="text"
 											onClick=${() => {
@@ -472,6 +478,7 @@ function App() {
 											查看详情
 										<//>
 										<${Button}
+											className="floating-monitor-action floating-monitor-action-toggle"
 											size="small"
 											variant="text"
 											onClick=${() =>
