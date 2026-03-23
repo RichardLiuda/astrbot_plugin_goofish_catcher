@@ -1,4 +1,7 @@
+
 # astrbot_plugin_goofish_catcher
+
+[![:name](https://count.getloli.com/@astrbot_plugin_goofish_catcher?name=astrbot_plugin_goofish_catcher&theme=miku&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)](https://count.getloli.com/@goofish_catcher?name=goofish_catcher&theme=minecraft&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
 
 闲鱼关键词监控插件（命令优先）。  
 支持订阅轮询、上新/降价检测、LLM 推荐分析、免订阅临时查询。  
