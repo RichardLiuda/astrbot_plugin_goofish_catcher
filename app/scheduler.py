@@ -4,6 +4,7 @@ import asyncio
 import random
 import time
 from collections.abc import Callable
+from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.star import Context
@@ -62,6 +63,7 @@ class MonitoringScheduler:
         notifier: Notifier,
         recommender: GoofishRecommender,
         activity_monitor: ActivityMonitor,
+        remote_auth_coordinator: Any | None = None,
     ) -> None:
         self.context = context
         self.settings = settings
@@ -70,6 +72,7 @@ class MonitoringScheduler:
         self.notifier = notifier
         self.recommender = recommender
         self.activity_monitor = activity_monitor
+        self.remote_auth_coordinator = remote_auth_coordinator
 
         self._running = False
         self._queue: asyncio.Queue[int] = asyncio.Queue(maxsize=settings.queue_max_size)
@@ -398,11 +401,33 @@ class MonitoringScheduler:
                 ProviderErrorCode.CAPTCHA,
             }:
                 await self.storage.pause_subscription(sub.id, exc.code.value)
+                action_hint = None
+                if exc.code in {
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    ProviderErrorCode.CAPTCHA,
+                } and self.remote_auth_coordinator is not None:
+                    try:
+                        await self.remote_auth_coordinator.handle_provider_auth_failure(
+                            umo=sub.umo,
+                            sub_id=sub.id,
+                        )
+                        action_hint = (
+                            "已暂停该订阅，并已尝试启动远端登录恢复流程。"
+                            "扫码完成后会自动恢复；如未收到二维码，可发送 /闲鱼 登录。"
+                        )
+                    except Exception as recovery_exc:
+                        logger.warning(
+                            "[goofish_catcher] failed to trigger remote auth recovery for sub=%s: %s",
+                            sub.id,
+                            recovery_exc,
+                            exc_info=True,
+                        )
                 await self.notifier.send_alert(
                     umo=sub.umo,
                     keyword=sub.keyword,
                     code=exc.code.value,
                     message=exc.message,
+                    action_hint=action_hint,
                 )
                 retry_sec = exc.retry_after_sec or self.settings.retry_max_sec
                 await self.storage.update_schedule_failure(sub.id, now_ts, retry_sec)

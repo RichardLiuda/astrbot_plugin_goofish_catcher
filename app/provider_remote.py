@@ -86,18 +86,13 @@ class RemoteSearchProvider:
             path="/health",
             timeout_sec=timeout_sec or self.settings.remote_healthcheck_timeout_sec,
         )
-        _raise_for_remote_error(response, data)
-        if not isinstance(data, dict):
-            raise ProviderError(
-                ProviderErrorCode.PARSE_ERROR,
-                "remote healthcheck json root is not an object",
-            )
-        if data.get("ok") is not True:
-            raise ProviderError(
-                ProviderErrorCode.NETWORK_ERROR,
-                "remote healthcheck did not return ok=true",
-            )
-        return data
+        return _expect_ok_object(
+            response=response,
+            data=data,
+            parse_error_message="remote healthcheck json root is not an object",
+            ok_error_message="remote healthcheck did not return ok=true",
+            ok_error_code=ProviderErrorCode.NETWORK_ERROR,
+        )
 
     async def search(
         self,
@@ -119,12 +114,12 @@ class RemoteSearchProvider:
             timeout_sec=timeout_sec,
             json_body=payload,
         )
-        _raise_for_remote_error(response, data)
-        if not isinstance(data, dict):
-            raise ProviderError(
-                ProviderErrorCode.PARSE_ERROR,
-                "remote provider json root is not an object",
-            )
+        data = _expect_ok_object(
+            response=response,
+            data=data,
+            parse_error_message="remote provider json root is not an object",
+            ok_error_message="remote provider did not return ok=true",
+        )
 
         items_raw = data.get("items", [])
         if not isinstance(items_raw, list):
@@ -141,6 +136,63 @@ class RemoteSearchProvider:
             if normalized is not None:
                 items.append(normalized)
         return items
+
+    async def start_auth_session(
+        self,
+        *,
+        force_restart: bool = False,
+        timeout_sec: int | None = None,
+    ) -> dict[str, Any]:
+        response, data = await self._request_json(
+            method="POST",
+            path="/v1/auth/start",
+            timeout_sec=timeout_sec or self.settings.remote_timeout_sec,
+            json_body={"force_restart": force_restart},
+        )
+        return _expect_ok_object(
+            response=response,
+            data=data,
+            parse_error_message="remote auth start json root is not an object",
+            ok_error_message="remote auth start did not return ok=true",
+        )
+
+    async def confirm_auth_session(
+        self,
+        *,
+        session_id: str,
+        timeout_sec: int | None = None,
+    ) -> dict[str, Any]:
+        response, data = await self._request_json(
+            method="POST",
+            path="/v1/auth/confirm",
+            timeout_sec=timeout_sec or self.settings.remote_timeout_sec,
+            json_body={"session_id": session_id},
+        )
+        return _expect_ok_object(
+            response=response,
+            data=data,
+            parse_error_message="remote auth confirm json root is not an object",
+            ok_error_message="remote auth confirm did not return ok=true",
+        )
+
+    async def cancel_auth_session(
+        self,
+        *,
+        session_id: str,
+        timeout_sec: int | None = None,
+    ) -> dict[str, Any]:
+        response, data = await self._request_json(
+            method="POST",
+            path="/v1/auth/cancel",
+            timeout_sec=timeout_sec or self.settings.remote_timeout_sec,
+            json_body={"session_id": session_id},
+        )
+        return _expect_ok_object(
+            response=response,
+            data=data,
+            parse_error_message="remote auth cancel json root is not an object",
+            ok_error_message="remote auth cancel did not return ok=true",
+        )
 
 
 def _map_remote_error_code(code_raw: str) -> ProviderErrorCode:
@@ -226,6 +278,28 @@ def _raise_for_remote_error(response: httpx.Response, data: Any) -> None:
         message,
         _safe_int(retry_after),
     )
+
+
+def _expect_ok_object(
+    *,
+    response: httpx.Response,
+    data: Any,
+    parse_error_message: str,
+    ok_error_message: str,
+    ok_error_code: ProviderErrorCode = ProviderErrorCode.NETWORK_ERROR,
+) -> dict[str, Any]:
+    _raise_for_remote_error(response, data)
+    if not isinstance(data, dict):
+        raise ProviderError(
+            ProviderErrorCode.PARSE_ERROR,
+            parse_error_message,
+        )
+    if data.get("ok") is not True:
+        raise ProviderError(
+            ok_error_code,
+            ok_error_message,
+        )
+    return data
 
 
 def _build_invalid_json_message(

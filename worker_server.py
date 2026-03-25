@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
@@ -13,10 +16,12 @@ from pydantic import BaseModel, Field
 
 try:
     from .app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
+    from .app.login_session import GoofishLoginSession
     from .app.provider_playwright import PlaywrightSearchProvider
     from .app.types import ProviderError, ProviderErrorCode
 except ImportError:
     from app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
+    from app.login_session import GoofishLoginSession
     from app.provider_playwright import PlaywrightSearchProvider
     from app.types import ProviderError, ProviderErrorCode
 
@@ -27,6 +32,14 @@ class SearchRequest(BaseModel):
     timeout_ms: int = Field(default=20_000, ge=1_000)
     sort: str = "time_desc"
     use_login: bool = True
+
+
+class AuthStartRequest(BaseModel):
+    force_restart: bool = False
+
+
+class AuthSessionRequest(BaseModel):
+    session_id: str = Field(min_length=1)
 
 
 @dataclass(slots=True)
@@ -48,10 +61,113 @@ class WorkerAuthConfig:
 
 
 @dataclass(slots=True)
+class WorkerLoginSession:
+    session_id: str
+    started_at: int
+    session: GoofishLoginSession
+
+
+class WorkerLoginSessionManager:
+    def __init__(self, settings: PluginSettings | None) -> None:
+        self.settings = settings
+        self._lock = asyncio.Lock()
+        self._active_session: WorkerLoginSession | None = None
+
+    async def start_session(self, *, force_restart: bool) -> dict[str, Any]:
+        async with self._lock:
+            if self.settings is None:
+                raise RuntimeError("worker settings are not ready")
+
+            if self._active_session is not None and not force_restart:
+                return await self._serialize_active_session(self._active_session)
+
+            if self._active_session is not None:
+                await self._active_session.session.close()
+                self._active_session = None
+
+            session = GoofishLoginSession(
+                executable_path=self.settings.playwright_executable_path,
+                force_direct=self.settings.playwright_force_direct,
+            )
+            try:
+                await session.start_login_session()
+                active_session = WorkerLoginSession(
+                    session_id=uuid4().hex,
+                    started_at=int(time.time()),
+                    session=session,
+                )
+                self._active_session = active_session
+                return await self._serialize_active_session(active_session)
+            except Exception:
+                await session.close()
+                raise
+
+    async def confirm_session(self, session_id: str) -> dict[str, Any]:
+        async with self._lock:
+            active_session = self._require_active_session(session_id)
+            if self.settings is None or self.settings.playwright_storage_state_path is None:
+                raise RuntimeError("worker storage_state path is not configured")
+
+            saved_path = await active_session.session.save_storage_state(
+                self.settings.playwright_storage_state_path
+            )
+            saved_at = int(time.time())
+            await active_session.session.close()
+            self._active_session = None
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "status": "saved",
+                "saved_path": str(saved_path),
+                "saved_at": saved_at,
+            }
+
+    async def cancel_session(self, session_id: str) -> dict[str, Any]:
+        async with self._lock:
+            active_session = self._require_active_session(session_id)
+            await active_session.session.close()
+            self._active_session = None
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "status": "cancelled",
+                "cancelled_at": int(time.time()),
+            }
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._active_session is not None:
+                await self._active_session.session.close()
+                self._active_session = None
+
+    def _require_active_session(self, session_id: str) -> WorkerLoginSession:
+        if self._active_session is None:
+            raise ValueError("no active login session")
+        if self._active_session.session_id != session_id:
+            raise ValueError("login session id does not match active session")
+        return self._active_session
+
+    async def _serialize_active_session(
+        self,
+        active_session: WorkerLoginSession,
+    ) -> dict[str, Any]:
+        snapshot = await active_session.session.capture_snapshot()
+        return {
+            "ok": True,
+            "session_id": active_session.session_id,
+            "status": "active",
+            "started_at": active_session.started_at,
+            "page_url": snapshot.page_url,
+            "screenshot_base64": snapshot.screenshot_base64,
+        }
+
+
+@dataclass(slots=True)
 class WorkerRuntime:
     settings: PluginSettings | None
     provider: Any | None
     auth: WorkerAuthConfig
+    login_manager: WorkerLoginSessionManager | None = None
     provider_error: str | None = None
     provider_error_code: ProviderErrorCode = ProviderErrorCode.UNKNOWN
 
@@ -181,12 +297,16 @@ def create_runtime_from_env() -> WorkerRuntime:
             settings=settings,
             provider=provider,
             auth=auth,
+            login_manager=WorkerLoginSessionManager(settings),
         )
     except ModuleNotFoundError as exc:
         return WorkerRuntime(
             settings=settings,
             provider=None,
             auth=auth,
+            login_manager=(
+                WorkerLoginSessionManager(settings) if settings is not None else None
+            ),
             provider_error=(
                 "playwright is not installed. "
                 "Run: uv pip install -r requirements.txt && "
@@ -199,6 +319,9 @@ def create_runtime_from_env() -> WorkerRuntime:
             settings=settings,
             provider=None,
             auth=auth,
+            login_manager=(
+                WorkerLoginSessionManager(settings) if settings is not None else None
+            ),
             provider_error=str(exc),
             provider_error_code=ProviderErrorCode.UNKNOWN,
         )
@@ -230,6 +353,9 @@ def create_app(runtime: WorkerRuntime | None = None) -> FastAPI:
             provider = getattr(current_runtime, "provider", None)
             if provider is not None and hasattr(provider, "close"):
                 await provider.close()
+            login_manager = getattr(current_runtime, "login_manager", None)
+            if login_manager is not None and hasattr(login_manager, "close"):
+                await login_manager.close()
 
     app = FastAPI(title="Goofish Remote Worker", lifespan=lifespan)
 
@@ -333,6 +459,132 @@ def create_app(runtime: WorkerRuntime | None = None) -> FastAPI:
             "ok": True,
             "items": [asdict(item) for item in items],
         }
+
+    @app.post("/v1/auth/start")
+    async def start_auth_session(
+        req: AuthStartRequest,
+        authorization: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+        cf_access_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+        cf_access_client_secret: str | None = Header(
+            None,
+            alias="CF-Access-Client-Secret",
+        ),
+    ):
+        current_runtime = _get_runtime(app)
+        _verify_request_auth(
+            current_runtime.auth,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            cf_access_client_id=cf_access_client_id,
+            cf_access_client_secret=cf_access_client_secret,
+        )
+        login_manager = current_runtime.login_manager
+        if login_manager is None:
+            return _error_response(
+                status_code=503,
+                code=current_runtime.provider_error_code,
+                message=current_runtime.provider_error or "worker login manager is unavailable",
+            )
+
+        try:
+            return await login_manager.start_session(force_restart=req.force_restart)
+        except ValueError as exc:
+            return _error_response(
+                status_code=409,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
+        except Exception as exc:
+            return _error_response(
+                status_code=500,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
+
+    @app.post("/v1/auth/confirm")
+    async def confirm_auth_session(
+        req: AuthSessionRequest,
+        authorization: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+        cf_access_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+        cf_access_client_secret: str | None = Header(
+            None,
+            alias="CF-Access-Client-Secret",
+        ),
+    ):
+        current_runtime = _get_runtime(app)
+        _verify_request_auth(
+            current_runtime.auth,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            cf_access_client_id=cf_access_client_id,
+            cf_access_client_secret=cf_access_client_secret,
+        )
+        login_manager = current_runtime.login_manager
+        if login_manager is None:
+            return _error_response(
+                status_code=503,
+                code=current_runtime.provider_error_code,
+                message=current_runtime.provider_error or "worker login manager is unavailable",
+            )
+
+        try:
+            return await login_manager.confirm_session(req.session_id)
+        except ValueError as exc:
+            return _error_response(
+                status_code=409,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
+        except Exception as exc:
+            return _error_response(
+                status_code=500,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
+
+    @app.post("/v1/auth/cancel")
+    async def cancel_auth_session(
+        req: AuthSessionRequest,
+        authorization: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+        cf_access_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+        cf_access_client_secret: str | None = Header(
+            None,
+            alias="CF-Access-Client-Secret",
+        ),
+    ):
+        current_runtime = _get_runtime(app)
+        _verify_request_auth(
+            current_runtime.auth,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            cf_access_client_id=cf_access_client_id,
+            cf_access_client_secret=cf_access_client_secret,
+        )
+        login_manager = current_runtime.login_manager
+        if login_manager is None:
+            return _error_response(
+                status_code=503,
+                code=current_runtime.provider_error_code,
+                message=current_runtime.provider_error or "worker login manager is unavailable",
+            )
+
+        try:
+            return await login_manager.cancel_session(req.session_id)
+        except ValueError as exc:
+            return _error_response(
+                status_code=409,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
+        except Exception as exc:
+            return _error_response(
+                status_code=500,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
 
     return app
 

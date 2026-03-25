@@ -430,6 +430,91 @@ class SubscriptionStorage:
             )
             await conn.commit()
 
+    async def list_subscriptions_by_pause_reasons(
+        self,
+        reasons: list[str] | tuple[str, ...],
+    ) -> list[Subscription]:
+        normalized = [str(reason).strip() for reason in reasons if str(reason).strip()]
+        if not normalized:
+            return []
+
+        conn = self._conn_or_raise()
+        placeholders = ", ".join("?" for _ in normalized)
+        rows = await (
+            await conn.execute(
+                f"""
+                SELECT * FROM subscriptions
+                WHERE paused_reason IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                tuple(normalized),
+            )
+        ).fetchall()
+        return [self._row_to_subscription(row) for row in rows]
+
+    async def resume_subscriptions_by_pause_reasons(
+        self,
+        reasons: list[str] | tuple[str, ...],
+        *,
+        now_ts: int,
+    ) -> list[Subscription]:
+        normalized = [str(reason).strip() for reason in reasons if str(reason).strip()]
+        if not normalized:
+            return []
+
+        conn = self._conn_or_raise()
+        placeholders = ", ".join("?" for _ in normalized)
+        async with self._write_lock:
+            rows = await (
+                await conn.execute(
+                    f"""
+                    SELECT * FROM subscriptions
+                    WHERE paused_reason IN ({placeholders})
+                    ORDER BY id ASC
+                    """,
+                    tuple(normalized),
+                )
+            ).fetchall()
+            if not rows:
+                return []
+
+            await conn.execute(
+                f"""
+                UPDATE subscriptions
+                SET enabled = 1,
+                    paused_reason = NULL,
+                    consecutive_failures = 0,
+                    next_run_at = ?,
+                    updated_at = ?
+                WHERE paused_reason IN ({placeholders})
+                """,
+                (now_ts, now_ts, *normalized),
+            )
+            await conn.commit()
+
+        resumed: list[Subscription] = []
+        for row in rows:
+            sub = self._row_to_subscription(row)
+            resumed.append(
+                Subscription(
+                    id=sub.id,
+                    umo=sub.umo,
+                    keyword=sub.keyword,
+                    interval_sec=sub.interval_sec,
+                    pages=sub.pages,
+                    drop_abs=sub.drop_abs,
+                    drop_pct=sub.drop_pct,
+                    new_window_sec=sub.new_window_sec,
+                    cooldown_sec=sub.cooldown_sec,
+                    enabled=True,
+                    paused_reason=None,
+                    last_run_at=sub.last_run_at,
+                    next_run_at=now_ts,
+                    consecutive_failures=0,
+                )
+            )
+        return resumed
+
     async def update_schedule_success(
         self, sub_id: int, now_ts: int, interval_sec: int
     ) -> None:

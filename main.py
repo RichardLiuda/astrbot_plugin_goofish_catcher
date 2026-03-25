@@ -21,6 +21,7 @@ from .app.provider import (
     SearchProvider,
     build_provider,
 )
+from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
 from .app.storage import SubscriptionStorage
@@ -51,6 +52,7 @@ class GoofishCatcherPlugin(Star):
         self.notifier: Notifier | None = None
         self.recommender: GoofishRecommender | None = None
         self.scheduler: MonitoringScheduler | None = None
+        self.remote_auth_coordinator: RemoteAuthRecoveryCoordinator | None = None
         self._provider_error: str | None = None
         self._provider_health: dict[str, Any] | None = None
         self._provider_health_checked_at: int | None = None
@@ -177,6 +179,7 @@ class GoofishCatcherPlugin(Star):
         self._provider_health_checked_at = None
         self.provider = None
         self.scheduler = None
+        self.remote_auth_coordinator = None
         self.notifier = Notifier(
             context=self.context,
             webhook_url=self.settings.webhook_url,
@@ -221,6 +224,11 @@ class GoofishCatcherPlugin(Star):
 
         if self.storage is None:
             raise RuntimeError("storage is not initialized")
+        self.remote_auth_coordinator = RemoteAuthRecoveryCoordinator(
+            context=self.context,
+            settings=self.settings,
+            provider=self.provider,
+        )
         self.scheduler = MonitoringScheduler(
             context=self.context,
             settings=self.settings,
@@ -229,6 +237,7 @@ class GoofishCatcherPlugin(Star):
             notifier=self.notifier,
             recommender=self.recommender,
             activity_monitor=self.activity_monitor,
+            remote_auth_coordinator=self.remote_auth_coordinator,
         )
         self._ready = True
         logger.info(
@@ -253,6 +262,7 @@ class GoofishCatcherPlugin(Star):
         self.notifier = None
         self.provider = None
         self.recommender = None
+        self.remote_auth_coordinator = None
         self._ready = False
 
     async def _ensure_admin_webui_started(self, *, allow_stop: bool = True) -> None:
@@ -285,7 +295,7 @@ class GoofishCatcherPlugin(Star):
                 timeout=max(self.settings.fetch_timeout_sec + 30, 45),
             )
             now_ts = int(time.time())
-            candidates = await self.scheduler.process_manual_fetch(
+            candidates, _ = await self.scheduler.process_manual_fetch(
                 sub=sub,
                 items=items,
                 now_ts=now_ts,
@@ -317,6 +327,27 @@ class GoofishCatcherPlugin(Star):
                 exc_info=True,
             )
 
+    async def _trigger_remote_auth_recovery(
+        self,
+        *,
+        umo: str,
+        sub_id: int | None = None,
+    ) -> str | None:
+        if self.remote_auth_coordinator is None:
+            return None
+        try:
+            return await self.remote_auth_coordinator.handle_provider_auth_failure(
+                umo=umo,
+                sub_id=sub_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] failed to trigger remote auth recovery: %s",
+                exc,
+                exc_info=True,
+            )
+            return None
+
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):
         """闲鱼监控指令入口，查看命令总览。"""
@@ -329,6 +360,9 @@ class GoofishCatcherPlugin(Star):
             "/闲鱼 恢复 <关键词>\n"
             "/闲鱼 立即检查 [关键词]\n"
             "/闲鱼 查询 <关键词...> [--pages N]\n"
+            "/闲鱼 登录\n"
+            "/闲鱼 登录完成\n"
+            "/闲鱼 登录取消\n"
             "/闲鱼 明细 <关键词> [limit]\n"
             "/闲鱼 状态"
         )
@@ -520,8 +554,19 @@ class GoofishCatcherPlugin(Star):
                     ProviderErrorCode.CAPTCHA,
                 }:
                     await self.storage.pause_subscription(sub.id, exc.code.value)
+                extra_hint = ""
+                if exc.code in {
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    ProviderErrorCode.CAPTCHA,
+                }:
+                    login_hint = await self._trigger_remote_auth_recovery(
+                        umo=event.unified_msg_origin,
+                        sub_id=sub.id,
+                    )
+                    if login_hint:
+                        extra_hint = f"\n{login_hint}"
                 yield event.plain_result(
-                    f"立即检查失败：{exc.code.value}\n{exc.message}"
+                    f"立即检查失败：{exc.code.value}\n{exc.message}{extra_hint}"
                 )
                 return
             except Exception as exc:
@@ -559,10 +604,21 @@ class GoofishCatcherPlugin(Star):
                     ProviderErrorCode.CAPTCHA,
                 }:
                     await self.storage.pause_subscription(sub.id, exc.code.value)
+                extra_hint = ""
+                if exc.code in {
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    ProviderErrorCode.CAPTCHA,
+                }:
+                    login_hint = await self._trigger_remote_auth_recovery(
+                        umo=event.unified_msg_origin,
+                        sub_id=sub.id,
+                    )
+                    if login_hint:
+                        extra_hint = f"\n{login_hint}"
                 result_sections.append(
                     _render_manual_check_error(
                         keyword=sub.keyword,
-                        message=f"立即检查失败：{exc.code.value}\n{exc.message}",
+                        message=f"立即检查失败：{exc.code.value}\n{exc.message}{extra_hint}",
                     )
                 )
             except Exception as exc:
@@ -659,10 +715,103 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(f"查询超时（>{timeout_sec}s），请稍后重试。")
             return
         except ProviderError as exc:
-            yield event.plain_result(f"查询失败：{exc.code.value}\n{exc.message}")
+            extra_hint = ""
+            if exc.code in {
+                ProviderErrorCode.AUTH_REQUIRED,
+                ProviderErrorCode.CAPTCHA,
+            }:
+                login_hint = await self._trigger_remote_auth_recovery(
+                    umo=event.unified_msg_origin
+                )
+                if login_hint:
+                    extra_hint = f"\n{login_hint}"
+            yield event.plain_result(
+                f"查询失败：{exc.code.value}\n{exc.message}{extra_hint}"
+            )
             return
         except Exception as exc:
             yield event.plain_result(f"查询失败：{exc}")
+            return
+
+    @goofish.command("登录", alias={"login", "auth"})
+    async def remote_login(self, event: AstrMessageEvent):
+        """手动拉起远端 worker 登录流程并回传二维码截图。"""
+        if not await self._check_ready(event):
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+        if self.remote_auth_coordinator is None:
+            yield event.plain_result(
+                "当前 Provider 未启用远端登录恢复（需要 remote_rest 且 Provider 可用）。"
+            )
+            return
+
+        try:
+            message = await self.remote_auth_coordinator.start_login(
+                umo=event.unified_msg_origin
+            )
+            yield event.plain_result(message)
+            return
+        except ProviderError as exc:
+            yield event.plain_result(f"启动远端登录失败：{exc.code.value}\n{exc.message}")
+            return
+        except Exception as exc:
+            yield event.plain_result(f"启动远端登录失败：{exc}")
+            return
+
+    @goofish.command("登录完成", alias={"login_done", "auth_done"})
+    async def remote_login_done(self, event: AstrMessageEvent):
+        """确认扫码已完成，保存远端登录态并自动恢复订阅。"""
+        if not await self._check_ready(event):
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+        if self.remote_auth_coordinator is None:
+            yield event.plain_result(
+                "当前 Provider 未启用远端登录恢复（需要 remote_rest 且 Provider 可用）。"
+            )
+            return
+        if self.storage is None:
+            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+            return
+
+        await self._ensure_scheduler_started()
+        try:
+            message = await self.remote_auth_coordinator.complete_login(
+                umo=event.unified_msg_origin,
+                storage=self.storage,
+                scheduler=self.scheduler,
+            )
+            yield event.plain_result(message)
+            return
+        except ProviderError as exc:
+            yield event.plain_result(f"保存远端登录态失败：{exc.code.value}\n{exc.message}")
+            return
+        except Exception as exc:
+            yield event.plain_result(f"保存远端登录态失败：{exc}")
+            return
+
+    @goofish.command("登录取消", alias={"login_cancel", "auth_cancel"})
+    async def remote_login_cancel(self, event: AstrMessageEvent):
+        """取消当前远端登录恢复流程。"""
+        if not await self._check_ready(event):
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+        if self.remote_auth_coordinator is None:
+            yield event.plain_result(
+                "当前 Provider 未启用远端登录恢复（需要 remote_rest 且 Provider 可用）。"
+            )
+            return
+
+        try:
+            message = await self.remote_auth_coordinator.cancel_login(
+                umo=event.unified_msg_origin
+            )
+            yield event.plain_result(message)
+            return
+        except ProviderError as exc:
+            yield event.plain_result(f"取消远端登录恢复失败：{exc.code.value}\n{exc.message}")
+            return
+        except Exception as exc:
+            yield event.plain_result(f"取消远端登录恢复失败：{exc}")
             return
 
     @goofish.command("明细", alias={"detail", "items"})

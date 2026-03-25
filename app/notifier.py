@@ -108,12 +108,13 @@ class Notifier:
         keyword: str,
         code: str,
         message: str,
+        action_hint: str | None = None,
     ) -> bool:
         text = (
             f"⚠️【闲鱼监控告警】关键词：{keyword}\n"
             f"错误码：{code}\n"
             f"说明：{message}\n"
-            "已暂停该订阅，请处理后手动恢复。"
+            f"{action_hint or '已暂停该订阅，请处理后手动恢复。'}"
         )
         sent = await self._send_to_umo(umo, text)
         await self._send_webhook(
