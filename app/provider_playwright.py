@@ -319,6 +319,9 @@ class PlaywrightSearchProvider:
             await self._persist_context_storage_state(context)
             return items
         except TimeoutError as exc:
+            timeout_error = await self._classify_timeout_page_state(page)
+            if timeout_error is not None:
+                raise timeout_error from exc
             raise ProviderError(
                 ProviderErrorCode.TIMEOUT,
                 f"playwright timeout while fetching page {page_index}: {exc}",
@@ -459,6 +462,39 @@ class PlaywrightSearchProvider:
             await page.wait_for_load_state("networkidle", timeout=idle_timeout)
         except Exception:
             await page.wait_for_timeout(min(1800, idle_timeout))
+
+    async def _classify_timeout_page_state(self, page) -> ProviderError | None:
+        try:
+            current_url = str(getattr(page, "url", "") or "").lower()
+        except Exception:
+            current_url = ""
+        if "login" in current_url or "passport" in current_url:
+            return ProviderError(
+                ProviderErrorCode.AUTH_REQUIRED,
+                "goofish redirected to login page",
+            )
+        if "captcha" in current_url:
+            return ProviderError(
+                ProviderErrorCode.CAPTCHA,
+                "captcha detected on goofish page",
+            )
+
+        try:
+            html = await page.content()
+        except Exception:
+            html = ""
+        lowered = html.lower()
+        if "验证码" in html or "滑块" in html or "captcha" in lowered:
+            return ProviderError(
+                ProviderErrorCode.CAPTCHA,
+                "captcha detected on goofish page",
+            )
+        if "登录" in html or "login" in lowered or "passport" in lowered:
+            return ProviderError(
+                ProviderErrorCode.AUTH_REQUIRED,
+                "goofish redirected to login page",
+            )
+        return None
 
     async def _wait_for_items_ready(
         self,

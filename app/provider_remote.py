@@ -101,6 +101,9 @@ class RemoteSearchProvider:
         pages: int,
         timeout_sec: int,
     ) -> list[NormalizedItem]:
+        # Give the remote worker enough time to finish its own Playwright timeout
+        # and send back a structured AUTH_REQUIRED/CAPTCHA/TIMEOUT response.
+        request_timeout_sec = max(timeout_sec + 10, int(timeout_sec * 1.5))
         payload = {
             "keyword": keyword,
             "pages": pages,
@@ -111,7 +114,7 @@ class RemoteSearchProvider:
         response, data = await self._request_json(
             method="POST",
             path="/v1/search",
-            timeout_sec=timeout_sec,
+            timeout_sec=request_timeout_sec,
             json_body=payload,
         )
         data = _expect_ok_object(

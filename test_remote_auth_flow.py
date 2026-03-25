@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 import worker_server
 from app.config import PluginSettings
+from app.provider_playwright import PlaywrightSearchProvider
+from app.provider_remote import RemoteSearchProvider
 from app.provider_retry import search_with_captcha_retry
 from app.remote_auth_recovery import ActiveRemoteAuthFlow, RemoteAuthRecoveryCoordinator
 from app.storage import SubscriptionStorage
@@ -309,6 +311,53 @@ class ProviderCaptchaRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, 3)
         self.assertEqual(ctx.exception.code, ProviderErrorCode.CAPTCHA)
         self.assertEqual(ctx.exception.message, "captcha attempt 3")
+
+
+class RemoteProviderTimeoutBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup_temp_dir)
+        self.base_dir = Path(self._temp_dir.name)
+
+    async def _cleanup_temp_dir(self) -> None:
+        self._temp_dir.cleanup()
+
+    async def test_remote_search_uses_timeout_buffer(self) -> None:
+        settings = replace(
+            build_settings(self.base_dir),
+            provider_mode="remote_rest",
+            remote_base_url="https://worker.example",
+        )
+        provider = RemoteSearchProvider(settings)
+
+        async def fake_request_json(*, method, path, timeout_sec, json_body=None):
+            self.assertEqual(method, "POST")
+            self.assertEqual(path, "/v1/search")
+            self.assertEqual(timeout_sec, 30)
+            return SimpleNamespace(status_code=200, text=""), {"ok": True, "items": []}
+
+        provider._request_json = fake_request_json  # type: ignore[method-assign]
+        items = await provider.search(
+            keyword="flash",
+            pages=1,
+            timeout_sec=20,
+        )
+
+        self.assertEqual(items, [])
+
+    async def test_timeout_page_state_maps_login_page_to_auth_required(self) -> None:
+        settings = build_settings(self.base_dir)
+        provider = PlaywrightSearchProvider(settings)
+
+        class FakePage:
+            url = "https://passport.goofish.com/login"
+
+            async def content(self) -> str:
+                return "<html><body>login</body></html>"
+
+        error = await provider._classify_timeout_page_state(FakePage())
+        self.assertIsNotNone(error)
+        self.assertEqual(error.code, ProviderErrorCode.AUTH_REQUIRED)
 
 
 class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
