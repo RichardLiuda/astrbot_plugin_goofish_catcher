@@ -13,7 +13,10 @@ import worker_server
 from app.config import PluginSettings
 from app.provider_playwright import PlaywrightSearchProvider
 from app.provider_remote import RemoteSearchProvider
-from app.provider_retry import search_with_captcha_retry
+from app.provider_retry import (
+    estimate_captcha_retry_timeout_sec,
+    search_with_captcha_retry,
+)
 from app.remote_auth_recovery import ActiveRemoteAuthFlow, RemoteAuthRecoveryCoordinator
 from app.storage import SubscriptionStorage
 from app.types import ProviderError, ProviderErrorCode
@@ -259,6 +262,12 @@ class StorageResumeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProviderCaptchaRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_timeout_budget_accounts_for_all_attempts(self) -> None:
+        self.assertEqual(
+            estimate_captcha_retry_timeout_sec(timeout_sec=20),
+            92,
+        )
+
     async def test_search_retries_captcha_twice_before_success(self) -> None:
         class FakeProvider:
             def __init__(self) -> None:

@@ -20,7 +20,10 @@ from .detector import (
 from .notifier import Notifier
 from .activity_monitor import ActivityMonitor
 from .provider import SearchProvider
-from .provider_retry import search_with_captcha_retry
+from .provider_retry import (
+    estimate_captcha_retry_timeout_sec,
+    search_with_captcha_retry,
+)
 from .recommender import GoofishRecommender
 from .storage import SubscriptionStorage
 from .types import (
@@ -290,8 +293,9 @@ class MonitoringScheduler:
                     pages=max(1, min(sub.pages, self.settings.max_pages)),
                     timeout_sec=self.settings.fetch_timeout_sec,
                 ),
-                # Add a global timeout wrapper to avoid hanging without logs.
-                timeout=max(self.settings.fetch_timeout_sec + 30, 45),
+                timeout=estimate_captcha_retry_timeout_sec(
+                    timeout_sec=self.settings.fetch_timeout_sec,
+                ),
             )
             now_ts = int(time.time())
             await self.activity_monitor.update_task(

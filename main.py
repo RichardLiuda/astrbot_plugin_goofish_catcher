@@ -22,7 +22,10 @@ from .app.provider import (
     SearchProvider,
     build_provider,
 )
-from .app.provider_retry import search_with_captcha_retry
+from .app.provider_retry import (
+    estimate_captcha_retry_timeout_sec,
+    search_with_captcha_retry,
+)
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
@@ -293,7 +296,7 @@ class GoofishCatcherPlugin(Star):
                     keyword=sub.keyword,
                     pages=max(1, min(sub.pages, self.settings.max_pages)),
                 ),
-                timeout=max(self.settings.fetch_timeout_sec + 30, 45),
+                timeout=self._search_operation_timeout_sec(),
             )
             now_ts = int(time.time())
             candidates, _ = await self.scheduler.process_manual_fetch(
@@ -361,6 +364,11 @@ class GoofishCatcherPlugin(Star):
             self.provider,
             keyword=keyword,
             pages=pages,
+            timeout_sec=self.settings.fetch_timeout_sec,
+        )
+
+    def _search_operation_timeout_sec(self) -> int:
+        return estimate_captcha_retry_timeout_sec(
             timeout_sec=self.settings.fetch_timeout_sec,
         )
 
@@ -602,7 +610,7 @@ class GoofishCatcherPlugin(Star):
                 return
             except asyncio.TimeoutError:
                 yield event.plain_result(
-                    f"立即检查超时（>{max(self.settings.fetch_timeout_sec + 30, 45)}s），请稍后重试。"
+                    f"立即检查超时（>{self._search_operation_timeout_sec()}s），请稍后重试。"
                 )
                 return
             except ProviderError as exc:
@@ -651,7 +659,7 @@ class GoofishCatcherPlugin(Star):
                     _render_manual_check_error(
                         keyword=sub.keyword,
                         message=(
-                            f"立即检查超时（>{max(self.settings.fetch_timeout_sec + 30, 45)}s），请稍后重试。"
+                            f"立即检查超时（>{self._search_operation_timeout_sec()}s），请稍后重试。"
                         ),
                     )
                 )
@@ -733,7 +741,7 @@ class GoofishCatcherPlugin(Star):
                 "关键词不能为空。示例：/闲鱼 查询 适马 60-600 --pages 2"
             )
             return
-        timeout_sec = max(self.settings.fetch_timeout_sec + 30, 45)
+        timeout_sec = self._search_operation_timeout_sec()
         try:
             raw_items = await asyncio.wait_for(
                 self._search_with_captcha_retry(
