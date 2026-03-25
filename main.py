@@ -4,6 +4,7 @@ import asyncio
 import re
 import time
 from datetime import datetime
+from sys import maxsize
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -21,6 +22,7 @@ from .app.provider import (
     SearchProvider,
     build_provider,
 )
+from .app.provider_retry import search_with_captcha_retry
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
@@ -287,10 +289,9 @@ class GoofishCatcherPlugin(Star):
 
         try:
             items = await asyncio.wait_for(
-                self.provider.search(
+                self._search_with_captcha_retry(
                     keyword=sub.keyword,
                     pages=max(1, min(sub.pages, self.settings.max_pages)),
-                    timeout_sec=self.settings.fetch_timeout_sec,
                 ),
                 timeout=max(self.settings.fetch_timeout_sec + 30, 45),
             )
@@ -348,6 +349,64 @@ class GoofishCatcherPlugin(Star):
             )
             return None
 
+    async def _search_with_captcha_retry(
+        self,
+        *,
+        keyword: str,
+        pages: int,
+    ) -> list[NormalizedItem]:
+        if self.provider is None:
+            raise RuntimeError("抓取组件不可用")
+        return await search_with_captcha_retry(
+            self.provider,
+            keyword=keyword,
+            pages=pages,
+            timeout_sec=self.settings.fetch_timeout_sec,
+        )
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 20)
+    async def auto_complete_remote_auth_flow(self, event: AstrMessageEvent):
+        if not await self._check_ready(event):
+            return
+        if self.remote_auth_coordinator is None or self.storage is None:
+            return
+        message_text = event.get_message_str()
+        try:
+            should_complete = await (
+                self.remote_auth_coordinator.should_auto_complete_from_message(
+                    umo=event.unified_msg_origin,
+                    message_text=message_text,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] failed to inspect auth recovery auto-complete message: %s",
+                exc,
+                exc_info=True,
+            )
+            return
+        if not should_complete:
+            return
+
+        await self._ensure_scheduler_started()
+        try:
+            message = await self.remote_auth_coordinator.complete_login(
+                umo=event.unified_msg_origin,
+                storage=self.storage,
+                scheduler=self.scheduler,
+            )
+            yield event.plain_result(message)
+            event.stop_event()
+            return
+        except ProviderError as exc:
+            yield event.plain_result(f"保存远端登录态失败：{exc.code.value}\n{exc.message}")
+            event.stop_event()
+            return
+        except Exception as exc:
+            yield event.plain_result(f"保存远端登录态失败：{exc}")
+            event.stop_event()
+            return
+
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):
         """闲鱼监控指令入口，查看命令总览。"""
@@ -361,7 +420,6 @@ class GoofishCatcherPlugin(Star):
             "/闲鱼 立即检查 [关键词]\n"
             "/闲鱼 查询 <关键词...> [--pages N]\n"
             "/闲鱼 登录\n"
-            "/闲鱼 登录完成\n"
             "/闲鱼 登录取消\n"
             "/闲鱼 明细 <关键词> [limit]\n"
             "/闲鱼 状态"
@@ -678,10 +736,9 @@ class GoofishCatcherPlugin(Star):
         timeout_sec = max(self.settings.fetch_timeout_sec + 30, 45)
         try:
             raw_items = await asyncio.wait_for(
-                self.provider.search(
+                self._search_with_captcha_retry(
                     keyword=keyword_text,
                     pages=page_count,
-                    timeout_sec=self.settings.fetch_timeout_sec,
                 ),
                 timeout=timeout_sec,
             )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,7 +11,10 @@ from fastapi.testclient import TestClient
 
 import worker_server
 from app.config import PluginSettings
+from app.provider_retry import search_with_captcha_retry
+from app.remote_auth_recovery import ActiveRemoteAuthFlow, RemoteAuthRecoveryCoordinator
 from app.storage import SubscriptionStorage
+from app.types import ProviderError, ProviderErrorCode
 
 
 def build_settings(base_dir: Path) -> PluginSettings:
@@ -251,3 +255,137 @@ class StorageResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manual_after.enabled)
         self.assertEqual(manual_after.paused_reason, "MANUAL_PAUSE")
 
+
+class ProviderCaptchaRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_retries_captcha_twice_before_success(self) -> None:
+        class FakeProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def search(self, *, keyword, pages, timeout_sec):
+                self.calls += 1
+                if self.calls < 3:
+                    raise ProviderError(
+                        ProviderErrorCode.CAPTCHA,
+                        "captcha required",
+                    )
+                return [{"keyword": keyword, "pages": pages, "timeout_sec": timeout_sec}]
+
+        provider = FakeProvider()
+        result = await search_with_captcha_retry(
+            provider,
+            keyword="camera",
+            pages=2,
+            timeout_sec=20,
+            retry_delay_sec=0,
+        )
+
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["keyword"], "camera")
+
+    async def test_search_raises_after_final_captcha_retry(self) -> None:
+        class FakeProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def search(self, *, keyword, pages, timeout_sec):
+                self.calls += 1
+                raise ProviderError(
+                    ProviderErrorCode.CAPTCHA,
+                    f"captcha attempt {self.calls}",
+                )
+
+        provider = FakeProvider()
+        with self.assertRaises(ProviderError) as ctx:
+            await search_with_captcha_retry(
+                provider,
+                keyword="lens",
+                pages=1,
+                timeout_sec=20,
+                retry_delay_sec=0,
+            )
+
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(ctx.exception.code, ProviderErrorCode.CAPTCHA)
+        self.assertEqual(ctx.exception.message, "captcha attempt 3")
+
+
+class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup_temp_dir)
+        self.base_dir = Path(self._temp_dir.name)
+
+    async def _cleanup_temp_dir(self) -> None:
+        self._temp_dir.cleanup()
+
+    async def test_auto_complete_accepts_plain_reply_for_owner(self) -> None:
+        async def _send_message(*args, **kwargs) -> None:
+            return None
+
+        settings = replace(build_settings(self.base_dir), provider_mode="remote_rest")
+        provider = SimpleNamespace(
+            start_auth_session=lambda **_: None,
+            confirm_auth_session=lambda **_: None,
+            cancel_auth_session=lambda **_: None,
+        )
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=SimpleNamespace(send_message=_send_message),
+            settings=settings,
+            provider=provider,
+        )
+        coordinator._active_flow = ActiveRemoteAuthFlow(
+            session_id="session-1",
+            owner_umo="umo-1",
+            started_at=1,
+            page_url="https://example.com/login",
+        )
+
+        should_complete = await coordinator.should_auto_complete_from_message(
+            umo="umo-1",
+            message_text="好了，继续",
+        )
+
+        self.assertTrue(should_complete)
+
+    async def test_auto_complete_ignores_commands_and_non_owner_messages(self) -> None:
+        async def _send_message(*args, **kwargs) -> None:
+            return None
+
+        settings = replace(build_settings(self.base_dir), provider_mode="remote_rest")
+        provider = SimpleNamespace(
+            start_auth_session=lambda **_: None,
+            confirm_auth_session=lambda **_: None,
+            cancel_auth_session=lambda **_: None,
+        )
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=SimpleNamespace(send_message=_send_message),
+            settings=settings,
+            provider=provider,
+        )
+        coordinator._active_flow = ActiveRemoteAuthFlow(
+            session_id="session-1",
+            owner_umo="umo-1",
+            started_at=1,
+            page_url="https://example.com/login",
+        )
+
+        self.assertFalse(
+            await coordinator.should_auto_complete_from_message(
+                umo="umo-1",
+                message_text="/闲鱼 登录",
+            )
+        )
+        self.assertFalse(
+            await coordinator.should_auto_complete_from_message(
+                umo="umo-1",
+                message_text="/闲鱼 登录取消",
+            )
+        )
+        self.assertFalse(
+            await coordinator.should_auto_complete_from_message(
+                umo="umo-2",
+                message_text="好了",
+            )
+        )

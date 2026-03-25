@@ -20,6 +20,7 @@ from .detector import (
 from .notifier import Notifier
 from .activity_monitor import ActivityMonitor
 from .provider import SearchProvider
+from .provider_retry import search_with_captcha_retry
 from .recommender import GoofishRecommender
 from .storage import SubscriptionStorage
 from .types import (
@@ -227,6 +228,8 @@ class MonitoringScheduler:
                     continue
 
                 try:
+                    if self.remote_auth_coordinator is not None:
+                        await self.remote_auth_coordinator.wait_until_idle()
                     sub = await self.storage.get_subscription_by_id(sub_id)
                     if sub is None:
                         logger.info(
@@ -281,7 +284,8 @@ class MonitoringScheduler:
 
         try:
             raw_items = await asyncio.wait_for(
-                self.provider.search(
+                search_with_captcha_retry(
+                    self.provider,
                     keyword=sub.keyword,
                     pages=max(1, min(sub.pages, self.settings.max_pages)),
                     timeout_sec=self.settings.fetch_timeout_sec,

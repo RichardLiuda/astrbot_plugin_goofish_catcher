@@ -17,6 +17,10 @@ except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 AUTH_PAUSE_REASONS = ("AUTH_REQUIRED", "CAPTCHA")
+REMOTE_AUTH_COMMAND_PREFIXES = (
+    "/闲鱼",
+    "/goofish",
+)
 
 
 @dataclass(slots=True)
@@ -41,6 +45,8 @@ class RemoteAuthRecoveryCoordinator:
         self.provider = provider
         self._lock = asyncio.Lock()
         self._active_flow: ActiveRemoteAuthFlow | None = None
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
 
     async def handle_provider_auth_failure(
         self,
@@ -67,6 +73,7 @@ class RemoteAuthRecoveryCoordinator:
                 page_url=str(payload.get("page_url", "")).strip(),
                 affected_subscription_ids=({sub_id} if sub_id is not None else set()),
             )
+            self._idle_event.clear()
             notify_umo = umo
             notify_chain = _build_login_chain(
                 screenshot_base64=str(payload.get("screenshot_base64", "")).strip(),
@@ -76,7 +83,7 @@ class RemoteAuthRecoveryCoordinator:
 
         if notify_umo and notify_chain is not None:
             await self._send_chain(notify_umo, notify_chain)
-            return "已向当前会话发送远端登录二维码，请扫码后发送 /闲鱼 登录完成。"
+            return "已向当前会话发送远端登录二维码，扫码登录后回复任意消息即可继续。"
         return None
 
     async def start_login(self, *, umo: str) -> str:
@@ -101,6 +108,7 @@ class RemoteAuthRecoveryCoordinator:
                 page_url=str(payload.get("page_url", "")).strip(),
                 affected_subscription_ids=existing_ids,
             )
+            self._idle_event.clear()
             notify_chain = _build_login_chain(
                 screenshot_base64=str(payload.get("screenshot_base64", "")).strip(),
                 page_url=self._active_flow.page_url,
@@ -109,7 +117,7 @@ class RemoteAuthRecoveryCoordinator:
 
         if notify_chain is not None:
             await self._send_chain(umo, notify_chain)
-        return "已将远端登录二维码发送到当前会话，请扫码后发送 /闲鱼 登录完成。"
+        return "已将远端登录二维码发送到当前会话，扫码登录后回复任意消息即可继续。"
 
     async def complete_login(
         self,
@@ -132,6 +140,7 @@ class RemoteAuthRecoveryCoordinator:
 
         async with self._lock:
             self._active_flow = None
+            self._idle_event.set()
 
         now_ts = int(time.time())
         resumed = await storage.resume_subscriptions_by_pause_reasons(
@@ -168,7 +177,42 @@ class RemoteAuthRecoveryCoordinator:
 
         async with self._lock:
             self._active_flow = None
+            self._idle_event.set()
         return "已取消当前远端登录恢复流程。"
+
+    def has_active_flow(self) -> bool:
+        return self._active_flow is not None
+
+    async def wait_until_idle(self) -> None:
+        await self._idle_event.wait()
+
+    async def should_auto_complete_from_message(
+        self,
+        *,
+        umo: str,
+        message_text: str,
+    ) -> bool:
+        normalized = str(message_text or "").strip()
+        if not normalized:
+            return False
+
+        async with self._lock:
+            if self._active_flow is None:
+                return False
+            if self._active_flow.owner_umo != umo:
+                return False
+
+        lowered = normalized.lower()
+        if any(lowered.startswith(prefix.lower()) for prefix in REMOTE_AUTH_COMMAND_PREFIXES):
+            return False
+        cancel_markers = (
+            "/闲鱼 登录取消",
+            "/goofish login_cancel",
+            "/goofish auth_cancel",
+        )
+        if any(lowered.startswith(marker.lower()) for marker in cancel_markers):
+            return False
+        return True
 
     def _supports_remote_auth(self) -> bool:
         return bool(
@@ -199,7 +243,7 @@ def _build_login_chain(
     lines = [
         "检测到远端 worker 需要重新登录闲鱼。",
         "请直接在当前对话里扫码登录。",
-        "登录完成后发送 /闲鱼 登录完成",
+        "扫码登录后回复任意消息即可继续任务。",
         "如需取消请发送 /闲鱼 登录取消",
     ]
     if owner_only:
