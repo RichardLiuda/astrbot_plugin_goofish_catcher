@@ -12,7 +12,7 @@
 
 | 配置项 | 默认值 | 建议 |
 | --- | --- | --- |
-| `playwright_storage_state_file` | `[]` | 本地登录态文件路径，建议指向固定的 `storage_state.json` |
+| `playwright_storage_state_file` | `[]` | 仅保留兼容旧配置导入；本地模式现在默认直接使用 `plugin_data/storage_state.json` |
 | `playwright_executable_path` | `""` | 想用系统 Chrome/Chromium 时再填，建议绝对路径 |
 | `playwright_block_assets` | `true` | 建议保持开启，减少图片/字体加载 |
 | `playwright_force_direct` | `true` | 建议保持开启，减少系统代理造成的 IP 波动 |
@@ -111,7 +111,7 @@
 
 ## 补登录态相关说明
 
-- 本地模式下，建议直接运行 `save_state.py` 更新 `storage_state.json`
+- 本地模式下，优先直接发送 `/闲鱼 登录`；如需 CLI，也可以运行 `save_state.py` 更新 `plugin_data/storage_state.json`
 - 远程模式下，推荐使用 2.0.0 的自动补登录态流程
 - 如果远程 worker 返回 `CAPTCHA`，插件会自动重试 2 次
 - 重试后仍失败时，会向首次触发的会话发送二维码截图

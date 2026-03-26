@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import shutil
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -257,37 +257,60 @@ def load_plugin_settings(
     storage_state_path: Path | None = None
     stable_state_path = plugin_data_dir / "storage_state.json"
     storage_state_file = _first_file(raw.get("playwright_storage_state_file"))
-    if storage_state_file:
+    if provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL:
+        if stable_state_path.exists():
+            storage_state_path = stable_state_path
+            logger.info(
+                "[%s] use local playwright storage_state from stable path: %s",
+                plugin_name,
+                stable_state_path,
+            )
+        elif storage_state_file:
+            candidate = Path(storage_state_file)
+            if not candidate.is_absolute():
+                candidate = plugin_data_dir / storage_state_file
+            if candidate.exists():
+                try:
+                    if candidate.resolve() != stable_state_path.resolve():
+                        shutil.copy2(candidate, stable_state_path)
+                        logger.info(
+                            "[%s] copied playwright storage_state to stable path: %s",
+                            plugin_name,
+                            stable_state_path,
+                        )
+                    storage_state_path = stable_state_path
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] failed to copy storage_state from %s to %s: %s",
+                        plugin_name,
+                        candidate,
+                        stable_state_path,
+                        exc,
+                    )
+                    storage_state_path = candidate
+            else:
+                logger.warning(
+                    "[%s] playwright_storage_state_file not found: %s",
+                    plugin_name,
+                    candidate,
+                )
+    elif storage_state_file:
         candidate = Path(storage_state_file)
         if not candidate.is_absolute():
             candidate = plugin_data_dir / storage_state_file
         if candidate.exists():
-            try:
-                # Keep a stable state copy under plugin data dir to survive temp-file cleanup.
-                if candidate.resolve() != stable_state_path.resolve():
-                    shutil.copy2(candidate, stable_state_path)
-                    logger.info(
-                        "[%s] copied playwright storage_state to stable path: %s",
-                        plugin_name,
-                        stable_state_path,
-                    )
-                storage_state_path = stable_state_path
-            except Exception as exc:
-                logger.warning(
-                    "[%s] failed to copy storage_state from %s to %s: %s",
-                    plugin_name,
-                    candidate,
-                    stable_state_path,
-                    exc,
-                )
-                storage_state_path = candidate
+            storage_state_path = candidate
         else:
             logger.warning(
                 "[%s] playwright_storage_state_file not found: %s",
                 plugin_name,
                 candidate,
             )
-    if storage_state_path is None and stable_state_path.exists():
+    if (
+        provider_mode != PROVIDER_MODE_PLAYWRIGHT_LOCAL
+        and storage_state_path is None
+        and stable_state_path.exists()
+    ):
         storage_state_path = stable_state_path
         logger.info(
             "[%s] use fallback playwright storage_state from stable path: %s",

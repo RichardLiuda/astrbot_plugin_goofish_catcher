@@ -420,12 +420,28 @@ class MonitoringScheduler:
                             sub_id=sub.id,
                         )
                         action_hint = (
-                            "已暂停该订阅，并已尝试启动远端登录恢复流程。"
+                            "已暂停该订阅，并已尝试启动登录恢复流程。"
                             "扫码完成后会自动恢复；如未收到二维码，可发送 /闲鱼 登录。"
                         )
-                    except Exception as recovery_exc:
+                    except ProviderError as recovery_exc:
+                        action_hint = (
+                            "已暂停该订阅，但自动启动登录恢复失败。"
+                            f"{recovery_exc.code.value}: {recovery_exc.message}。"
+                            "可稍后发送 /闲鱼 登录 重试。"
+                        )
                         logger.warning(
-                            "[goofish_catcher] failed to trigger remote auth recovery for sub=%s: %s",
+                            "[goofish_catcher] failed to trigger auth recovery for sub=%s: %s",
+                            sub.id,
+                            recovery_exc,
+                            exc_info=True,
+                        )
+                    except Exception as recovery_exc:
+                        action_hint = (
+                            "已暂停该订阅，但自动启动登录恢复失败。"
+                            f"{recovery_exc}。可稍后发送 /闲鱼 登录 重试。"
+                        )
+                        logger.warning(
+                            "[goofish_catcher] failed to trigger auth recovery for sub=%s: %s",
                             sub.id,
                             recovery_exc,
                             exc_info=True,

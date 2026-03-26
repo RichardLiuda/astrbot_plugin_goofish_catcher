@@ -10,7 +10,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import worker_server
-from app.config import PluginSettings
+from app.auth_session import LocalAuthSessionController
+from app.config import PluginSettings, load_plugin_settings
 from app.provider_playwright import PlaywrightSearchProvider
 from app.provider_remote import RemoteSearchProvider
 from app.provider_retry import (
@@ -188,6 +189,119 @@ class WorkerAuthRouteTests(unittest.TestCase):
                 confirm = client.post("/v1/auth/confirm", json={"session_id": session_id})
                 self.assertEqual(confirm.status_code, 409)
                 self.assertIn("no active login session", confirm.json()["error"]["message"])
+
+
+class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup_temp_dir)
+        self.base_dir = Path(self._temp_dir.name)
+        FakeGoofishLoginSession.created_count = 0
+
+    async def _cleanup_temp_dir(self) -> None:
+        self._temp_dir.cleanup()
+
+    async def test_local_auth_start_reuses_active_session_and_confirm_mirrors_state(self) -> None:
+        settings = build_settings(self.base_dir)
+        controller = LocalAuthSessionController(settings)
+
+        with patch("app.auth_session.GoofishLoginSession", FakeGoofishLoginSession):
+            first = await controller.start_auth_session(force_restart=False)
+            self.assertEqual(first["status"], "active")
+            self.assertTrue(first["session_id"])
+            self.assertTrue(first["screenshot_base64"])
+
+            second = await controller.start_auth_session(force_restart=False)
+            self.assertEqual(second["session_id"], first["session_id"])
+            self.assertEqual(FakeGoofishLoginSession.created_count, 1)
+
+            confirm = await controller.confirm_auth_session(
+                session_id=first["session_id"]
+            )
+            self.assertEqual(confirm["status"], "saved")
+            saved_path = Path(confirm["saved_path"])
+            self.assertTrue(saved_path.exists())
+            self.assertEqual(saved_path.read_text(encoding="utf-8"), "fake-state")
+            self.assertEqual(confirm["mirrored_paths"], [])
+
+            with self.assertRaises(RuntimeError):
+                await controller.confirm_auth_session(session_id=first["session_id"])
+
+    async def test_local_auth_cancel_clears_active_session(self) -> None:
+        settings = build_settings(self.base_dir)
+        controller = LocalAuthSessionController(settings)
+
+        with patch("app.auth_session.GoofishLoginSession", FakeGoofishLoginSession):
+            first = await controller.start_auth_session(force_restart=False)
+            session_id = first["session_id"]
+
+            cancel = await controller.cancel_auth_session(session_id=session_id)
+            self.assertEqual(cancel["status"], "cancelled")
+
+            with self.assertRaises(RuntimeError):
+                await controller.cancel_auth_session(session_id=session_id)
+
+
+class LocalStorageStatePathTests(unittest.TestCase):
+    def test_resolve_local_storage_state_path_uses_runtime_plugin_data_dir(self) -> None:
+        expected_dir = Path("/tmp/goofish-plugin-data")
+
+        with patch(
+            "app.auth_session.StarTools",
+            SimpleNamespace(get_data_dir=lambda plugin_name: expected_dir),
+        ):
+            from app.auth_session import resolve_local_storage_state_path
+
+            resolved = resolve_local_storage_state_path()
+
+        self.assertEqual(resolved, expected_dir / "storage_state.json")
+
+
+class PluginSettingsStorageMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp_dir.cleanup)
+        self.base_dir = Path(self._temp_dir.name)
+        self.plugin_data_dir = self.base_dir / "plugin_data"
+        self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+
+    def test_local_mode_copies_legacy_storage_state_to_stable_path(self) -> None:
+        legacy_path = self.base_dir / "legacy_state.json"
+        legacy_path.write_text('{"cookies": ["legacy"]}', encoding="utf-8")
+
+        settings = load_plugin_settings(
+            {
+                "provider_mode": "playwright_local",
+                "playwright_storage_state_file": [str(legacy_path)],
+            },
+            "goofish_catcher",
+            self.plugin_data_dir,
+        )
+
+        stable_path = self.plugin_data_dir / "storage_state.json"
+        self.assertEqual(settings.playwright_storage_state_path, stable_path)
+        self.assertTrue(stable_path.exists())
+        self.assertEqual(
+            stable_path.read_text(encoding="utf-8"),
+            legacy_path.read_text(encoding="utf-8"),
+        )
+
+    def test_local_mode_falls_back_to_legacy_storage_state_when_copy_fails(self) -> None:
+        legacy_path = self.base_dir / "legacy_state.json"
+        legacy_path.write_text('{"cookies": ["legacy"]}', encoding="utf-8")
+
+        with patch("app.config.shutil.copy2", side_effect=OSError("disk full")):
+            settings = load_plugin_settings(
+                {
+                    "provider_mode": "playwright_local",
+                    "playwright_storage_state_file": [str(legacy_path)],
+                },
+                "goofish_catcher",
+                self.plugin_data_dir,
+            )
+
+        self.assertEqual(settings.playwright_storage_state_path, legacy_path)
+        self.assertFalse((self.plugin_data_dir / "storage_state.json").exists())
 
 
 class StorageResumeTests(unittest.IsolatedAsyncioTestCase):
@@ -447,3 +561,42 @@ class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
                 message_text="好了",
             )
         )
+
+    async def test_local_mode_auth_failure_can_start_login_recovery(self) -> None:
+        sent_messages: list[tuple[str, object]] = []
+
+        async def _send_message(umo, chain) -> None:
+            sent_messages.append((umo, chain))
+
+        async def _start_auth_session(*, force_restart: bool = False):
+            self.assertFalse(force_restart)
+            return {
+                "session_id": "local-session-1",
+                "status": "active",
+                "started_at": 1,
+                "page_url": "https://www.goofish.com/search?q=%E9%97%B2%E9%B1%BC",
+                "screenshot_base64": "ZmFrZS1pbWFnZQ==",
+            }
+
+        settings = build_settings(self.base_dir)
+        auth_controller = SimpleNamespace(
+            start_auth_session=_start_auth_session,
+            confirm_auth_session=lambda **_: None,
+            cancel_auth_session=lambda **_: None,
+        )
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=SimpleNamespace(send_message=_send_message),
+            settings=settings,
+            auth_controller=auth_controller,
+        )
+
+        message = await coordinator.handle_provider_auth_failure(
+            umo="umo-1",
+            sub_id=123,
+        )
+
+        self.assertEqual(
+            message,
+            "已向当前会话发送登录二维码，扫码登录后回复任意消息即可继续。",
+        )
+        self.assertEqual(len(sent_messages), 1)

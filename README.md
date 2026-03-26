@@ -83,9 +83,8 @@ uv run python -m playwright install chromium chromium-headless-shell
 uv run python ./save_state.py
 ```
 
-3. 在 WebUI 中设置 `playwright_storage_state_file`
-4. 保存并重载插件
-5. 使用 `/闲鱼 订阅 <关键词>` 或 `/闲鱼 查询 <关键词>` 开始使用
+3. 保存并重载插件
+4. 使用 `/闲鱼 订阅 <关键词>` 或 `/闲鱼 查询 <关键词>` 开始使用
 
 如果你想改用系统 Chrome/Chromium，再额外填写 `playwright_executable_path`。
 
@@ -145,7 +144,7 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 
 - 队列在补登录态期间会暂停等待，不会继续乱跑任务。
 - `登录完成` 现在不是必须指令；回复任意普通消息就可以继续。
-- 如果是本地模式，仍然建议直接重新运行 `save_state.py`。
+- 如果是本地模式，也可以直接发送 `/闲鱼 登录` 走和远端一致的对话内补登录态流程。
 
 ## 常用指令
 
@@ -187,7 +186,7 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 
 - 插件数据目录：`data/plugin_data/astrbot_plugin_goofish_catcher`
 - SQLite：`goofish_catcher.db`
-- 本地登录态：你在 WebUI 里填写的 `playwright_storage_state_file`
+- 本地登录态：插件自动维护在 `plugin_data/storage_state.json`
 - 远端登录态：worker 自己的 `storage_state_file`
 
 详细配置项、默认值、推荐取值已经拆到 [CONFIG_REFERENCE.md](./CONFIG_REFERENCE.md)。
@@ -211,7 +210,7 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 
 ### 2. 出现 `AUTH_REQUIRED` 或 `CAPTCHA`
 
-- 本地模式：重新运行 `save_state.py`，更新登录态文件后执行 `/闲鱼 恢复 <关键词>`
+- 本地模式：可直接发送 `/闲鱼 登录`，或重新运行 `save_state.py` 更新本地稳定登录态文件后执行 `/闲鱼 恢复 <关键词>`
 - 远程模式：正常情况下会自动进入补登录态流程；如果没有触发，可手动发送 `/闲鱼 登录`
 
 ### 3. 远端模式收不到二维码截图

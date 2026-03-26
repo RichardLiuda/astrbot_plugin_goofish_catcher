@@ -51,7 +51,7 @@
   "playwright_storage_state_file": {
     "type": "file",
     "description": "登录态文件",
-    "hint": "只在本地模式使用；远程模式请在远程主机的 `worker_config.json` 配置",
+    "hint": "本地模式通常不需要再手动设置，插件会统一写入 `plugin_data/storage_state.json`；这里只保留兼容旧配置导入。远程模式请在远程主机的 `worker_config.json` 配置",
     "default": [],
     "file_types": [
       "json"

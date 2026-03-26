@@ -9,7 +9,7 @@ from typing import Any
 from astrbot.api.event import MessageChain
 from astrbot.api.star import Context
 
-from .config import PROVIDER_MODE_REMOTE_REST, PluginSettings
+from .config import PluginSettings
 
 try:
     from astrbot.api import logger
@@ -38,11 +38,12 @@ class RemoteAuthRecoveryCoordinator:
         *,
         context: Context,
         settings: PluginSettings,
-        provider: Any | None,
+        provider: Any | None = None,
+        auth_controller: Any | None = None,
     ) -> None:
         self.context = context
         self.settings = settings
-        self.provider = provider
+        self.auth_controller = auth_controller or provider
         self._lock = asyncio.Lock()
         self._active_flow: ActiveRemoteAuthFlow | None = None
         self._idle_event = asyncio.Event()
@@ -54,7 +55,7 @@ class RemoteAuthRecoveryCoordinator:
         umo: str,
         sub_id: int | None = None,
     ) -> str | None:
-        if not self._supports_remote_auth():
+        if not self._supports_auth_recovery():
             return None
 
         notify_umo: str | None = None
@@ -65,7 +66,7 @@ class RemoteAuthRecoveryCoordinator:
                     self._active_flow.affected_subscription_ids.add(sub_id)
                 return None
 
-            payload = await self.provider.start_auth_session(force_restart=False)
+            payload = await self.auth_controller.start_auth_session(force_restart=False)
             self._active_flow = ActiveRemoteAuthFlow(
                 session_id=str(payload.get("session_id", "")).strip(),
                 owner_umo=umo,
@@ -83,19 +84,19 @@ class RemoteAuthRecoveryCoordinator:
 
         if notify_umo and notify_chain is not None:
             await self._send_chain(notify_umo, notify_chain)
-            return "已向当前会话发送远端登录二维码，扫码登录后回复任意消息即可继续。"
+            return "已向当前会话发送登录二维码，扫码登录后回复任意消息即可继续。"
         return None
 
     async def start_login(self, *, umo: str) -> str:
-        if not self._supports_remote_auth():
-            return "当前 Provider 不是 remote_rest，远端登录流程不可用。"
+        if not self._supports_auth_recovery():
+            return "当前 Provider 未启用登录恢复流程。"
 
         notify_chain: MessageChain | None = None
         async with self._lock:
             if self._active_flow is not None and self._active_flow.owner_umo != umo:
                 return "登录恢复已在其他会话进行中，当前会话不能接管。"
 
-            payload = await self.provider.start_auth_session(force_restart=False)
+            payload = await self.auth_controller.start_auth_session(force_restart=False)
             existing_ids = (
                 set(self._active_flow.affected_subscription_ids)
                 if self._active_flow is not None
@@ -117,7 +118,7 @@ class RemoteAuthRecoveryCoordinator:
 
         if notify_chain is not None:
             await self._send_chain(umo, notify_chain)
-        return "已将远端登录二维码发送到当前会话，扫码登录后回复任意消息即可继续。"
+        return "已将登录二维码发送到当前会话，扫码登录后回复任意消息即可继续。"
 
     async def complete_login(
         self,
@@ -126,17 +127,17 @@ class RemoteAuthRecoveryCoordinator:
         storage,
         scheduler,
     ) -> str:
-        if not self._supports_remote_auth():
-            return "当前 Provider 不是 remote_rest，远端登录流程不可用。"
+        if not self._supports_auth_recovery():
+            return "当前 Provider 未启用登录恢复流程。"
 
         async with self._lock:
             if self._active_flow is None:
-                return "当前没有进行中的远端登录恢复流程，请先发送 /闲鱼 登录。"
+                return "当前没有进行中的登录恢复流程，请先发送 /闲鱼 登录。"
             if self._active_flow.owner_umo != umo:
                 return "登录恢复已在其他会话进行中，当前会话不能确认。"
             session_id = self._active_flow.session_id
 
-        result = await self.provider.confirm_auth_session(session_id=session_id)
+        result = await self.auth_controller.confirm_auth_session(session_id=session_id)
 
         async with self._lock:
             self._active_flow = None
@@ -155,30 +156,42 @@ class RemoteAuthRecoveryCoordinator:
                 enqueued += 1
 
         saved_path = str(result.get("saved_path", "")).strip() or "-"
-        return (
-            "远端登录态已保存。\n"
-            f"保存位置：{saved_path}\n"
-            f"已恢复订阅：{len(resumed)}\n"
-            f"已重新入队：{enqueued}"
+        mirrored_paths = [
+            str(path).strip()
+            for path in (result.get("mirrored_paths") or [])
+            if str(path).strip()
+        ]
+        lines = [
+            "登录态已保存。",
+            f"保存位置：{saved_path}",
+        ]
+        if mirrored_paths:
+            lines.append(f"同步位置：{', '.join(mirrored_paths)}")
+        lines.extend(
+            [
+                f"已恢复订阅：{len(resumed)}",
+                f"已重新入队：{enqueued}",
+            ]
         )
+        return "\n".join(lines)
 
     async def cancel_login(self, *, umo: str) -> str:
-        if not self._supports_remote_auth():
-            return "当前 Provider 不是 remote_rest，远端登录流程不可用。"
+        if not self._supports_auth_recovery():
+            return "当前 Provider 未启用登录恢复流程。"
 
         async with self._lock:
             if self._active_flow is None:
-                return "当前没有进行中的远端登录恢复流程。"
+                return "当前没有进行中的登录恢复流程。"
             if self._active_flow.owner_umo != umo:
                 return "登录恢复已在其他会话进行中，当前会话不能取消。"
             session_id = self._active_flow.session_id
 
-        await self.provider.cancel_auth_session(session_id=session_id)
+        await self.auth_controller.cancel_auth_session(session_id=session_id)
 
         async with self._lock:
             self._active_flow = None
             self._idle_event.set()
-        return "已取消当前远端登录恢复流程。"
+        return "已取消当前登录恢复流程。"
 
     def has_active_flow(self) -> bool:
         return self._active_flow is not None
@@ -214,13 +227,19 @@ class RemoteAuthRecoveryCoordinator:
             return False
         return True
 
-    def _supports_remote_auth(self) -> bool:
+    async def close(self) -> None:
+        async with self._lock:
+            self._active_flow = None
+            self._idle_event.set()
+        if callable(getattr(self.auth_controller, "close", None)):
+            await self.auth_controller.close()
+
+    def _supports_auth_recovery(self) -> bool:
         return bool(
-            self.settings.provider_mode == PROVIDER_MODE_REMOTE_REST
-            and self.provider is not None
-            and callable(getattr(self.provider, "start_auth_session", None))
-            and callable(getattr(self.provider, "confirm_auth_session", None))
-            and callable(getattr(self.provider, "cancel_auth_session", None))
+            self.auth_controller is not None
+            and callable(getattr(self.auth_controller, "start_auth_session", None))
+            and callable(getattr(self.auth_controller, "confirm_auth_session", None))
+            and callable(getattr(self.auth_controller, "cancel_auth_session", None))
         )
 
     async def _send_chain(self, umo: str, chain: MessageChain) -> None:
@@ -228,7 +247,7 @@ class RemoteAuthRecoveryCoordinator:
             await self.context.send_message(umo, chain)
         except Exception as exc:
             logger.error(
-                "[goofish_catcher] failed to send remote auth recovery message: %s",
+                "[goofish_catcher] failed to send auth recovery message: %s",
                 exc,
                 exc_info=True,
             )
@@ -241,7 +260,7 @@ def _build_login_chain(
     owner_only: bool,
 ) -> MessageChain:
     lines = [
-        "检测到远端 worker 需要重新登录闲鱼。",
+        "检测到需要重新登录闲鱼。",
         "请直接在当前对话里扫码登录。",
         "扫码登录后回复任意消息即可继续任务。",
         "如需取消请发送 /闲鱼 登录取消",
