@@ -26,7 +26,6 @@
 | --- | --- | --- |
 | Python | `>= 3.10` | 与 AstrBot 运行环境保持一致 |
 | AstrBot | `>= 4.x` | 需要命令系统、Provider 与插件配置能力 |
-| 本地模式 | `2C2G` 起步 | 需要运行 Playwright 有头浏览器 |
 | 远程模式 | AstrBot 宿主机要求较低，Worker 建议 `2C2G` 起步 | 浏览器负载主要落在远端 worker |
 
 补充说明：
@@ -101,7 +100,7 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 ```json
 {
   "data_dir": "./worker_data",
-  "storage_state_file": "./worker_data/storage_state.json",
+  "storage_state_file": "storage_state.json",
   "fetch_timeout_sec": 20,
   "max_pages": 2,
   "block_assets": true,
