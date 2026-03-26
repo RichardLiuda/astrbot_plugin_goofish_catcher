@@ -160,6 +160,8 @@ curl http://127.0.0.1:8787/health
 
 ## 七、配置 Cloudflare Tunnel
 
+> 可以参考隔壁带图的文档 [hapi_connector插件的cf access文档](https://github.com/LiJinHao999/astrbot_plugin_hapi_connector/blob/master/docs/cf_access_guide.md)
+
 ### 1. 远程主机安装并登录 `cloudflared`
 
 macOS：
