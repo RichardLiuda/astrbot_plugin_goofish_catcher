@@ -4,7 +4,7 @@
 
 # 闲鱼蹲蹲助手
 
-_✨ 闲鱼关键词监控与远端补登录态 ✨_
+_✨ 闲鱼关键词监控与商品好价推荐推送 ✨_
 
 [![License](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
