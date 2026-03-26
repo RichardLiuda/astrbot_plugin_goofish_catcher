@@ -1,11 +1,21 @@
+<div align="center">
 
-# astrbot_plugin_goofish_catcher
+![:name](https://count.getloli.com/@goofish_catcher?name=goofish_catcher&theme=minecraft&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
 
-[![Moe Counter](https://count.getloli.com/@goofish_catcher?name=goofish_catcher&theme=minecraft&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)](https://count.getloli.com/@goofish_catcher?name=goofish_catcher&theme=minecraft&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
+# 闲鱼蹲蹲助手
 
-闲鱼关键词监控插件（命令优先）。  
+_✨ 闲鱼关键词监控与远端补登录态 ✨_
+
+[![License](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![AstrBot 4.x+](https://img.shields.io/badge/AstrBot-4.x%2B-orange.svg)](https://github.com/Soulter/AstrBot)
+[![GitHub](https://img.shields.io/badge/作者-RichardLiu-blue)](https://github.com/RichardLiuda)
+
+</div>
+
+本插件的开发缘由：某人在闲鱼蹲一颗镜头蹲了三个月，期间被卖家跑单三次，觉得还是自己手速不够快，遂诞生了这个插件。目前已经帮某人蹲到了几个好价商品，这玩意还是挺有用的（）  
 支持订阅轮询、上新/降价检测、LLM 推荐分析、免订阅临时查询。  
-提供webui管理，理论上可以脱离astrbot聊天平台工作（）
+提供webui管理，理论上可以脱离astrbot聊天平台工作。
 
 目前很多功能都比较原始，可能配置起来会有点麻烦，请见谅！
 
