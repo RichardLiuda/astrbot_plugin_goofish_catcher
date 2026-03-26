@@ -694,11 +694,6 @@ class AdminService:
             "remote_timeout_sec": settings.remote_timeout_sec,
             "remote_healthcheck_on_init": settings.remote_healthcheck_on_init,
             "remote_healthcheck_timeout_sec": settings.remote_healthcheck_timeout_sec,
-            "playwright_storage_state_file": (
-                [str(settings.playwright_storage_state_path)]
-                if settings.playwright_storage_state_path
-                else []
-            ),
             "playwright_executable_path": str(settings.playwright_executable_path or ""),
             "playwright_block_assets": settings.playwright_block_assets,
             "playwright_force_direct": settings.playwright_force_direct,
@@ -772,9 +767,6 @@ class AdminService:
             if key == "remote_headers":
                 overlay[key] = [str(item) for item in value or [] if str(item).strip()]
                 continue
-            if key == "playwright_storage_state_file":
-                overlay[key] = [str(item) for item in value or [] if str(item).strip()]
-                continue
             overlay[key] = value
         return overlay
 
@@ -804,7 +796,6 @@ class AdminService:
                 "title": "抓取模式",
                 "fields": [
                     "provider_mode",
-                    "playwright_storage_state_file",
                     "playwright_executable_path",
                     "playwright_block_assets",
                     "playwright_force_direct",

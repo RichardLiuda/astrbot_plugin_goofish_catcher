@@ -48,15 +48,6 @@
     "hint": "默认 10 秒；网络较慢时再调大",
     "default": 10
   },
-  "playwright_storage_state_file": {
-    "type": "file",
-    "description": "登录态文件",
-    "hint": "本地模式通常不需要再手动设置，插件会统一写入 `plugin_data/storage_state.json`；这里只保留兼容旧配置导入。远程模式请在远程主机的 `worker_config.json` 配置",
-    "default": [],
-    "file_types": [
-      "json"
-    ]
-  },
   "playwright_executable_path": {
     "type": "string",
     "description": "浏览器可执行文件",

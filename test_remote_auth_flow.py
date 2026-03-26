@@ -257,7 +257,7 @@ class LocalStorageStatePathTests(unittest.TestCase):
         self.assertEqual(resolved, expected_dir / "storage_state.json")
 
 
-class PluginSettingsStorageMigrationTests(unittest.TestCase):
+class PluginSettingsStoragePathTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._temp_dir.cleanup)
@@ -265,43 +265,24 @@ class PluginSettingsStorageMigrationTests(unittest.TestCase):
         self.plugin_data_dir = self.base_dir / "plugin_data"
         self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
 
-    def test_local_mode_copies_legacy_storage_state_to_stable_path(self) -> None:
-        legacy_path = self.base_dir / "legacy_state.json"
-        legacy_path.write_text('{"cookies": ["legacy"]}', encoding="utf-8")
-
+    def test_local_mode_always_uses_stable_storage_state_path(self) -> None:
         settings = load_plugin_settings(
-            {
-                "provider_mode": "playwright_local",
-                "playwright_storage_state_file": [str(legacy_path)],
-            },
+            {"provider_mode": "playwright_local"},
             "goofish_catcher",
             self.plugin_data_dir,
         )
 
         stable_path = self.plugin_data_dir / "storage_state.json"
         self.assertEqual(settings.playwright_storage_state_path, stable_path)
-        self.assertTrue(stable_path.exists())
-        self.assertEqual(
-            stable_path.read_text(encoding="utf-8"),
-            legacy_path.read_text(encoding="utf-8"),
+
+    def test_remote_mode_ignores_stable_storage_state_when_missing(self) -> None:
+        settings = load_plugin_settings(
+            {"provider_mode": "remote_rest"},
+            "goofish_catcher",
+            self.plugin_data_dir,
         )
 
-    def test_local_mode_falls_back_to_legacy_storage_state_when_copy_fails(self) -> None:
-        legacy_path = self.base_dir / "legacy_state.json"
-        legacy_path.write_text('{"cookies": ["legacy"]}', encoding="utf-8")
-
-        with patch("app.config.shutil.copy2", side_effect=OSError("disk full")):
-            settings = load_plugin_settings(
-                {
-                    "provider_mode": "playwright_local",
-                    "playwright_storage_state_file": [str(legacy_path)],
-                },
-                "goofish_catcher",
-                self.plugin_data_dir,
-            )
-
-        self.assertEqual(settings.playwright_storage_state_path, legacy_path)
-        self.assertFalse((self.plugin_data_dir / "storage_state.json").exists())
+        self.assertIsNone(settings.playwright_storage_state_path)
 
 
 class StorageResumeTests(unittest.IsolatedAsyncioTestCase):

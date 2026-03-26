@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -76,15 +75,6 @@ def _as_optional_path(value: Any) -> Path | None:
     if not text:
         return None
     return Path(text).expanduser()
-
-
-def _first_file(raw_value: Any) -> str | None:
-    if isinstance(raw_value, list) and raw_value:
-        first = raw_value[0]
-        return str(first) if first else None
-    if isinstance(raw_value, str) and raw_value.strip():
-        return raw_value.strip()
-    return None
 
 
 def _normalize_remote_headers(
@@ -254,69 +244,18 @@ def load_plugin_settings(
         )
         provider_mode = PROVIDER_MODE_PLAYWRIGHT_LOCAL
 
-    storage_state_path: Path | None = None
     stable_state_path = plugin_data_dir / "storage_state.json"
-    storage_state_file = _first_file(raw.get("playwright_storage_state_file"))
     if provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL:
-        if stable_state_path.exists():
-            storage_state_path = stable_state_path
-            logger.info(
-                "[%s] use local playwright storage_state from stable path: %s",
-                plugin_name,
-                stable_state_path,
-            )
-        elif storage_state_file:
-            candidate = Path(storage_state_file)
-            if not candidate.is_absolute():
-                candidate = plugin_data_dir / storage_state_file
-            if candidate.exists():
-                try:
-                    if candidate.resolve() != stable_state_path.resolve():
-                        shutil.copy2(candidate, stable_state_path)
-                        logger.info(
-                            "[%s] copied playwright storage_state to stable path: %s",
-                            plugin_name,
-                            stable_state_path,
-                        )
-                    storage_state_path = stable_state_path
-                except Exception as exc:
-                    logger.warning(
-                        "[%s] failed to copy storage_state from %s to %s: %s",
-                        plugin_name,
-                        candidate,
-                        stable_state_path,
-                        exc,
-                    )
-                    storage_state_path = candidate
-            else:
-                logger.warning(
-                    "[%s] playwright_storage_state_file not found: %s",
-                    plugin_name,
-                    candidate,
-                )
-    elif storage_state_file:
-        candidate = Path(storage_state_file)
-        if not candidate.is_absolute():
-            candidate = plugin_data_dir / storage_state_file
-        if candidate.exists():
-            storage_state_path = candidate
-        else:
-            logger.warning(
-                "[%s] playwright_storage_state_file not found: %s",
-                plugin_name,
-                candidate,
-            )
-    if (
-        provider_mode != PROVIDER_MODE_PLAYWRIGHT_LOCAL
-        and storage_state_path is None
-        and stable_state_path.exists()
-    ):
+        storage_state_path: Path | None = stable_state_path
+    elif stable_state_path.exists():
         storage_state_path = stable_state_path
         logger.info(
             "[%s] use fallback playwright storage_state from stable path: %s",
             plugin_name,
             stable_state_path,
         )
+    else:
+        storage_state_path = None
 
     webhook_url = str(raw.get("webhook_url", "")).strip() or None
     remote_base_url = str(raw.get("remote_base_url", "")).strip() or None

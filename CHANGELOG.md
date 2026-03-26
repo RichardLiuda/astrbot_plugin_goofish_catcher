@@ -2,6 +2,15 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.1.0] - 2026-03-26
+
+### Changed
+
+- 本地模式 `playwright_local` 现在与 `remote_rest` 统一走对话内补登录态链路，支持二维码截图下发、扫码后回复任意消息继续、自动恢复暂停订阅。
+- 本地登录态改为固定使用插件稳定路径 `plugin_data/storage_state.json`，不再依赖配置页手动指定登录态文件。
+- WebUI 配置页移除 `playwright_storage_state_file`，本地模式默认直接走统一登录流程，减少配置分叉。
+- README 与配置参考同步更新为统一登录说明，本地主路径改为 `/闲鱼 登录`，`save_state.py` 保留为备用 CLI 方式。
+
 ## [2.0.0] - 2026-03-26
 
 ### Added
