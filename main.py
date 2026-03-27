@@ -408,6 +408,19 @@ class GoofishCatcherPlugin(Star):
             return
         message_text = event.get_message_str()
         try:
+            should_restart = await (
+                self.remote_auth_coordinator.should_restart_login_from_message(
+                    umo=event.unified_msg_origin,
+                    message_text=message_text,
+                )
+            )
+            if should_restart:
+                message = await self.remote_auth_coordinator.start_login(
+                    umo=event.unified_msg_origin
+                )
+                yield event.plain_result(message)
+                event.stop_event()
+                return
             should_complete = await (
                 self.remote_auth_coordinator.should_auto_complete_from_message(
                     umo=event.unified_msg_origin,

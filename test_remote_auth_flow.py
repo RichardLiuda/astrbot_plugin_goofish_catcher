@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -128,6 +130,7 @@ class WorkerAuthRouteTests(unittest.TestCase):
                 self.assertEqual(first_payload["status"], "active")
                 self.assertTrue(first_payload["session_id"])
                 self.assertTrue(first_payload["screenshot_base64"])
+                self.assertEqual(first_payload["timeout_sec"], 60)
 
                 second = client.post("/v1/auth/start", json={"force_restart": False})
                 self.assertEqual(second.status_code, 200)
@@ -190,6 +193,35 @@ class WorkerAuthRouteTests(unittest.TestCase):
                 self.assertEqual(confirm.status_code, 409)
                 self.assertIn("no active login session", confirm.json()["error"]["message"])
 
+    def test_auth_confirm_rejects_timed_out_session(self) -> None:
+        settings = build_settings(self.base_dir)
+        manager = worker_server.WorkerLoginSessionManager(settings)
+        runtime = worker_server.WorkerRuntime(
+            settings=settings,
+            provider=object(),
+            auth=worker_server.WorkerAuthConfig(
+                api_key=None,
+                cf_access_client_id=None,
+                cf_access_client_secret=None,
+            ),
+            login_manager=manager,
+        )
+
+        with patch.object(
+            worker_server,
+            "GoofishLoginSession",
+            FakeGoofishLoginSession,
+        ):
+            with TestClient(worker_server.create_app(runtime)) as client:
+                first = client.post("/v1/auth/start", json={"force_restart": False})
+                session_id = first.json()["session_id"]
+                assert manager._active_session is not None
+                manager._active_session.expires_at_monotonic = 0.0
+
+                confirm = client.post("/v1/auth/confirm", json={"session_id": session_id})
+                self.assertEqual(confirm.status_code, 409)
+                self.assertIn("timed out after 60 seconds", confirm.json()["error"]["message"])
+
 
 class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -210,6 +242,7 @@ class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first["status"], "active")
             self.assertTrue(first["session_id"])
             self.assertTrue(first["screenshot_base64"])
+            self.assertEqual(first["timeout_sec"], 60)
 
             second = await controller.start_auth_session(force_restart=False)
             self.assertEqual(second["session_id"], first["session_id"])
@@ -240,6 +273,21 @@ class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaises(RuntimeError):
                 await controller.cancel_auth_session(session_id=session_id)
+
+    async def test_local_auth_confirm_rejects_timed_out_session(self) -> None:
+        settings = build_settings(self.base_dir)
+        controller = LocalAuthSessionController(settings)
+
+        with patch("app.auth_session.GoofishLoginSession", FakeGoofishLoginSession):
+            first = await controller.start_auth_session(force_restart=False)
+            assert controller._active_session is not None
+            controller._active_session.expires_at_monotonic = 0.0
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "timed out after 60 seconds",
+            ):
+                await controller.confirm_auth_session(session_id=first["session_id"])
 
 
 class LocalStorageStatePathTests(unittest.TestCase):
@@ -492,6 +540,7 @@ class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
             session_id="session-1",
             owner_umo="umo-1",
             started_at=1,
+            expires_at=time.time() + 120,
             page_url="https://example.com/login",
         )
 
@@ -521,6 +570,7 @@ class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
             session_id="session-1",
             owner_umo="umo-1",
             started_at=1,
+            expires_at=time.time() + 120,
             page_url="https://example.com/login",
         )
 
@@ -528,6 +578,12 @@ class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
             await coordinator.should_auto_complete_from_message(
                 umo="umo-1",
                 message_text="/闲鱼 登录",
+            )
+        )
+        self.assertFalse(
+            await coordinator.should_auto_complete_from_message(
+                umo="umo-1",
+                message_text="闲鱼 登录",
             )
         )
         self.assertFalse(
@@ -542,6 +598,102 @@ class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
                 message_text="好了",
             )
         )
+
+    async def test_restart_login_message_is_detected_for_owner(self) -> None:
+        async def _send_message(*args, **kwargs) -> None:
+            return None
+
+        settings = replace(build_settings(self.base_dir), provider_mode="remote_rest")
+        provider = SimpleNamespace(
+            start_auth_session=lambda **_: None,
+            confirm_auth_session=lambda **_: None,
+            cancel_auth_session=lambda **_: None,
+        )
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=SimpleNamespace(send_message=_send_message),
+            settings=settings,
+            provider=provider,
+        )
+        coordinator._active_flow = ActiveRemoteAuthFlow(
+            session_id="session-1",
+            owner_umo="umo-1",
+            started_at=1,
+            expires_at=time.time() + 120,
+            page_url="https://example.com/login",
+        )
+
+        self.assertTrue(
+            await coordinator.should_restart_login_from_message(
+                umo="umo-1",
+                message_text="闲鱼 登录",
+            )
+        )
+        self.assertTrue(
+            await coordinator.should_restart_login_from_message(
+                umo="umo-1",
+                message_text="/闲鱼 登录",
+            )
+        )
+        self.assertFalse(
+            await coordinator.should_restart_login_from_message(
+                umo="umo-1",
+                message_text="好了继续",
+            )
+        )
+        self.assertFalse(
+            await coordinator.should_restart_login_from_message(
+                umo="umo-1",
+                message_text="/闲鱼 登录完成",
+            )
+        )
+        self.assertFalse(
+            await coordinator.should_restart_login_from_message(
+                umo="umo-1",
+                message_text="/闲鱼 登录取消",
+            )
+        )
+
+    async def test_start_login_restarts_existing_owner_flow(self) -> None:
+        sent_messages: list[tuple[str, object]] = []
+        force_restart_flags: list[bool] = []
+
+        async def _send_message(umo, chain) -> None:
+            sent_messages.append((umo, chain))
+
+        async def _start_auth_session(*, force_restart: bool = False):
+            force_restart_flags.append(force_restart)
+            return {
+                "session_id": "session-restarted",
+                "status": "active",
+                "started_at": int(time.time()),
+                "timeout_sec": 60,
+                "page_url": "https://www.goofish.com/member/login",
+                "screenshot_base64": "ZmFrZS1pbWFnZQ==",
+            }
+
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=SimpleNamespace(send_message=_send_message),
+            settings=replace(build_settings(self.base_dir), provider_mode="remote_rest"),
+            auth_controller=SimpleNamespace(
+                start_auth_session=_start_auth_session,
+                confirm_auth_session=lambda **_: None,
+                cancel_auth_session=lambda **_: None,
+            ),
+        )
+        coordinator._active_flow = ActiveRemoteAuthFlow(
+            session_id="session-1",
+            owner_umo="umo-1",
+            started_at=1,
+            expires_at=time.time() + 120,
+            page_url="https://example.com/login",
+        )
+
+        message = await coordinator.start_login(umo="umo-1")
+
+        self.assertEqual(message, "已重启登录流程并将新的二维码发送到当前会话。")
+        self.assertEqual(force_restart_flags, [True])
+        self.assertEqual(len(sent_messages), 1)
+        await coordinator.close()
 
     async def test_local_mode_auth_failure_can_start_login_recovery(self) -> None:
         sent_messages: list[tuple[str, object]] = []
@@ -560,10 +712,16 @@ class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
             }
 
         settings = build_settings(self.base_dir)
+        async def _confirm_auth_session(**_):
+            return None
+
+        async def _cancel_auth_session(**_):
+            return None
+
         auth_controller = SimpleNamespace(
             start_auth_session=_start_auth_session,
-            confirm_auth_session=lambda **_: None,
-            cancel_auth_session=lambda **_: None,
+            confirm_auth_session=_confirm_auth_session,
+            cancel_auth_session=_cancel_auth_session,
         )
         coordinator = RemoteAuthRecoveryCoordinator(
             context=SimpleNamespace(send_message=_send_message),
@@ -581,3 +739,49 @@ class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
             "已向当前会话发送登录二维码，扫码登录后回复任意消息即可继续。",
         )
         self.assertEqual(len(sent_messages), 1)
+        await coordinator.close()
+
+    async def test_login_flow_times_out_and_auto_cancels_session(self) -> None:
+        sent_messages: list[tuple[str, object]] = []
+        cancelled_session_ids: list[str] = []
+
+        async def _send_message(umo, chain) -> None:
+            sent_messages.append((umo, chain))
+
+        async def _start_auth_session(*, force_restart: bool = False):
+            self.assertFalse(force_restart)
+            return {
+                "session_id": "session-timeout-1",
+                "status": "active",
+                "started_at": int(time.time()),
+                "timeout_sec": 1,
+                "page_url": "https://www.goofish.com/member/login",
+                "screenshot_base64": "ZmFrZS1pbWFnZQ==",
+            }
+
+        async def _cancel_auth_session(*, session_id: str):
+            cancelled_session_ids.append(session_id)
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "status": "cancelled",
+            }
+
+        settings = replace(build_settings(self.base_dir), provider_mode="remote_rest")
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=SimpleNamespace(send_message=_send_message),
+            settings=settings,
+            auth_controller=SimpleNamespace(
+                start_auth_session=_start_auth_session,
+                confirm_auth_session=lambda **_: None,
+                cancel_auth_session=_cancel_auth_session,
+            ),
+            auth_timeout_sec=1,
+        )
+
+        await coordinator.start_login(umo="umo-1")
+        await asyncio.wait_for(coordinator.wait_until_idle(), timeout=2.5)
+
+        self.assertEqual(cancelled_session_ids, ["session-timeout-1"])
+        self.assertFalse(coordinator.has_active_flow())
+        self.assertEqual(len(sent_messages), 2)

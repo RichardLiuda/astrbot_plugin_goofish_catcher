@@ -23,11 +23,14 @@ except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
     StarTools = None
 
+AUTH_SESSION_TIMEOUT_SEC = 60
+
 
 @dataclass(slots=True)
 class LocalAuthSession:
     session_id: str
     started_at: int
+    expires_at_monotonic: float
     session: GoofishLoginSession
 
 
@@ -72,13 +75,20 @@ async def save_login_session_state(
 
 
 class LocalAuthSessionController:
-    def __init__(self, settings: PluginSettings) -> None:
+    def __init__(
+        self,
+        settings: PluginSettings,
+        *,
+        auth_timeout_sec: float = AUTH_SESSION_TIMEOUT_SEC,
+    ) -> None:
         self.settings = settings
+        self.auth_timeout_sec = max(1.0, float(auth_timeout_sec))
         self._lock = asyncio.Lock()
         self._active_session: LocalAuthSession | None = None
 
     async def start_auth_session(self, *, force_restart: bool = False) -> dict[str, Any]:
         async with self._lock:
+            await self._expire_active_session_if_needed(raise_on_timeout=False)
             if self._active_session is not None and not force_restart:
                 return await self._serialize_active_session(self._active_session)
 
@@ -95,6 +105,7 @@ class LocalAuthSessionController:
                 active_session = LocalAuthSession(
                     session_id=uuid4().hex,
                     started_at=int(time.time()),
+                    expires_at_monotonic=time.monotonic() + self.auth_timeout_sec,
                     session=session,
                 )
                 self._active_session = active_session
@@ -105,7 +116,7 @@ class LocalAuthSessionController:
 
     async def confirm_auth_session(self, *, session_id: str) -> dict[str, Any]:
         async with self._lock:
-            active_session = self._require_active_session(session_id)
+            active_session = await self._require_active_session(session_id)
             try:
                 result = await save_login_session_state(
                     active_session.session,
@@ -128,7 +139,7 @@ class LocalAuthSessionController:
 
     async def cancel_auth_session(self, *, session_id: str) -> dict[str, Any]:
         async with self._lock:
-            active_session = self._require_active_session(session_id)
+            active_session = await self._require_active_session(session_id)
             await active_session.session.close()
             self._active_session = None
             return {
@@ -144,12 +155,31 @@ class LocalAuthSessionController:
                 await self._active_session.session.close()
                 self._active_session = None
 
-    def _require_active_session(self, session_id: str) -> LocalAuthSession:
+    async def _require_active_session(self, session_id: str) -> LocalAuthSession:
+        await self._expire_active_session_if_needed()
         if self._active_session is None:
             raise RuntimeError("no active login session")
         if self._active_session.session_id != session_id:
             raise RuntimeError("login session id does not match active session")
         return self._active_session
+
+    async def _expire_active_session_if_needed(
+        self,
+        *,
+        raise_on_timeout: bool = True,
+    ) -> None:
+        if self._active_session is None:
+            return
+        if time.monotonic() < self._active_session.expires_at_monotonic:
+            return
+
+        expired_session = self._active_session
+        self._active_session = None
+        await expired_session.session.close()
+        if raise_on_timeout:
+            raise RuntimeError(
+                f"login session timed out after {int(self.auth_timeout_sec)} seconds"
+            )
 
     async def _serialize_active_session(
         self,
@@ -164,9 +194,13 @@ class LocalAuthSessionController:
             "session_id": active_session.session_id,
             "status": "active",
             "started_at": active_session.started_at,
+            "expires_at": active_session.started_at + int(self.auth_timeout_sec),
+            "timeout_sec": int(self.auth_timeout_sec),
             "page_url": snapshot.page_url,
             "screenshot_base64": snapshot.screenshot_base64,
         }
+
+
 def _to_provider_error(exc: Exception, *, action: str) -> ProviderError:
     if isinstance(exc, ProviderError):
         return exc

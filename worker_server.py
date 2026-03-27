@@ -15,11 +15,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 try:
+    from .app.auth_session import AUTH_SESSION_TIMEOUT_SEC
     from .app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
     from .app.login_session import GoofishLoginSession
     from .app.provider_playwright import PlaywrightSearchProvider
     from .app.types import ProviderError, ProviderErrorCode
 except ImportError:
+    from app.auth_session import AUTH_SESSION_TIMEOUT_SEC
     from app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
     from app.login_session import GoofishLoginSession
     from app.provider_playwright import PlaywrightSearchProvider
@@ -64,12 +66,19 @@ class WorkerAuthConfig:
 class WorkerLoginSession:
     session_id: str
     started_at: int
+    expires_at_monotonic: float
     session: GoofishLoginSession
 
 
 class WorkerLoginSessionManager:
-    def __init__(self, settings: PluginSettings | None) -> None:
+    def __init__(
+        self,
+        settings: PluginSettings | None,
+        *,
+        auth_timeout_sec: float = AUTH_SESSION_TIMEOUT_SEC,
+    ) -> None:
         self.settings = settings
+        self.auth_timeout_sec = max(1.0, float(auth_timeout_sec))
         self._lock = asyncio.Lock()
         self._active_session: WorkerLoginSession | None = None
 
@@ -77,6 +86,7 @@ class WorkerLoginSessionManager:
         async with self._lock:
             if self.settings is None:
                 raise RuntimeError("worker settings are not ready")
+            await self._expire_active_session_if_needed(raise_on_timeout=False)
 
             if self._active_session is not None and not force_restart:
                 return await self._serialize_active_session(self._active_session)
@@ -94,6 +104,7 @@ class WorkerLoginSessionManager:
                 active_session = WorkerLoginSession(
                     session_id=uuid4().hex,
                     started_at=int(time.time()),
+                    expires_at_monotonic=time.monotonic() + self.auth_timeout_sec,
                     session=session,
                 )
                 self._active_session = active_session
@@ -104,7 +115,7 @@ class WorkerLoginSessionManager:
 
     async def confirm_session(self, session_id: str) -> dict[str, Any]:
         async with self._lock:
-            active_session = self._require_active_session(session_id)
+            active_session = await self._require_active_session(session_id)
             if self.settings is None or self.settings.playwright_storage_state_path is None:
                 raise RuntimeError("worker storage_state path is not configured")
 
@@ -124,7 +135,7 @@ class WorkerLoginSessionManager:
 
     async def cancel_session(self, session_id: str) -> dict[str, Any]:
         async with self._lock:
-            active_session = self._require_active_session(session_id)
+            active_session = await self._require_active_session(session_id)
             await active_session.session.close()
             self._active_session = None
             return {
@@ -140,12 +151,31 @@ class WorkerLoginSessionManager:
                 await self._active_session.session.close()
                 self._active_session = None
 
-    def _require_active_session(self, session_id: str) -> WorkerLoginSession:
+    async def _require_active_session(self, session_id: str) -> WorkerLoginSession:
+        await self._expire_active_session_if_needed()
         if self._active_session is None:
             raise ValueError("no active login session")
         if self._active_session.session_id != session_id:
             raise ValueError("login session id does not match active session")
         return self._active_session
+
+    async def _expire_active_session_if_needed(
+        self,
+        *,
+        raise_on_timeout: bool = True,
+    ) -> None:
+        if self._active_session is None:
+            return
+        if time.monotonic() < self._active_session.expires_at_monotonic:
+            return
+
+        expired_session = self._active_session
+        self._active_session = None
+        await expired_session.session.close()
+        if raise_on_timeout:
+            raise ValueError(
+                f"login session timed out after {int(self.auth_timeout_sec)} seconds"
+            )
 
     async def _serialize_active_session(
         self,
@@ -157,6 +187,8 @@ class WorkerLoginSessionManager:
             "session_id": active_session.session_id,
             "status": "active",
             "started_at": active_session.started_at,
+            "expires_at": active_session.started_at + int(self.auth_timeout_sec),
+            "timeout_sec": int(self.auth_timeout_sec),
             "page_url": snapshot.page_url,
             "screenshot_base64": snapshot.screenshot_base64,
         }
