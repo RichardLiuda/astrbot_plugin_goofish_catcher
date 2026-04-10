@@ -60,6 +60,22 @@ def extract_non_reply_text(messages: list[object]) -> str | None:
     return text or None
 
 
+def extract_reply_context_from_outline(outline: str) -> tuple[str | None, str | None]:
+    normalized = str(outline or "").strip()
+    prefix = "[引用消息("
+    if not normalized.startswith(prefix):
+        return None, None
+
+    content_start = normalized.find(": ")
+    content_end = normalized.rfind(")]")
+    if content_start == -1 or content_end == -1 or content_end <= content_start + 2:
+        return None, None
+
+    reply_text = normalized[content_start + 2 : content_end].strip() or None
+    selection_text = normalized[content_end + 2 :].strip() or None
+    return reply_text, selection_text
+
+
 def parse_reply_selection(text: str) -> list[int] | None:
     normalized = str(text or "").strip()
     if not normalized or not _SELECTION_RE.fullmatch(normalized):

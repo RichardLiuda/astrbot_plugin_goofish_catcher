@@ -4,6 +4,7 @@ import unittest
 
 from app.reply_favorite import (
     extract_non_reply_text,
+    extract_reply_context_from_outline,
     map_reply_selection,
     parse_reply_selection,
     parse_reply_target,
@@ -18,6 +19,16 @@ class ReplyFavoriteParserTests(unittest.TestCase):
         text = extract_non_reply_text([reply, Plain(" 2 ")])
 
         self.assertEqual(text, "2")
+
+    def test_extract_reply_context_from_outline_parses_aiocqhttp_style_outline(self) -> None:
+        reply_text, selection_text = extract_reply_context_from_outline(
+            "[引用消息(神户理香子: 【查询推荐】关键词：macmini\n1. [95.0] test\n   链接：https://www.goofish.com/item?id=1)] 1"
+        )
+
+        self.assertEqual(selection_text, "1")
+        self.assertIsNotNone(reply_text)
+        assert reply_text is not None
+        self.assertTrue(reply_text.startswith("【查询推荐】关键词：macmini"))
 
     def test_parse_reply_selection_supports_multiple_separators_and_dedupes(self) -> None:
         self.assertEqual(parse_reply_selection("1 2,2、3，4"), [1, 2, 3, 4])

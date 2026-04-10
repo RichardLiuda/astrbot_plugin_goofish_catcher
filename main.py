@@ -34,6 +34,7 @@ from .app.provider_retry import (
 )
 from .app.reply_favorite import (
     extract_non_reply_text,
+    extract_reply_context_from_outline,
     extract_reply_text,
     map_reply_selection,
     parse_reply_selection,
@@ -472,26 +473,43 @@ class GoofishCatcherPlugin(Star):
     ):
         messages = event.get_messages()
         raw_message_text = event.get_message_str()
-        selection_text = extract_non_reply_text(messages) or raw_message_text
-        reply_text = extract_reply_text(messages)
+        outline_text = event.get_message_outline()
+        outline_reply_text, outline_selection_text = extract_reply_context_from_outline(
+            outline_text
+        )
+        selection_text = (
+            extract_non_reply_text(messages)
+            or raw_message_text
+            or outline_selection_text
+        )
+        reply_text = extract_reply_text(messages) or outline_reply_text
         if reply_text:
             logger.debug(
-                "[goofish_catcher] inspect reply favorite candidate: selection_text=%r raw_message_str=%r component_types=%s",
+                "[goofish_catcher] inspect reply favorite candidate: selection_text=%r raw_message_str=%r outline_selection_text=%r component_types=%s",
                 selection_text,
                 raw_message_text,
+                outline_selection_text,
                 [type(component).__name__ for component in messages],
             )
         selections = parse_reply_selection(selection_text or "")
         if selections is None:
             if reply_text:
                 logger.debug(
-                    "[goofish_catcher] reply favorite skipped: selection parse failed, selection_text=%r raw_message_str=%r",
+                    "[goofish_catcher] reply favorite skipped: selection parse failed, selection_text=%r raw_message_str=%r outline_selection_text=%r outline=%r",
                     selection_text,
                     raw_message_text,
+                    outline_selection_text,
+                    outline_text,
                 )
             return None
 
         if not reply_text:
+            if outline_text:
+                logger.debug(
+                    "[goofish_catcher] reply favorite skipped: reply text missing, raw_message_str=%r outline=%r",
+                    raw_message_text,
+                    outline_text,
+                )
             return None
 
         target = parse_reply_target(reply_text)
