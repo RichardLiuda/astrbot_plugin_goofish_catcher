@@ -652,6 +652,47 @@ class PlaywrightFavoriteBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.wait_for_function_calls, 1)
 
 
+class PlaywrightOperationSerializationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup_temp_dir)
+        self.base_dir = Path(self._temp_dir.name)
+
+    async def _cleanup_temp_dir(self) -> None:
+        self._temp_dir.cleanup()
+
+    async def test_search_operations_are_serialized_on_single_provider(self) -> None:
+        settings = build_settings(self.base_dir)
+        provider = PlaywrightSearchProvider(settings)
+        call_order: list[str] = []
+
+        async def fake_ensure_browser():
+            return object()
+
+        async def fake_fetch_single_page(*, browser, keyword, page_index, timeout_ms):
+            del browser, page_index, timeout_ms
+            call_order.append(f"start:{keyword}")
+            await asyncio.sleep(0.05)
+            call_order.append(f"end:{keyword}")
+            return []
+
+        provider._ensure_browser = fake_ensure_browser  # type: ignore[method-assign]
+        provider._fetch_single_page = fake_fetch_single_page  # type: ignore[method-assign]
+
+        await asyncio.gather(
+            provider.search(keyword="camera-a", pages=1, timeout_sec=20),
+            provider.search(keyword="camera-b", pages=1, timeout_sec=20),
+        )
+
+        self.assertIn(
+            call_order,
+            (
+                ["start:camera-a", "end:camera-a", "start:camera-b", "end:camera-b"],
+                ["start:camera-b", "end:camera-b", "start:camera-a", "end:camera-a"],
+            ),
+        )
+
+
 class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._temp_dir = tempfile.TemporaryDirectory()
