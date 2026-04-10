@@ -49,6 +49,17 @@ def extract_reply_text(messages: list[object]) -> str | None:
     return None
 
 
+def extract_non_reply_text(messages: list[object]) -> str | None:
+    parts: list[str] = []
+    for component in messages:
+        if isinstance(component, Reply):
+            continue
+        if isinstance(component, Plain):
+            parts.append(component.text)
+    text = "".join(parts).strip()
+    return text or None
+
+
 def parse_reply_selection(text: str) -> list[int] | None:
     normalized = str(text or "").strip()
     if not normalized or not _SELECTION_RE.fullmatch(normalized):

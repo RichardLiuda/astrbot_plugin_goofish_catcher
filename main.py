@@ -33,6 +33,7 @@ from .app.provider_retry import (
     search_with_captcha_retry,
 )
 from .app.reply_favorite import (
+    extract_non_reply_text,
     extract_reply_text,
     map_reply_selection,
     parse_reply_selection,
@@ -469,16 +470,36 @@ class GoofishCatcherPlugin(Star):
         self,
         event: AstrMessageEvent,
     ):
-        selections = parse_reply_selection(event.get_message_str())
+        messages = event.get_messages()
+        raw_message_text = event.get_message_str()
+        selection_text = extract_non_reply_text(messages) or raw_message_text
+        reply_text = extract_reply_text(messages)
+        if reply_text:
+            logger.debug(
+                "[goofish_catcher] inspect reply favorite candidate: selection_text=%r raw_message_str=%r component_types=%s",
+                selection_text,
+                raw_message_text,
+                [type(component).__name__ for component in messages],
+            )
+        selections = parse_reply_selection(selection_text or "")
         if selections is None:
+            if reply_text:
+                logger.debug(
+                    "[goofish_catcher] reply favorite skipped: selection parse failed, selection_text=%r raw_message_str=%r",
+                    selection_text,
+                    raw_message_text,
+                )
             return None
 
-        reply_text = extract_reply_text(event.get_messages())
         if not reply_text:
             return None
 
         target = parse_reply_target(reply_text)
         if target is None:
+            logger.debug(
+                "[goofish_catcher] reply favorite skipped: quoted text did not match recommendation format, preview=%r",
+                reply_text[:200],
+            )
             return None
         logger.info(
             "[goofish_catcher] matched reply favorite request: source=%s selections=%s",

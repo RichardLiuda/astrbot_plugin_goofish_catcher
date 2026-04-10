@@ -3,14 +3,22 @@ from __future__ import annotations
 import unittest
 
 from app.reply_favorite import (
+    extract_non_reply_text,
     map_reply_selection,
     parse_reply_selection,
     parse_reply_target,
     recommendation_reply_hint,
 )
+from astrbot.api.message_components import Plain, Reply
 
 
 class ReplyFavoriteParserTests(unittest.TestCase):
+    def test_extract_non_reply_text_ignores_quoted_message_segment(self) -> None:
+        reply = Reply(id="quoted-1", message_str="【查询推荐】关键词：macstudio96g")
+        text = extract_non_reply_text([reply, Plain(" 2 ")])
+
+        self.assertEqual(text, "2")
+
     def test_parse_reply_selection_supports_multiple_separators_and_dedupes(self) -> None:
         self.assertEqual(parse_reply_selection("1 2,2、3，4"), [1, 2, 3, 4])
 
