@@ -45,6 +45,7 @@ def build_settings(base_dir: Path) -> PluginSettings:
         default_drop_pct=0.05,
         default_cooldown_sec=21600,
         playwright_storage_state_path=base_dir / "storage_state.json",
+        playwright_user_data_dir=None,
         playwright_executable_path=None,
         playwright_headless=False,
         playwright_block_assets=True,
@@ -72,13 +73,23 @@ def build_settings(base_dir: Path) -> PluginSettings:
 
 class FakeGoofishLoginSession:
     created_count = 0
+    validate_ok = True
+    validate_code = "OK"
+    validate_reason = "SUCCESS::调用成功"
+    validate_results: list[dict[str, object]] | None = None
 
     def __init__(self, **_: object) -> None:
+        kwargs = _
         type(self).created_count += 1
         self.page_url = "https://passport.goofish.example/login"
         self.closed = False
+        raw_profile_dir = kwargs.get("user_data_dir")
+        self.user_data_dir = Path(raw_profile_dir) if raw_profile_dir else None
 
     async def start_login_session(self):
+        if self.user_data_dir is not None:
+            self.user_data_dir.mkdir(parents=True, exist_ok=True)
+            (self.user_data_dir / "profile.txt").write_text("fake-profile", encoding="utf-8")
         return await self.capture_snapshot()
 
     async def capture_snapshot(self):
@@ -93,6 +104,32 @@ class FakeGoofishLoginSession:
         target.write_text("fake-state", encoding="utf-8")
         return target
 
+    async def validate_login(self):
+        queued = type(self).validate_results
+        if queued:
+            next_result = queued.pop(0)
+            return {
+                "ok": bool(next_result.get("ok", True)),
+                "code": str(next_result.get("code", "OK")),
+                "reason": str(next_result.get("reason", "SUCCESS::调用成功")),
+                "page_url": str(
+                    next_result.get(
+                        "page_url",
+                        "https://www.goofish.com/search?q=%E9%97%B2%E9%B1%BC",
+                    )
+                ),
+                "frame_urls": list(next_result.get("frame_urls", [])),
+                "payload_rets": dict(next_result.get("payload_rets", {})),
+            }
+        return {
+            "ok": type(self).validate_ok,
+            "code": type(self).validate_code,
+            "reason": type(self).validate_reason,
+            "page_url": "https://www.goofish.com/search?q=%E9%97%B2%E9%B1%BC",
+            "frame_urls": [],
+            "payload_rets": {},
+        }
+
     async def close(self):
         self.closed = True
 
@@ -103,6 +140,10 @@ class WorkerAuthRouteTests(unittest.TestCase):
         self.addCleanup(self._temp_dir.cleanup)
         self.base_dir = Path(self._temp_dir.name)
         FakeGoofishLoginSession.created_count = 0
+        FakeGoofishLoginSession.validate_ok = True
+        FakeGoofishLoginSession.validate_code = "OK"
+        FakeGoofishLoginSession.validate_reason = "SUCCESS::调用成功"
+        FakeGoofishLoginSession.validate_results = None
 
     def test_auth_start_reuses_active_session_and_confirm_saves_state(self) -> None:
         settings = build_settings(self.base_dir)
@@ -222,6 +263,82 @@ class WorkerAuthRouteTests(unittest.TestCase):
                 self.assertEqual(confirm.status_code, 409)
                 self.assertIn("timed out after 60 seconds", confirm.json()["error"]["message"])
 
+    def test_auth_confirm_rejects_invalid_login_state(self) -> None:
+        settings = build_settings(self.base_dir)
+        manager = worker_server.WorkerLoginSessionManager(settings)
+        runtime = worker_server.WorkerRuntime(
+            settings=settings,
+            provider=object(),
+            auth=worker_server.WorkerAuthConfig(
+                api_key=None,
+                cf_access_client_id=None,
+                cf_access_client_secret=None,
+            ),
+            login_manager=manager,
+        )
+        FakeGoofishLoginSession.validate_ok = False
+        FakeGoofishLoginSession.validate_code = "AUTH_REQUIRED"
+        FakeGoofishLoginSession.validate_reason = "FAIL_SYS_SESSION_EXPIRED::Session过期"
+
+        with patch.object(
+            worker_server,
+            "GoofishLoginSession",
+            FakeGoofishLoginSession,
+        ):
+            with TestClient(worker_server.create_app(runtime)) as client:
+                first = client.post("/v1/auth/start", json={"force_restart": False})
+                session_id = first.json()["session_id"]
+
+                confirm = client.post("/v1/auth/confirm", json={"session_id": session_id})
+                self.assertEqual(confirm.status_code, 409)
+                self.assertIn("Session过期", confirm.json()["error"]["message"])
+
+    def test_auth_confirm_adopts_live_login_session_into_worker_provider(self) -> None:
+        settings = replace(
+            build_settings(self.base_dir),
+            playwright_user_data_dir=self.base_dir / "browser_profile",
+        )
+
+        class FakeWorkerProvider:
+            def __init__(self) -> None:
+                self.close_calls = 0
+                self.adopted_sessions: list[object] = []
+
+            async def close(self) -> None:
+                self.close_calls += 1
+
+            async def adopt_login_session(self, session) -> None:
+                self.adopted_sessions.append(session)
+
+        provider = FakeWorkerProvider()
+        manager = worker_server.WorkerLoginSessionManager(settings, provider=provider)
+        runtime = worker_server.WorkerRuntime(
+            settings=settings,
+            provider=provider,
+            auth=worker_server.WorkerAuthConfig(
+                api_key=None,
+                cf_access_client_id=None,
+                cf_access_client_secret=None,
+            ),
+            login_manager=manager,
+        )
+
+        with patch.object(
+            worker_server,
+            "GoofishLoginSession",
+            FakeGoofishLoginSession,
+        ):
+            with TestClient(worker_server.create_app(runtime)) as client:
+                first = client.post("/v1/auth/start", json={"force_restart": False})
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(provider.close_calls, 1)
+                session_id = first.json()["session_id"]
+
+                confirm = client.post("/v1/auth/confirm", json={"session_id": session_id})
+                self.assertEqual(confirm.status_code, 200)
+                self.assertEqual(confirm.json()["status"], "saved")
+                self.assertEqual(len(provider.adopted_sessions), 1)
+
 
 class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -229,6 +346,10 @@ class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self._cleanup_temp_dir)
         self.base_dir = Path(self._temp_dir.name)
         FakeGoofishLoginSession.created_count = 0
+        FakeGoofishLoginSession.validate_ok = True
+        FakeGoofishLoginSession.validate_code = "OK"
+        FakeGoofishLoginSession.validate_reason = "SUCCESS::调用成功"
+        FakeGoofishLoginSession.validate_results = None
 
     async def _cleanup_temp_dir(self) -> None:
         self._temp_dir.cleanup()
@@ -288,6 +409,61 @@ class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
                 "timed out after 60 seconds",
             ):
                 await controller.confirm_auth_session(session_id=first["session_id"])
+
+    async def test_local_auth_confirm_rejects_invalid_login_and_keeps_session(self) -> None:
+        settings = build_settings(self.base_dir)
+        controller = LocalAuthSessionController(settings)
+        FakeGoofishLoginSession.validate_ok = False
+        FakeGoofishLoginSession.validate_code = "AUTH_REQUIRED"
+        FakeGoofishLoginSession.validate_reason = "FAIL_SYS_SESSION_EXPIRED::Session过期"
+
+        with patch("app.auth_session.GoofishLoginSession", FakeGoofishLoginSession):
+            first = await controller.start_auth_session(force_restart=False)
+
+            with self.assertRaises(ProviderError) as ctx:
+                await controller.confirm_auth_session(session_id=first["session_id"])
+
+            self.assertEqual(ctx.exception.code, ProviderErrorCode.AUTH_REQUIRED)
+            self.assertIn("Session过期", ctx.exception.message)
+            self.assertIsNotNone(controller._active_session)
+
+    async def test_local_auth_confirm_rejects_when_saved_profile_recheck_fails(self) -> None:
+        settings = replace(
+            build_settings(self.base_dir),
+            playwright_user_data_dir=self.base_dir / "browser_profile",
+        )
+        controller = LocalAuthSessionController(settings)
+        FakeGoofishLoginSession.validate_results = [
+            {
+                "ok": True,
+                "code": "OK",
+                "reason": "SUCCESS::调用成功; SUCCESS::调用成功",
+                "payload_rets": {
+                    "loginuser": "SUCCESS::调用成功",
+                    "nav": "SUCCESS::调用成功",
+                },
+            },
+            {
+                "ok": False,
+                "code": "AUTH_REQUIRED",
+                "reason": "FAIL_SYS_SESSION_EXPIRED::Session过期",
+                "frame_urls": ["https://passport.goofish.com/mini_login.htm"],
+                "payload_rets": {
+                    "loginuser": "FAIL_SYS_SESSION_EXPIRED::Session过期",
+                },
+            },
+        ]
+
+        with patch("app.auth_session.GoofishLoginSession", FakeGoofishLoginSession):
+            first = await controller.start_auth_session(force_restart=False)
+
+            with self.assertRaises(ProviderError) as ctx:
+                await controller.confirm_auth_session(session_id=first["session_id"])
+
+            self.assertEqual(ctx.exception.code, ProviderErrorCode.AUTH_REQUIRED)
+            self.assertIn("复检失败", ctx.exception.message)
+            self.assertFalse((self.base_dir / "storage_state.json").exists())
+            self.assertFalse((self.base_dir / "browser_profile").exists())
 
 
 class LocalStorageStatePathTests(unittest.TestCase):
@@ -542,6 +718,7 @@ class RemoteProviderTimeoutBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         class FakePage:
             url = "https://passport.goofish.com/login"
+            frames = []
 
             async def content(self) -> str:
                 return "<html><body>login</body></html>"
@@ -549,6 +726,47 @@ class RemoteProviderTimeoutBehaviorTests(unittest.IsolatedAsyncioTestCase):
         error = await provider._classify_timeout_page_state(FakePage())
         self.assertIsNotNone(error)
         self.assertEqual(error.code, ProviderErrorCode.AUTH_REQUIRED)
+
+    async def test_timeout_page_state_detects_embedded_login_frame(self) -> None:
+        settings = build_settings(self.base_dir)
+        provider = PlaywrightSearchProvider(settings)
+
+        class FakeFrame:
+            def __init__(self, url: str) -> None:
+                self.url = url
+
+        class FakePage:
+            url = "https://www.goofish.com/item?id=123"
+            frames = [FakeFrame("https://passport.goofish.com/mini_login.htm")]
+
+            async def content(self) -> str:
+                return "<html><body>ok</body></html>"
+
+        error = await provider._classify_timeout_page_state(FakePage())
+        self.assertIsNotNone(error)
+        self.assertEqual(error.code, ProviderErrorCode.AUTH_REQUIRED)
+        self.assertIn("embedded login", error.message)
+
+    async def test_timeout_page_state_does_not_flag_normal_page_with_login_strings(self) -> None:
+        settings = build_settings(self.base_dir)
+        provider = PlaywrightSearchProvider(settings)
+
+        class FakePage:
+            url = "https://www.goofish.com/item?id=123"
+            frames = []
+
+            async def content(self) -> str:
+                return """
+                <html>
+                  <body>
+                    <script src="https://passport.goofish.com/ac/account/queryLoginSettings.do"></script>
+                    <div>login status ok</div>
+                  </body>
+                </html>
+                """
+
+        error = await provider._classify_timeout_page_state(FakePage())
+        self.assertIsNone(error)
 
 
 class WorkerFavoriteRouteTests(unittest.TestCase):

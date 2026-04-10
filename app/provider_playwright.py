@@ -9,7 +9,13 @@ from time import monotonic
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from playwright.async_api import Browser, Playwright, TimeoutError, async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Playwright,
+    TimeoutError,
+    async_playwright,
+)
 from playwright.async_api import Error as PlaywrightError
 
 try:
@@ -25,6 +31,10 @@ _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
 _DETAIL_FAVORITE_BUTTON_SELECTOR = "div[class*='buttons--'] div[class*='right--']"
 _FAVORITE_HINT_TEXT = "收藏"
 _FAVORITED_HINT_TEXT = "已收藏"
+_EMBEDDED_LOGIN_MARKERS = (
+    "passport.goofish.com/mini_login.htm",
+    "alibaba-login-box",
+)
 
 
 class PlaywrightSearchProvider:
@@ -34,6 +44,7 @@ class PlaywrightSearchProvider:
         self.settings = settings
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
+        self._persistent_context: BrowserContext | None = None
         self._init_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
         self._configured_executable_path = self._validate_executable_path()
@@ -81,14 +92,108 @@ class PlaywrightSearchProvider:
         return launch_kwargs
 
     async def close(self) -> None:
+        if self._persistent_context is not None:
+            try:
+                await self._persistent_context.close()
+            except Exception:
+                pass
+            self._persistent_context = None
+            self._browser = None
         if self._browser is not None:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
             self._browser = None
         if self._playwright is not None:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
             self._playwright = None
 
+    async def adopt_login_session(self, session) -> None:
+        runtime = session.detach_runtime()
+        context = runtime.get("context")
+        playwright = runtime.get("playwright")
+        browser = runtime.get("browser")
+        if context is None or playwright is None:
+            raise RuntimeError("login session runtime is not available for adoption")
+
+        await self.close()
+        self._playwright = playwright
+        self._browser = browser
+        self._persistent_context = context
+        logger.info(
+            "[goofish_catcher] adopted live login browser session into provider"
+        )
+
+    async def _ensure_persistent_context(self) -> BrowserContext:
+        if self._persistent_context is not None:
+            return self._persistent_context
+
+        user_data_dir = self.settings.playwright_user_data_dir
+        if user_data_dir is None:
+            raise RuntimeError("persistent context requested without user_data_dir")
+
+        async with self._init_lock:
+            if self._persistent_context is not None:
+                return self._persistent_context
+            playwright = await async_playwright().start()
+            if playwright is None:
+                raise ProviderError(
+                    ProviderErrorCode.UNKNOWN,
+                    "playwright start failed",
+                    retry_after_sec=300,
+                )
+
+            launch_kwargs = self._build_launch_kwargs(
+                executable_path=self._configured_executable_path
+            )
+            try:
+                user_data_dir.mkdir(parents=True, exist_ok=True)
+                context = await playwright.chromium.launch_persistent_context(
+                    str(user_data_dir),
+                    viewport={"width": 1280, "height": 800},
+                    **launch_kwargs,
+                )
+            except PlaywrightError as exc:
+                message = str(exc)
+                if self._configured_executable_path is not None:
+                    await playwright.stop()
+                    raise ProviderError(
+                        ProviderErrorCode.DEPENDENCY_MISSING,
+                        "failed to launch configured playwright executable: "
+                        f"{self._configured_executable_path}: {message}",
+                        retry_after_sec=1800,
+                    ) from exc
+                await playwright.stop()
+                raise ProviderError(
+                    ProviderErrorCode.DEPENDENCY_MISSING,
+                    "failed to launch persistent playwright browser. "
+                    "Run: uv run python -m playwright install",
+                    retry_after_sec=1800,
+                ) from exc
+            except Exception:
+                await playwright.stop()
+                raise
+
+            self._playwright = playwright
+            self._persistent_context = context
+            self._browser = context.browser
+            return context
+
     async def _ensure_browser(self) -> Browser:
+        if self.settings.playwright_user_data_dir is not None:
+            context = await self._ensure_persistent_context()
+            browser = context.browser
+            if browser is None:
+                raise ProviderError(
+                    ProviderErrorCode.UNKNOWN,
+                    "persistent playwright context does not expose browser handle",
+                    retry_after_sec=300,
+                )
+            return browser
         if self._browser is not None:
             return self._browser
 
@@ -163,6 +268,13 @@ class PlaywrightSearchProvider:
             self._browser = browser
             return self._browser
 
+    async def _open_operation_context(self) -> tuple[BrowserContext, bool]:
+        if self.settings.playwright_user_data_dir is not None:
+            return await self._ensure_persistent_context(), False
+
+        browser = await self._ensure_browser()
+        return await browser.new_context(**self._build_context_kwargs()), True
+
     async def search(
         self,
         *,
@@ -171,7 +283,9 @@ class PlaywrightSearchProvider:
         timeout_sec: int,
     ) -> list[NormalizedItem]:
         async with self._operation_lock:
-            browser = await self._ensure_browser()
+            browser = None
+            if self.settings.playwright_user_data_dir is None:
+                browser = await self._ensure_browser()
             unique: dict[str, NormalizedItem] = {}
             page_count = max(1, pages)
             timeout_ms = max(5, timeout_sec) * 1000
@@ -199,10 +313,22 @@ class PlaywrightSearchProvider:
         item_id: str | None = None,
     ) -> FavoriteItemResult:
         async with self._operation_lock:
-            browser = await self._ensure_browser()
             timeout_ms = max(5, timeout_sec) * 1000
-            context = await browser.new_context(**self._build_context_kwargs())
+            context, should_close_context = await self._open_operation_context()
             page = await context.new_page()
+            error_flags: set[str] = set()
+            self._attach_page_state_watchers(page, error_flags)
+            logger.info(
+                "[goofish_catcher] favorite start: url=%s item_id=%s persistent_profile=%s storage_state=%s",
+                url,
+                item_id or "-",
+                str(self.settings.playwright_user_data_dir)
+                if self.settings.playwright_user_data_dir is not None
+                else "-",
+                str(self.settings.playwright_storage_state_path)
+                if self.settings.playwright_storage_state_path is not None
+                else "-",
+            )
             if hasattr(page, "set_default_timeout"):
                 page.set_default_timeout(timeout_ms)
 
@@ -210,9 +336,26 @@ class PlaywrightSearchProvider:
                 await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                 await self._maybe_wait_for_network_idle(page, timeout_ms)
                 await page.wait_for_timeout(1200)
+                logger.info(
+                    "[goofish_catcher] favorite after goto: page_url=%s flags=%s frames=%s",
+                    str(getattr(page, "url", "") or ""),
+                    sorted(error_flags),
+                    _collect_frame_urls(page),
+                )
 
-                page_error = await self._classify_favorite_page_state(page)
+                page_error = await self._classify_favorite_page_state(
+                    page,
+                    error_flags=error_flags,
+                )
                 if page_error is not None:
+                    logger.warning(
+                        "[goofish_catcher] favorite page rejected before button: url=%s code=%s message=%s flags=%s frames=%s",
+                        str(getattr(page, "url", "") or ""),
+                        page_error.code.value,
+                        page_error.message,
+                        sorted(error_flags),
+                        _collect_frame_urls(page),
+                    )
                     raise page_error
 
                 favorite_button = await self._wait_for_favorite_button(page, timeout_ms)
@@ -224,10 +367,22 @@ class PlaywrightSearchProvider:
                     or _extract_item_id_from_url(resolved_url)
                     or _extract_item_id_from_url(url)
                 )
+                logger.info(
+                    "[goofish_catcher] favorite button detected: item_id=%s button_text=%s title=%s url=%s",
+                    resolved_item_id or "-",
+                    button_text.strip(),
+                    title or "-",
+                    resolved_url,
+                )
 
                 state = _classify_favorite_button_text(button_text)
                 if state == "already_favorited":
                     await self._persist_context_storage_state(context)
+                    logger.info(
+                        "[goofish_catcher] favorite idempotent success: item_id=%s url=%s",
+                        resolved_item_id or "-",
+                        resolved_url,
+                    )
                     return FavoriteItemResult(
                         status="already_favorited",
                         url=resolved_url,
@@ -241,6 +396,11 @@ class PlaywrightSearchProvider:
                     )
 
                 await favorite_button.click(timeout=max(2500, min(timeout_ms, 8_000)))
+                logger.info(
+                    "[goofish_catcher] favorite click issued: item_id=%s url=%s",
+                    resolved_item_id or "-",
+                    resolved_url,
+                )
                 try:
                     await page.wait_for_function(
                         """
@@ -257,8 +417,19 @@ class PlaywrightSearchProvider:
                         timeout=max(2500, min(timeout_ms, 8_000)),
                     )
                 except TimeoutError as exc:
-                    page_error = await self._classify_favorite_page_state(page)
+                    page_error = await self._classify_favorite_page_state(
+                        page,
+                        error_flags=error_flags,
+                    )
                     if page_error is not None:
+                        logger.warning(
+                            "[goofish_catcher] favorite page rejected after click: url=%s code=%s message=%s flags=%s frames=%s",
+                            str(getattr(page, "url", "") or ""),
+                            page_error.code.value,
+                            page_error.message,
+                            sorted(error_flags),
+                            _collect_frame_urls(page),
+                        )
                         raise page_error from exc
                     latest_text = ""
                     try:
@@ -275,6 +446,12 @@ class PlaywrightSearchProvider:
                         ) from exc
 
                 await self._persist_context_storage_state(context)
+                logger.info(
+                    "[goofish_catcher] favorite success: item_id=%s url=%s final_button=%s",
+                    resolved_item_id or "-",
+                    resolved_url,
+                    (await favorite_button.inner_text()).strip(),
+                )
                 return FavoriteItemResult(
                     status="favorited",
                     url=resolved_url,
@@ -282,8 +459,19 @@ class PlaywrightSearchProvider:
                     title=title or None,
                 )
             except TimeoutError as exc:
-                timeout_error = await self._classify_timeout_page_state(page)
+                timeout_error = await self._classify_timeout_page_state(
+                    page,
+                    error_flags=error_flags,
+                )
                 if timeout_error is not None:
+                    logger.warning(
+                        "[goofish_catcher] favorite timeout classified: page_url=%s code=%s message=%s flags=%s frames=%s",
+                        str(getattr(page, "url", "") or ""),
+                        timeout_error.code.value,
+                        timeout_error.message,
+                        sorted(error_flags),
+                        _collect_frame_urls(page),
+                    )
                     raise timeout_error from exc
                 raise ProviderError(
                     ProviderErrorCode.TIMEOUT,
@@ -296,7 +484,10 @@ class PlaywrightSearchProvider:
                     retry_after_sec=300,
                 ) from exc
             finally:
-                await context.close()
+                if callable(getattr(page, "close", None)):
+                    await page.close()
+                if should_close_context:
+                    await context.close()
 
     def _build_context_kwargs(self) -> dict[str, Any]:
         context_kwargs: dict[str, Any] = {
@@ -311,18 +502,20 @@ class PlaywrightSearchProvider:
     async def _fetch_single_page(
         self,
         *,
-        browser: Browser,
+        browser: Browser | None,
         keyword: str,
         page_index: int,
         timeout_ms: int,
     ) -> list[NormalizedItem]:
-        context = await browser.new_context(**self._build_context_kwargs())
+        del browser
+        context, should_close_context = await self._open_operation_context()
         page = await context.new_page()
         captured_payloads: list[dict[str, Any] | list[Any]] = []
         error_flags: set[str] = set()
+        self._attach_page_state_watchers(page, error_flags)
 
         if self.settings.playwright_block_assets:
-            await context.route("**/*", _route_handler)
+            await page.route("**/*", _route_handler)
 
         async def on_response(response) -> None:
             url = response.url.lower()
@@ -330,6 +523,8 @@ class PlaywrightSearchProvider:
 
             if "captcha" in url:
                 error_flags.add("captcha")
+            if _is_auth_url(url):
+                error_flags.add("auth")
             # Only treat auth as failure when main document is redirected to login.
             # Static subresources from passport domains are common even in valid sessions.
             if response.request.resource_type == "document" and response.status in {
@@ -360,7 +555,14 @@ class PlaywrightSearchProvider:
                     error_flags.add("captcha")
                 return
 
-            if isinstance(payload, (dict, list)):
+            if isinstance(payload, dict):
+                if _payload_requires_login(payload):
+                    error_flags.add("auth")
+                if _payload_indicates_captcha(payload):
+                    error_flags.add("captcha")
+                captured_payloads.append(payload)
+                return
+            if isinstance(payload, list):
                 captured_payloads.append(payload)
 
         page.on("response", on_response)
@@ -371,18 +573,12 @@ class PlaywrightSearchProvider:
                 search_url, wait_until="domcontentloaded", timeout=timeout_ms
             )
             await self._maybe_wait_for_network_idle(page, timeout_ms)
-            current_url = page.url.lower()
-            if "login" in current_url or "passport" in current_url:
-                raise ProviderError(
-                    ProviderErrorCode.AUTH_REQUIRED,
-                    "goofish redirected to login page",
-                )
-            html = await page.content()
-            if "验证码" in html or "captcha" in html.lower() or "滑块" in html:
-                raise ProviderError(
-                    ProviderErrorCode.CAPTCHA,
-                    "captcha detected on goofish page",
-                )
+            page_error = await self._classify_timeout_page_state(
+                page,
+                error_flags=error_flags,
+            )
+            if page_error is not None:
+                raise page_error
 
             if page_index > 1:
                 # Goofish keeps the browser URL stable and drives pagination
@@ -446,7 +642,10 @@ class PlaywrightSearchProvider:
                 retry_after_sec=300,
             ) from exc
         finally:
-            await context.close()
+            if callable(getattr(page, "close", None)):
+                await page.close()
+            if should_close_context:
+                await context.close()
 
     async def _persist_context_storage_state(self, context) -> None:
         storage_path = self.settings.playwright_storage_state_path
@@ -470,8 +669,16 @@ class PlaywrightSearchProvider:
         )
         return page.locator(_DETAIL_FAVORITE_BUTTON_SELECTOR).first
 
-    async def _classify_favorite_page_state(self, page) -> ProviderError | None:
-        return await self._classify_timeout_page_state(page)
+    async def _classify_favorite_page_state(
+        self,
+        page,
+        *,
+        error_flags: set[str] | None = None,
+    ) -> ProviderError | None:
+        return await self._classify_timeout_page_state(
+            page,
+            error_flags=error_flags,
+        )
 
     def _build_search_url(self, *, keyword: str) -> str:
         return f"{self.BASE_URL}/search?q={quote(keyword)}"
@@ -587,36 +794,155 @@ class PlaywrightSearchProvider:
         except Exception:
             await page.wait_for_timeout(min(1800, idle_timeout))
 
-    async def _classify_timeout_page_state(self, page) -> ProviderError | None:
+    def _attach_page_state_watchers(self, page, error_flags: set[str]) -> None:
+        on = getattr(page, "on", None)
+        if not callable(on):
+            return
+
+        def _on_frame_navigated(frame) -> None:
+            frame_url = str(getattr(frame, "url", "") or "")
+            if _is_auth_url(frame_url):
+                error_flags.add("auth")
+                logger.info(
+                    "[goofish_catcher] detected auth frame navigation: %s",
+                    frame_url,
+                )
+            if _is_captcha_url(frame_url):
+                error_flags.add("captcha")
+                logger.info(
+                    "[goofish_catcher] detected captcha frame navigation: %s",
+                    frame_url,
+                )
+
+        async def _on_response(response) -> None:
+            url = str(getattr(response, "url", "") or "")
+            if _is_auth_url(url):
+                error_flags.add("auth")
+                logger.info(
+                    "[goofish_catcher] detected auth response: status=%s url=%s",
+                    getattr(response, "status", "?"),
+                    url,
+                )
+            if _is_captcha_url(url):
+                error_flags.add("captcha")
+                logger.info(
+                    "[goofish_catcher] detected captcha response: status=%s url=%s",
+                    getattr(response, "status", "?"),
+                    url,
+                )
+
+            content_type = ""
+            try:
+                content_type = (response.headers.get("content-type") or "").lower()
+            except Exception:
+                content_type = ""
+
+            if _should_log_response_url(url):
+                logger.info(
+                    "[goofish_catcher] observed response: status=%s resource=%s url=%s content_type=%s",
+                    getattr(response, "status", "?"),
+                    getattr(getattr(response, "request", None), "resource_type", "?"),
+                    url,
+                    content_type or "-",
+                )
+            if "json" not in content_type:
+                return
+            try:
+                payload = await response.json()
+            except Exception:
+                return
+            if isinstance(payload, dict):
+                if _should_log_response_url(url):
+                    logger.info(
+                        "[goofish_catcher] response payload summary: url=%s ret=%s auth=%s captcha=%s",
+                        url,
+                        _payload_ret_summary(payload),
+                        _payload_requires_login(payload),
+                        _payload_indicates_captcha(payload),
+                    )
+                if _payload_requires_login(payload):
+                    error_flags.add("auth")
+                    logger.info(
+                        "[goofish_catcher] payload requires login: url=%s ret=%s",
+                        url,
+                        _payload_ret_summary(payload),
+                    )
+                if _payload_indicates_captcha(payload):
+                    error_flags.add("captcha")
+                    logger.info(
+                        "[goofish_catcher] payload indicates captcha: url=%s ret=%s",
+                        url,
+                        _payload_ret_summary(payload),
+                    )
+
+        on("framenavigated", _on_frame_navigated)
+        on("response", _on_response)
+
+    async def _classify_timeout_page_state(
+        self,
+        page,
+        *,
+        error_flags: set[str] | None = None,
+    ) -> ProviderError | None:
+        if error_flags and "auth" in error_flags:
+            return ProviderError(
+                ProviderErrorCode.AUTH_REQUIRED,
+                "goofish showed embedded login prompt",
+            )
+        if error_flags and "captcha" in error_flags:
+            return ProviderError(
+                ProviderErrorCode.CAPTCHA,
+                "captcha detected on goofish page",
+            )
         try:
             current_url = str(getattr(page, "url", "") or "").lower()
         except Exception:
             current_url = ""
-        if "login" in current_url or "passport" in current_url:
+        if _is_auth_url(current_url):
             return ProviderError(
                 ProviderErrorCode.AUTH_REQUIRED,
                 "goofish redirected to login page",
             )
-        if "captcha" in current_url:
+        if _is_captcha_url(current_url):
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
                 "captcha detected on goofish page",
             )
 
         try:
+            frames = list(getattr(page, "frames", []) or [])
+        except Exception:
+            frames = []
+        for frame in frames:
+            try:
+                frame_url = str(getattr(frame, "url", "") or "").lower()
+            except Exception:
+                frame_url = ""
+            if _is_auth_url(frame_url):
+                return ProviderError(
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    "goofish showed embedded login prompt",
+                )
+            if _is_captcha_url(frame_url):
+                return ProviderError(
+                    ProviderErrorCode.CAPTCHA,
+                    "captcha detected on goofish page",
+                )
+
+        try:
             html = await page.content()
         except Exception:
             html = ""
         lowered = html.lower()
+        if any(marker in lowered for marker in _EMBEDDED_LOGIN_MARKERS):
+            return ProviderError(
+                ProviderErrorCode.AUTH_REQUIRED,
+                "goofish showed embedded login prompt",
+            )
         if "验证码" in html or "滑块" in html or "captcha" in lowered:
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
                 "captcha detected on goofish page",
-            )
-        if "登录" in html or "login" in lowered or "passport" in lowered:
-            return ProviderError(
-                ProviderErrorCode.AUTH_REQUIRED,
-                "goofish redirected to login page",
             )
         return None
 
@@ -646,7 +972,6 @@ class PlaywrightSearchProvider:
                     stable_rounds += 1
                 else:
                     stable_rounds = 0
-                # Either enough cards, or count stabilized for a while.
                 if dom_count >= 6 or stable_rounds >= 2:
                     return dom_items
             last_dom_count = dom_count
@@ -727,6 +1052,100 @@ class PlaywrightSearchProvider:
             publish_time=publish_time,
             raw=data,
         )
+
+
+def _is_auth_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    if not lowered:
+        return False
+    parsed = urlparse(lowered)
+    host = parsed.netloc
+    path = parsed.path or ""
+    if "passport.goofish.com" in host and (
+        "mini_login.htm" in path or path == "/login" or path.startswith("/login/")
+    ):
+        return True
+    if "goofish.com" in host and "mini_login.htm" in path:
+        return True
+    if "goofish.com" in host and "member/login" in path:
+        return True
+    return False
+
+
+def _is_captcha_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    if not lowered:
+        return False
+    parsed = urlparse(lowered)
+    host = parsed.netloc
+    path = parsed.path or ""
+    return bool(
+        ("cf.aliyun.com" in host and "nocaptcha" in path)
+        or "captcha" in path
+    )
+
+
+def _payload_requires_login(payload: dict[str, Any]) -> bool:
+    lowered = _payload_ret_summary(payload).lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "fail_sys_session_expired",
+            "fail_sys_illegal_access",
+            "session过期",
+            "请登录",
+            "need_login",
+        )
+    )
+
+
+def _payload_indicates_captcha(payload: dict[str, Any]) -> bool:
+    ret = payload.get("ret")
+    ret_text = " ".join(str(item) for item in ret) if isinstance(ret, list) else str(ret)
+    lowered = ret_text.lower()
+    return any(
+        marker in lowered
+        for marker in ("captcha", "验证码", "滑块")
+    )
+
+
+def _payload_ret_summary(payload: dict[str, Any]) -> str:
+    ret = payload.get("ret")
+    if isinstance(ret, list):
+        return " | ".join(str(item) for item in ret[:3]) or "-"
+    text = str(ret or "").strip()
+    return text or "-"
+
+
+def _should_log_response_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "mtop.taobao.idle.pc.detail",
+            "mtop.taobao.idlemessage.pc.loginuser.get",
+            "mtop.taobao.idle.collect.item",
+            "com.taobao.idle.unfavor.item",
+            "passport.goofish.com/mini_login.htm",
+            "mtop.idle.web.user.page.nav",
+        )
+    )
+
+
+def _collect_frame_urls(page) -> list[str]:
+    try:
+        frames = list(getattr(page, "frames", []) or [])
+    except Exception:
+        return []
+    urls: list[str] = []
+    for frame in frames:
+        try:
+            url = str(getattr(frame, "url", "") or "").strip()
+        except Exception:
+            url = ""
+        if url:
+            urls.append(url)
+    return urls
 
 
 async def _route_handler(route) -> None:

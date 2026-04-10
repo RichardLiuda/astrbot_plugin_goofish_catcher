@@ -146,6 +146,7 @@ class PluginSettings:
     default_drop_pct: float
     default_cooldown_sec: int
     playwright_storage_state_path: Path | None
+    playwright_user_data_dir: Path | None
     playwright_executable_path: Path | None
     playwright_headless: bool
     playwright_block_assets: bool
@@ -245,10 +246,13 @@ def load_plugin_settings(
         provider_mode = PROVIDER_MODE_PLAYWRIGHT_LOCAL
 
     stable_state_path = plugin_data_dir / "storage_state.json"
+    stable_user_data_dir = plugin_data_dir / "browser_profile"
     if provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL:
         storage_state_path: Path | None = stable_state_path
+        user_data_dir: Path | None = stable_user_data_dir
     elif stable_state_path.exists():
         storage_state_path = stable_state_path
+        user_data_dir = None
         logger.info(
             "[%s] use fallback playwright storage_state from stable path: %s",
             plugin_name,
@@ -256,6 +260,7 @@ def load_plugin_settings(
         )
     else:
         storage_state_path = None
+        user_data_dir = None
 
     webhook_url = str(raw.get("webhook_url", "")).strip() or None
     remote_base_url = str(raw.get("remote_base_url", "")).strip() or None
@@ -313,6 +318,7 @@ def load_plugin_settings(
         default_drop_pct=max(0.0, _as_float(raw.get("default_drop_pct"), 0.05)),
         default_cooldown_sec=max(60, _as_int(raw.get("default_cooldown_sec"), 21600)),
         playwright_storage_state_path=storage_state_path,
+        playwright_user_data_dir=user_data_dir,
         playwright_executable_path=playwright_executable_path,
         playwright_headless=False,
         playwright_block_assets=_as_bool(raw.get("playwright_block_assets"), True),

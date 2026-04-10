@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 try:
@@ -18,6 +19,14 @@ PLUGIN_NAME = "astrbot_plugin_goofish_catcher"
 PROVIDER_MODE_PLAYWRIGHT_LOCAL = "playwright_local"
 DEFAULT_LOGIN_URL = "https://www.goofish.com/search?q=%E9%97%B2%E9%B1%BC"
 DEFAULT_VIEWPORT = {"width": 1280, "height": 960}
+_LOGIN_STATUS_API_MARKERS = (
+    "mtop.taobao.idlemessage.pc.loginuser.get",
+    "mtop.idle.web.user.page.nav",
+)
+_EMBEDDED_LOGIN_MARKERS = (
+    "passport.goofish.com/mini_login.htm",
+    "alibaba-login-box",
+)
 
 
 def get_astrbot_root() -> Path:
@@ -108,10 +117,16 @@ class GoofishLoginSession:
         self,
         *,
         executable_path: Path | str | None = None,
+        user_data_dir: Path | str | None = None,
         force_direct: bool = False,
         login_url: str = DEFAULT_LOGIN_URL,
     ) -> None:
         self.executable_path = normalize_executable_path(executable_path)
+        self.user_data_dir = (
+            Path(user_data_dir).expanduser()
+            if user_data_dir is not None
+            else None
+        )
         self.force_direct = force_direct
         self.login_url = login_url
         self._playwright: Any | None = None
@@ -147,9 +162,27 @@ class GoofishLoginSession:
             if self.executable_path is not None:
                 launch_kwargs["executable_path"] = str(self.executable_path)
 
-            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-            self._context = await self._browser.new_context(viewport=DEFAULT_VIEWPORT)
-            self._page = await self._context.new_page()
+            if self.user_data_dir is not None:
+                self.user_data_dir.mkdir(parents=True, exist_ok=True)
+                self._context = await self._playwright.chromium.launch_persistent_context(
+                    str(self.user_data_dir),
+                    viewport=DEFAULT_VIEWPORT,
+                    **launch_kwargs,
+                )
+                self._browser = self._context.browser
+                self._page = (
+                    self._context.pages[0]
+                    if getattr(self._context, "pages", None)
+                    else None
+                )
+                if self._page is None:
+                    self._page = await self._context.new_page()
+            else:
+                self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+                self._context = await self._browser.new_context(
+                    viewport=DEFAULT_VIEWPORT
+                )
+                self._page = await self._context.new_page()
             await self._page.goto(
                 self.login_url,
                 wait_until="domcontentloaded",
@@ -195,15 +228,164 @@ class GoofishLoginSession:
                 temp_path.unlink(missing_ok=True)
             raise
 
+    async def validate_login(self) -> dict[str, Any]:
+        if self._context is None:
+            raise RuntimeError("login session has not been started")
+
+        page = self._page
+        if page is None:
+            page = await self._context.new_page()
+            self._page = page
+
+        auth_flags: set[str] = set()
+        captcha_flags: set[str] = set()
+        payload_rets: dict[str, str] = {}
+        payload_hits: set[str] = set()
+
+        def _on_frame_navigated(frame) -> None:
+            frame_url = str(getattr(frame, "url", "") or "")
+            if _is_auth_url(frame_url):
+                auth_flags.add(frame_url)
+            if _is_captcha_url(frame_url):
+                captcha_flags.add(frame_url)
+
+        async def _on_response(response) -> None:
+            url = str(getattr(response, "url", "") or "")
+            if _is_auth_url(url):
+                auth_flags.add(url)
+            if _is_captcha_url(url):
+                captcha_flags.add(url)
+
+            lowered = url.lower()
+            if not any(marker in lowered for marker in _LOGIN_STATUS_API_MARKERS):
+                return
+
+            try:
+                payload = await response.json()
+            except Exception:
+                return
+            if not isinstance(payload, dict):
+                return
+            payload_rets[url] = _payload_ret_summary(payload)
+            matched_marker = _match_login_status_api(url)
+            if matched_marker is not None:
+                payload_hits.add(matched_marker)
+            if _payload_requires_login(payload):
+                auth_flags.add(f"payload:{payload_rets[url]}")
+            if _payload_indicates_captcha(payload):
+                captcha_flags.add(f"payload:{payload_rets[url]}")
+
+        on = getattr(page, "on", None)
+        if callable(on):
+            on("framenavigated", _on_frame_navigated)
+            on("response", _on_response)
+
+        await page.goto(
+            self.login_url,
+            wait_until="domcontentloaded",
+            timeout=30_000,
+        )
+        await self._settle_page()
+
+        current_url = str(getattr(page, "url", "") or "")
+        frame_urls = _collect_frame_urls(page)
+        try:
+            html = await page.content()
+        except Exception:
+            html = ""
+        lowered_html = html.lower()
+        reason_text = "; ".join(payload_rets.values()) if payload_rets else "-"
+        logger.info(
+            "[goofish_catcher] validate_login result probe: page_url=%s hits=%s auth_flags=%s captcha_flags=%s frame_urls=%s payloads=%s",
+            current_url,
+            sorted(payload_hits),
+            sorted(auth_flags),
+            sorted(captcha_flags),
+            frame_urls,
+            payload_rets,
+        )
+
+        if auth_flags or _is_auth_url(current_url) or any(
+            _is_auth_url(frame_url) for frame_url in frame_urls
+        ) or any(marker in lowered_html for marker in _EMBEDDED_LOGIN_MARKERS):
+            return {
+                "ok": False,
+                "code": "AUTH_REQUIRED",
+                "reason": reason_text if payload_rets else "登录态尚未生效，页面仍出现登录提示",
+                "page_url": current_url,
+                "frame_urls": frame_urls,
+                "payload_rets": payload_rets,
+            }
+
+        if captcha_flags or _is_captcha_url(current_url) or (
+            "验证码" in html or "滑块" in html or "captcha" in lowered_html
+        ):
+            return {
+                "ok": False,
+                "code": "CAPTCHA",
+                "reason": reason_text if payload_rets else "登录校验期间触发验证码或风控",
+                "page_url": current_url,
+                "frame_urls": frame_urls,
+                "payload_rets": payload_rets,
+            }
+
+        missing_hits = [
+            marker for marker in _LOGIN_STATUS_API_MARKERS if marker not in payload_hits
+        ]
+        if missing_hits:
+            return {
+                "ok": False,
+                "code": "AUTH_REQUIRED",
+                "reason": "登录校验缺少关键接口成功响应："
+                + ", ".join(missing_hits),
+                "page_url": current_url,
+                "frame_urls": frame_urls,
+                "payload_rets": payload_rets,
+            }
+
+        if payload_rets:
+            return {
+                "ok": True,
+                "code": "OK",
+                "reason": reason_text,
+                "page_url": current_url,
+                "frame_urls": frame_urls,
+                "payload_rets": payload_rets,
+            }
+
+        return {
+            "ok": False,
+            "code": "AUTH_REQUIRED",
+            "reason": "未观察到登录态成功响应，请确认扫码后页面已完成登录",
+            "page_url": current_url,
+            "frame_urls": frame_urls,
+            "payload_rets": payload_rets,
+        }
+
     async def close(self) -> None:
-        if self._browser is not None:
+        if self._context is not None:
+            await self._context.close()
+            self._context = None
+        elif self._browser is not None:
             await self._browser.close()
-            self._browser = None
-        self._context = None
+        self._browser = None
         self._page = None
         if self._playwright is not None:
             await self._playwright.stop()
             self._playwright = None
+
+    def detach_runtime(self) -> dict[str, Any]:
+        runtime = {
+            "playwright": self._playwright,
+            "browser": self._browser,
+            "context": self._context,
+            "page": self._page,
+        }
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        return runtime
 
     async def _settle_page(self) -> None:
         if self._page is None:
@@ -214,3 +396,84 @@ class GoofishLoginSession:
         except Exception:
             await self._page.wait_for_timeout(600)
 
+
+def _payload_ret_summary(payload: dict[str, Any]) -> str:
+    ret = payload.get("ret")
+    if isinstance(ret, list):
+        return " | ".join(str(item) for item in ret[:3]) or "-"
+    text = str(ret or "").strip()
+    return text or "-"
+
+
+def _payload_requires_login(payload: dict[str, Any]) -> bool:
+    ret_text = _payload_ret_summary(payload).lower()
+    return any(
+        marker in ret_text
+        for marker in (
+            "fail_sys_session_expired",
+            "fail_sys_illegal_access",
+            "session过期",
+            "请登录",
+            "need_login",
+        )
+    )
+
+
+def _payload_indicates_captcha(payload: dict[str, Any]) -> bool:
+    ret_text = _payload_ret_summary(payload).lower()
+    return any(marker in ret_text for marker in ("captcha", "验证码", "滑块"))
+
+
+def _is_auth_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    if not lowered:
+        return False
+    parsed = urlparse(lowered)
+    host = parsed.netloc
+    path = parsed.path or ""
+    if "passport.goofish.com" in host and (
+        "mini_login.htm" in path or path == "/login" or path.startswith("/login/")
+    ):
+        return True
+    if "goofish.com" in host and "mini_login.htm" in path:
+        return True
+    if "goofish.com" in host and "member/login" in path:
+        return True
+    return False
+
+
+def _is_captcha_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    if not lowered:
+        return False
+    parsed = urlparse(lowered)
+    host = parsed.netloc
+    path = parsed.path or ""
+    return bool(
+        ("cf.aliyun.com" in host and "nocaptcha" in path)
+        or "captcha" in path
+    )
+
+
+def _collect_frame_urls(page) -> list[str]:
+    try:
+        frames = list(getattr(page, "frames", []) or [])
+    except Exception:
+        return []
+    urls: list[str] = []
+    for frame in frames:
+        try:
+            url = str(getattr(frame, "url", "") or "").strip()
+        except Exception:
+            url = ""
+        if url:
+            urls.append(url)
+    return urls
+
+
+def _match_login_status_api(url: str) -> str | None:
+    lowered = str(url or "").lower()
+    for marker in _LOGIN_STATUS_API_MARKERS:
+        if marker in lowered:
+            return marker
+    return None

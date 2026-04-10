@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -26,6 +27,11 @@ except ImportError:
     from app.login_session import GoofishLoginSession
     from app.provider_playwright import PlaywrightSearchProvider
     from app.types import FavoriteItemResult, ProviderError, ProviderErrorCode
+
+try:
+    from astrbot.api import logger
+except ModuleNotFoundError:
+    logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 
 class SearchRequest(BaseModel):
@@ -82,9 +88,11 @@ class WorkerLoginSessionManager:
         settings: PluginSettings | None,
         *,
         auth_timeout_sec: float = AUTH_SESSION_TIMEOUT_SEC,
+        provider: Any | None = None,
     ) -> None:
         self.settings = settings
         self.auth_timeout_sec = max(1.0, float(auth_timeout_sec))
+        self.provider = provider
         self._lock = asyncio.Lock()
         self._active_session: WorkerLoginSession | None = None
 
@@ -101,8 +109,10 @@ class WorkerLoginSessionManager:
                 await self._active_session.session.close()
                 self._active_session = None
 
+            await self._recycle_provider_browser()
             session = GoofishLoginSession(
                 executable_path=self.settings.playwright_executable_path,
+                user_data_dir=self.settings.playwright_user_data_dir,
                 force_direct=self.settings.playwright_force_direct,
             )
             try:
@@ -125,11 +135,18 @@ class WorkerLoginSessionManager:
             if self.settings is None or self.settings.playwright_storage_state_path is None:
                 raise RuntimeError("worker storage_state path is not configured")
 
+            validation = await active_session.session.validate_login()
+            if not validation.get("ok"):
+                reason = str(validation.get("reason", "")).strip() or "登录态尚未生效"
+                raise ValueError(reason)
+
             saved_path = await active_session.session.save_storage_state(
                 self.settings.playwright_storage_state_path
             )
             saved_at = int(time.time())
-            await active_session.session.close()
+            adopted = await self._adopt_login_session(active_session.session)
+            if not adopted:
+                await active_session.session.close()
             self._active_session = None
             return {
                 "ok": True,
@@ -199,6 +216,27 @@ class WorkerLoginSessionManager:
             "screenshot_base64": snapshot.screenshot_base64,
         }
 
+    async def _recycle_provider_browser(self) -> None:
+        provider = self.provider
+        if provider is None:
+            return
+        closer = getattr(provider, "close", None)
+        if not callable(closer):
+            return
+        await closer()
+        logger.info("[goofish_catcher] worker recycled playwright provider session")
+
+    async def _adopt_login_session(self, session: GoofishLoginSession) -> bool:
+        provider = self.provider
+        if provider is None:
+            return False
+        adopter = getattr(provider, "adopt_login_session", None)
+        if not callable(adopter):
+            return False
+        await adopter(session)
+        logger.info("[goofish_catcher] worker adopted live login session into provider")
+        return True
+
 
 @dataclass(slots=True)
 class WorkerRuntime:
@@ -262,6 +300,7 @@ def build_worker_settings_from_env() -> PluginSettings:
         default_drop_pct=0.05,
         default_cooldown_sec=21600,
         playwright_storage_state_path=storage_state_path,
+        playwright_user_data_dir=plugin_data_dir / "browser_profile",
         playwright_executable_path=(
             Path(executable_path).expanduser() if executable_path else None
         ),
@@ -331,11 +370,12 @@ def create_runtime_from_env() -> WorkerRuntime:
     try:
         settings = build_worker_settings_from_env()
         provider = PlaywrightSearchProvider(settings)
+        login_manager = WorkerLoginSessionManager(settings, provider=provider)
         return WorkerRuntime(
             settings=settings,
             provider=provider,
             auth=auth,
-            login_manager=WorkerLoginSessionManager(settings),
+            login_manager=login_manager,
         )
     except ModuleNotFoundError as exc:
         return WorkerRuntime(

@@ -249,7 +249,11 @@ class GoofishCatcherPlugin(Star):
         if self.settings.provider_mode == PROVIDER_MODE_REMOTE_REST:
             auth_controller = self.provider
         elif self.settings.provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL:
-            auth_controller = LocalAuthSessionController(self.settings)
+            auth_controller = LocalAuthSessionController(
+                self.settings,
+                on_before_start=self._recycle_local_provider_browser,
+                on_after_confirm=self._adopt_local_login_session,
+            )
         self.remote_auth_coordinator = RemoteAuthRecoveryCoordinator(
             context=self.context,
             settings=self.settings,
@@ -353,6 +357,42 @@ class GoofishCatcherPlugin(Star):
                 exc,
                 exc_info=True,
             )
+
+    async def _recycle_local_provider_browser(self) -> None:
+        provider = self.provider
+        if provider is None:
+            return
+        closer = getattr(provider, "close", None)
+        if not callable(closer):
+            return
+        try:
+            await closer()
+            logger.info("[goofish_catcher] recycled local playwright browser session")
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] failed to recycle local playwright browser session: %s",
+                exc,
+                exc_info=True,
+            )
+
+    async def _adopt_local_login_session(self, session) -> bool:
+        provider = self.provider
+        if provider is None:
+            return False
+        adopter = getattr(provider, "adopt_login_session", None)
+        if not callable(adopter):
+            await self._recycle_local_provider_browser()
+            return False
+        try:
+            await adopter(session)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] failed to adopt local login session: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
 
     async def _trigger_remote_auth_recovery(
         self,
