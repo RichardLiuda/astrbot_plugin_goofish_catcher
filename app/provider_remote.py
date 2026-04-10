@@ -75,6 +75,23 @@ class RemoteSearchProvider:
                 f"remote provider network error: {exc}",
             ) from exc
 
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "json" not in content_type:
+            body_preview = response.text[:200].replace("\n", " ").strip()
+            if response.status_code >= 500:
+                raise ProviderError(
+                    ProviderErrorCode.NETWORK_ERROR,
+                    "remote provider gateway error: "
+                    f"status={response.status_code}, url={url}, "
+                    f"content_type={content_type or '-'}, body={body_preview or '-'}",
+                )
+            raise ProviderError(
+                ProviderErrorCode.PARSE_ERROR,
+                "remote provider returned non-json response: "
+                f"status={response.status_code}, url={url}, "
+                f"content_type={content_type or '-'}, body={body_preview or '-'}",
+            )
+
         try:
             data = response.json()
         except ValueError as exc:

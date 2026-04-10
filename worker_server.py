@@ -116,6 +116,16 @@ class WorkerLoginSessionManager:
                 force_direct=self.settings.playwright_force_direct,
             )
             try:
+                logger.info(
+                    "[goofish_catcher] worker auth start: force_restart=%s user_data_dir=%s storage_state=%s",
+                    force_restart,
+                    str(self.settings.playwright_user_data_dir)
+                    if self.settings.playwright_user_data_dir is not None
+                    else "-",
+                    str(self.settings.playwright_storage_state_path)
+                    if self.settings.playwright_storage_state_path is not None
+                    else "-",
+                )
                 await session.start_login_session()
                 active_session = WorkerLoginSession(
                     session_id=uuid4().hex,
@@ -135,16 +145,41 @@ class WorkerLoginSessionManager:
             if self.settings is None or self.settings.playwright_storage_state_path is None:
                 raise RuntimeError("worker storage_state path is not configured")
 
+            logger.info(
+                "[goofish_catcher] worker auth confirm: session_id=%s storage_state=%s user_data_dir=%s",
+                session_id,
+                str(self.settings.playwright_storage_state_path),
+                str(self.settings.playwright_user_data_dir)
+                if self.settings.playwright_user_data_dir is not None
+                else "-",
+            )
             validation = await active_session.session.validate_login()
             if not validation.get("ok"):
                 reason = str(validation.get("reason", "")).strip() or "登录态尚未生效"
+                logger.warning(
+                    "[goofish_catcher] worker auth confirm validation failed: session_id=%s reason=%s payloads=%s frame_urls=%s",
+                    session_id,
+                    reason,
+                    validation.get("payload_rets"),
+                    validation.get("frame_urls"),
+                )
                 raise ValueError(reason)
 
             saved_path = await active_session.session.save_storage_state(
                 self.settings.playwright_storage_state_path
             )
+            logger.info(
+                "[goofish_catcher] worker auth confirm saved storage state: session_id=%s path=%s",
+                session_id,
+                saved_path,
+            )
             saved_at = int(time.time())
             adopted = await self._adopt_login_session(active_session.session)
+            logger.info(
+                "[goofish_catcher] worker auth confirm session handoff: session_id=%s adopted=%s",
+                session_id,
+                adopted,
+            )
             if not adopted:
                 await active_session.session.close()
             self._active_session = None
