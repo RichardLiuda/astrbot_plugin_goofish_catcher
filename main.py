@@ -411,6 +411,10 @@ class GoofishCatcherPlugin(Star):
     async def auto_complete_remote_auth_flow(self, event: AstrMessageEvent):
         if not await self._check_ready(event):
             return
+        reply_favorite_result = await self._build_reply_favorite_result(event)
+        if reply_favorite_result is not None:
+            yield reply_favorite_result.stop_event()
+            return
         if self.remote_auth_coordinator is None or self.storage is None:
             return
         message_text = event.get_message_str()
@@ -461,51 +465,46 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(f"保存登录态失败：{exc}").stop_event()
             return
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 21)
-    async def favorite_recommendation_by_reply(self, event: AstrMessageEvent):
-        if not await self._check_ready(event):
-            return
-
+    async def _build_reply_favorite_result(
+        self,
+        event: AstrMessageEvent,
+    ):
         selections = parse_reply_selection(event.get_message_str())
         if selections is None:
-            return
+            return None
 
         reply_text = extract_reply_text(event.get_messages())
         if not reply_text:
-            return
+            return None
 
         target = parse_reply_target(reply_text)
         if target is None:
-            return
+            return None
+        logger.info(
+            "[goofish_catcher] matched reply favorite request: source=%s selections=%s",
+            target.source,
+            selections,
+        )
 
         if target.error_message:
-            yield event.plain_result(target.error_message).stop_event()
-            return
+            return event.plain_result(target.error_message)
 
         selected_items, invalid = map_reply_selection(target, selections)
         if invalid:
             max_index = max((item.index for item in target.items), default=0)
             invalid_text = "、".join(str(value) for value in invalid)
-            yield event.plain_result(
+            return event.plain_result(
                 f"序号超出范围：{invalid_text}\n"
                 f"当前可选范围：1-{max_index}"
-            ).stop_event()
-            return
+            )
         if not selected_items:
-            yield event.plain_result(
-                "未识别到可收藏的商品序号，请重新引用推荐消息后再试。"
-            ).stop_event()
-            return
+            return event.plain_result("未识别到可收藏的商品序号，请重新引用推荐消息后再试。")
         if self._provider_error:
-            yield event.plain_result(
+            return event.plain_result(
                 f"Provider 当前不可用，暂时无法执行收藏。\n原因：{self._provider_error}"
-            ).stop_event()
-            return
+            )
         if self.provider is None:
-            yield event.plain_result(
-                "插件内部错误：抓取组件不可用，请重启后重试。"
-            ).stop_event()
-            return
+            return event.plain_result("插件内部错误：抓取组件不可用，请重启后重试。")
 
         lines = ["收藏结果："]
         auth_hint: str | None = None
@@ -524,6 +523,13 @@ class GoofishCatcherPlugin(Star):
                 else:
                     lines.append(f"{item.index}. 已收藏：{display_title}")
             except ProviderError as exc:
+                logger.warning(
+                    "[goofish_catcher] favorite item failed: index=%s url=%s code=%s message=%s",
+                    item.index,
+                    item.url,
+                    exc.code.value,
+                    exc.message,
+                )
                 lines.append(
                     f"{item.index}. 收藏失败：{title}（{exc.code.value}: {exc.message}）"
                 )
@@ -537,6 +543,13 @@ class GoofishCatcherPlugin(Star):
                     interrupted = True
                     break
             except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher] favorite item failed unexpectedly: index=%s url=%s error=%s",
+                    item.index,
+                    item.url,
+                    exc,
+                    exc_info=True,
+                )
                 lines.append(f"{item.index}. 收藏失败：{title}（{exc}）")
 
         if interrupted:
@@ -547,8 +560,16 @@ class GoofishCatcherPlugin(Star):
                 )
         if auth_hint:
             lines.append(auth_hint)
+        return event.plain_result("\n".join(lines))
 
-        yield event.plain_result("\n".join(lines)).stop_event()
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 21)
+    async def favorite_recommendation_by_reply(self, event: AstrMessageEvent):
+        if not await self._check_ready(event):
+            return
+        result = await self._build_reply_favorite_result(event)
+        if result is None:
+            return
+        yield result.stop_event()
         return
 
     @filter.command_group("闲鱼", alias={"goofish"})
