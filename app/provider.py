@@ -7,7 +7,7 @@ from .config import (
     PROVIDER_MODE_REMOTE_REST,
     PluginSettings,
 )
-from .types import NormalizedItem
+from .types import FavoriteItemResult, NormalizedItem
 
 
 class SearchProvider(Protocol):
@@ -18,6 +18,14 @@ class SearchProvider(Protocol):
         pages: int,
         timeout_sec: int,
     ) -> list[NormalizedItem]: ...
+
+    async def favorite_item(
+        self,
+        *,
+        url: str,
+        timeout_sec: int,
+        item_id: str | None = None,
+    ) -> FavoriteItemResult: ...
 
     async def close(self) -> None: ...
 

@@ -7,7 +7,12 @@ import httpx
 
 from .config import PluginSettings
 from .provider import ProviderConfigurationError
-from .types import NormalizedItem, ProviderError, ProviderErrorCode
+from .types import (
+    FavoriteItemResult,
+    NormalizedItem,
+    ProviderError,
+    ProviderErrorCode,
+)
 
 
 class RemoteSearchProvider:
@@ -139,6 +144,42 @@ class RemoteSearchProvider:
             if normalized is not None:
                 items.append(normalized)
         return items
+
+    async def favorite_item(
+        self,
+        *,
+        url: str,
+        timeout_sec: int,
+        item_id: str | None = None,
+    ) -> FavoriteItemResult:
+        response, data = await self._request_json(
+            method="POST",
+            path="/v1/favorite",
+            timeout_sec=max(5, timeout_sec + 10),
+            json_body={
+                "url": url,
+                "item_id": item_id,
+                "timeout_ms": int(timeout_sec * 1000),
+            },
+        )
+        data = _expect_ok_object(
+            response=response,
+            data=data,
+            parse_error_message="remote favorite json root is not an object",
+            ok_error_message="remote favorite did not return ok=true",
+        )
+        status = str(data.get("status", "")).strip()
+        if status not in {"favorited", "already_favorited"}:
+            raise ProviderError(
+                ProviderErrorCode.PARSE_ERROR,
+                f"remote favorite returned invalid status: {status or '<empty>'}",
+            )
+        return FavoriteItemResult(
+            status=status,
+            url=str(data.get("url") or url).strip() or url,
+            item_id=str(data.get("item_id") or item_id or "").strip() or None,
+            title=str(data.get("title") or "").strip() or None,
+        )
 
     async def start_auth_session(
         self,

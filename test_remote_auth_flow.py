@@ -22,7 +22,7 @@ from app.provider_retry import (
 )
 from app.remote_auth_recovery import ActiveRemoteAuthFlow, RemoteAuthRecoveryCoordinator
 from app.storage import SubscriptionStorage
-from app.types import ProviderError, ProviderErrorCode
+from app.types import FavoriteItemResult, ProviderError, ProviderErrorCode
 
 
 def build_settings(base_dir: Path) -> PluginSettings:
@@ -497,6 +497,45 @@ class RemoteProviderTimeoutBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(items, [])
 
+    async def test_remote_favorite_uses_route_and_parses_response(self) -> None:
+        settings = replace(
+            build_settings(self.base_dir),
+            provider_mode="remote_rest",
+            remote_base_url="https://worker.example",
+        )
+        provider = RemoteSearchProvider(settings)
+
+        async def fake_request_json(*, method, path, timeout_sec, json_body=None):
+            self.assertEqual(method, "POST")
+            self.assertEqual(path, "/v1/favorite")
+            self.assertEqual(timeout_sec, 30)
+            self.assertEqual(
+                json_body,
+                {
+                    "url": "https://www.goofish.com/item?id=123",
+                    "item_id": "123",
+                    "timeout_ms": 20000,
+                },
+            )
+            return SimpleNamespace(status_code=200, text=""), {
+                "ok": True,
+                "status": "favorited",
+                "url": "https://www.goofish.com/item?id=123",
+                "item_id": "123",
+                "title": "Sony A7C2",
+            }
+
+        provider._request_json = fake_request_json  # type: ignore[method-assign]
+        result = await provider.favorite_item(
+            url="https://www.goofish.com/item?id=123",
+            item_id="123",
+            timeout_sec=20,
+        )
+
+        self.assertEqual(result.status, "favorited")
+        self.assertEqual(result.item_id, "123")
+        self.assertEqual(result.title, "Sony A7C2")
+
     async def test_timeout_page_state_maps_login_page_to_auth_required(self) -> None:
         settings = build_settings(self.base_dir)
         provider = PlaywrightSearchProvider(settings)
@@ -510,6 +549,107 @@ class RemoteProviderTimeoutBehaviorTests(unittest.IsolatedAsyncioTestCase):
         error = await provider._classify_timeout_page_state(FakePage())
         self.assertIsNotNone(error)
         self.assertEqual(error.code, ProviderErrorCode.AUTH_REQUIRED)
+
+
+class WorkerFavoriteRouteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp_dir.cleanup)
+        self.base_dir = Path(self._temp_dir.name)
+
+    def test_worker_favorite_route_returns_provider_payload(self) -> None:
+        async def _favorite_item(*, url: str, item_id: str | None, timeout_sec: int):
+            self.assertEqual(url, "https://www.goofish.com/item?id=123")
+            self.assertEqual(item_id, "123")
+            self.assertEqual(timeout_sec, 20)
+            return FavoriteItemResult(
+                status="already_favorited",
+                url=url,
+                item_id=item_id,
+                title="Canon R6",
+            )
+
+        runtime = worker_server.WorkerRuntime(
+            settings=build_settings(self.base_dir),
+            provider=SimpleNamespace(favorite_item=_favorite_item),
+            auth=worker_server.WorkerAuthConfig(
+                api_key=None,
+                cf_access_client_id=None,
+                cf_access_client_secret=None,
+            ),
+        )
+
+        with TestClient(worker_server.create_app(runtime)) as client:
+            response = client.post(
+                "/v1/favorite",
+                json={
+                    "url": "https://www.goofish.com/item?id=123",
+                    "item_id": "123",
+                    "timeout_ms": 20000,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "ok": True,
+                "status": "already_favorited",
+                "url": "https://www.goofish.com/item?id=123",
+                "item_id": "123",
+                "title": "Canon R6",
+            },
+        )
+
+
+class PlaywrightFavoriteBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup_temp_dir)
+        self.base_dir = Path(self._temp_dir.name)
+
+    async def _cleanup_temp_dir(self) -> None:
+        self._temp_dir.cleanup()
+
+    async def test_favorite_item_returns_idempotent_success_when_already_favorited(self) -> None:
+        settings = build_settings(self.base_dir)
+        provider = PlaywrightSearchProvider(settings)
+        browser, page = _build_fake_favorite_browser(button_text="已收藏")
+
+        async def fake_ensure_browser():
+            return browser
+
+        provider._ensure_browser = fake_ensure_browser  # type: ignore[method-assign]
+        result = await provider.favorite_item(
+            url="https://www.goofish.com/item?id=123",
+            item_id="123",
+            timeout_sec=20,
+        )
+
+        self.assertEqual(result.status, "already_favorited")
+        self.assertEqual(result.item_id, "123")
+        self.assertEqual(page.favorite_locator.click_count, 0)
+        self.assertEqual(page.wait_for_function_calls, 0)
+
+    async def test_favorite_item_clicks_and_waits_for_collected_state(self) -> None:
+        settings = build_settings(self.base_dir)
+        provider = PlaywrightSearchProvider(settings)
+        browser, page = _build_fake_favorite_browser(button_text="收藏")
+
+        async def fake_ensure_browser():
+            return browser
+
+        provider._ensure_browser = fake_ensure_browser  # type: ignore[method-assign]
+        result = await provider.favorite_item(
+            url="https://www.goofish.com/item?id=123",
+            item_id="123",
+            timeout_sec=20,
+        )
+
+        self.assertEqual(result.status, "favorited")
+        self.assertEqual(page.favorite_locator.click_count, 1)
+        self.assertEqual(page.favorite_locator.text, "已收藏")
+        self.assertEqual(page.wait_for_function_calls, 1)
 
 
 class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
@@ -785,3 +925,99 @@ class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelled_session_ids, ["session-timeout-1"])
         self.assertFalse(coordinator.has_active_flow())
         self.assertEqual(len(sent_messages), 2)
+
+
+class _FakeFavoriteLocator:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.click_count = 0
+
+    @property
+    def first(self) -> _FakeFavoriteLocator:
+        return self
+
+    async def inner_text(self) -> str:
+        return self.text
+
+    async def click(self, timeout: int | None = None) -> None:
+        del timeout
+        self.click_count += 1
+        if "已收藏" not in self.text and "收藏" in self.text:
+            self.text = "已收藏"
+
+
+class _FakeFavoritePage:
+    def __init__(self, button_text: str) -> None:
+        self.url = "https://www.goofish.com/item?id=123"
+        self.favorite_locator = _FakeFavoriteLocator(button_text)
+        self.wait_for_function_calls = 0
+        self.default_timeout = None
+
+    def set_default_timeout(self, timeout: int) -> None:
+        self.default_timeout = timeout
+
+    async def goto(self, url: str, wait_until: str, timeout: int) -> None:
+        del wait_until, timeout
+        self.url = url
+
+    async def wait_for_load_state(self, state: str, timeout: int) -> None:
+        del state, timeout
+
+    async def wait_for_timeout(self, timeout: int) -> None:
+        del timeout
+
+    async def wait_for_selector(self, selector: str, timeout: int) -> None:
+        del selector, timeout
+
+    def locator(self, selector: str) -> _FakeFavoriteLocator:
+        del selector
+        return self.favorite_locator
+
+    async def title(self) -> str:
+        return "测试商品 - 闲鱼"
+
+    async def wait_for_function(self, script: str, arg: str, timeout: int) -> None:
+        del script, arg, timeout
+        self.wait_for_function_calls += 1
+        if "已收藏" not in self.favorite_locator.text:
+            raise AssertionError("favorite state did not change to collected")
+
+    async def content(self) -> str:
+        return "<html><body>ok</body></html>"
+
+
+class _FakeFavoriteContext:
+    def __init__(self, page: _FakeFavoritePage) -> None:
+        self.page = page
+        self.closed = False
+        self.storage_state_paths: list[str] = []
+
+    async def new_page(self) -> _FakeFavoritePage:
+        return self.page
+
+    async def storage_state(self, path: str) -> dict[str, object]:
+        self.storage_state_paths.append(path)
+        return {}
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeFavoriteBrowser:
+    def __init__(self, context: _FakeFavoriteContext) -> None:
+        self.context = context
+        self.last_context_kwargs: dict[str, object] | None = None
+
+    async def new_context(self, **kwargs):
+        self.last_context_kwargs = kwargs
+        return self.context
+
+
+def _build_fake_favorite_browser(
+    *,
+    button_text: str,
+) -> tuple[_FakeFavoriteBrowser, _FakeFavoritePage]:
+    page = _FakeFavoritePage(button_text)
+    context = _FakeFavoriteContext(page)
+    browser = _FakeFavoriteBrowser(context)
+    return browser, page

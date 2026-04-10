@@ -10,6 +10,7 @@ from .detector import (
     within_new_window,
 )
 from .types import (
+    FavoriteItemResult,
     ExistingItem,
     NormalizedItem,
     ProviderError,
@@ -22,6 +23,7 @@ from .types import (
 
 __all__ = [
     "EventPayload",
+    "FavoriteItemResult",
     "ExistingItem",
     "NormalizedItem",
     "PluginSettings",

@@ -19,13 +19,13 @@ try:
     from .app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
     from .app.login_session import GoofishLoginSession
     from .app.provider_playwright import PlaywrightSearchProvider
-    from .app.types import ProviderError, ProviderErrorCode
+    from .app.types import FavoriteItemResult, ProviderError, ProviderErrorCode
 except ImportError:
     from app.auth_session import AUTH_SESSION_TIMEOUT_SEC
     from app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
     from app.login_session import GoofishLoginSession
     from app.provider_playwright import PlaywrightSearchProvider
-    from app.types import ProviderError, ProviderErrorCode
+    from app.types import FavoriteItemResult, ProviderError, ProviderErrorCode
 
 
 class SearchRequest(BaseModel):
@@ -42,6 +42,12 @@ class AuthStartRequest(BaseModel):
 
 class AuthSessionRequest(BaseModel):
     session_id: str = Field(min_length=1)
+
+
+class FavoriteRequest(BaseModel):
+    url: str = Field(min_length=1)
+    item_id: str | None = None
+    timeout_ms: int = Field(default=20_000, ge=1_000)
 
 
 @dataclass(slots=True)
@@ -533,6 +539,60 @@ def create_app(runtime: WorkerRuntime | None = None) -> FastAPI:
                 code=ProviderErrorCode.UNKNOWN,
                 message=str(exc),
             )
+
+    @app.post("/v1/favorite")
+    async def favorite(
+        req: FavoriteRequest,
+        authorization: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+        cf_access_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+        cf_access_client_secret: str | None = Header(
+            None,
+            alias="CF-Access-Client-Secret",
+        ),
+    ):
+        current_runtime = _get_runtime(app)
+        _verify_request_auth(
+            current_runtime.auth,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            cf_access_client_id=cf_access_client_id,
+            cf_access_client_secret=cf_access_client_secret,
+        )
+        if current_runtime.provider_error or current_runtime.provider is None:
+            return _error_response(
+                status_code=503,
+                code=current_runtime.provider_error_code,
+                message=current_runtime.provider_error or "worker provider is unavailable",
+            )
+
+        try:
+            result: FavoriteItemResult = await current_runtime.provider.favorite_item(
+                url=req.url,
+                item_id=req.item_id,
+                timeout_sec=max(5, req.timeout_ms // 1000),
+            )
+        except ProviderError as exc:
+            return _error_response(
+                status_code=400,
+                code=exc.code,
+                message=exc.message,
+                retry_after_sec=exc.retry_after_sec,
+            )
+        except Exception as exc:
+            return _error_response(
+                status_code=500,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
+
+        return {
+            "ok": True,
+            "status": result.status,
+            "url": result.url,
+            "item_id": result.item_id,
+            "title": result.title,
+        }
 
     @app.post("/v1/auth/confirm")
     async def confirm_auth_session(

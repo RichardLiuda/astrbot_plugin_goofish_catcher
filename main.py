@@ -32,6 +32,13 @@ from .app.provider_retry import (
     estimate_captcha_retry_timeout_sec,
     search_with_captcha_retry,
 )
+from .app.reply_favorite import (
+    extract_reply_text,
+    map_reply_selection,
+    parse_reply_selection,
+    parse_reply_target,
+    recommendation_reply_hint,
+)
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
@@ -455,6 +462,98 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(f"保存登录态失败：{exc}")
             event.stop_event()
             return
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 21)
+    async def favorite_recommendation_by_reply(self, event: AstrMessageEvent):
+        if not await self._check_ready(event):
+            return
+
+        selections = parse_reply_selection(event.get_message_str())
+        if selections is None:
+            return
+
+        reply_text = extract_reply_text(event.get_messages())
+        if not reply_text:
+            return
+
+        target = parse_reply_target(reply_text)
+        if target is None:
+            return
+
+        if target.error_message:
+            yield event.plain_result(target.error_message)
+            event.stop_event()
+            return
+
+        selected_items, invalid = map_reply_selection(target, selections)
+        if invalid:
+            max_index = max((item.index for item in target.items), default=0)
+            invalid_text = "、".join(str(value) for value in invalid)
+            yield event.plain_result(
+                f"序号超出范围：{invalid_text}\n"
+                f"当前可选范围：1-{max_index}"
+            )
+            event.stop_event()
+            return
+        if not selected_items:
+            yield event.plain_result("未识别到可收藏的商品序号，请重新引用推荐消息后再试。")
+            event.stop_event()
+            return
+        if self._provider_error:
+            yield event.plain_result(
+                f"Provider 当前不可用，暂时无法执行收藏。\n原因：{self._provider_error}"
+            )
+            event.stop_event()
+            return
+        if self.provider is None:
+            yield event.plain_result("插件内部错误：抓取组件不可用，请重启后重试。")
+            event.stop_event()
+            return
+
+        lines = ["收藏结果："]
+        auth_hint: str | None = None
+        interrupted = False
+        for item in selected_items:
+            title = item.title
+            try:
+                result = await self.provider.favorite_item(
+                    url=item.url,
+                    item_id=item.item_id,
+                    timeout_sec=self.settings.fetch_timeout_sec,
+                )
+                display_title = result.title or title
+                if result.status == "already_favorited":
+                    lines.append(f"{item.index}. 已在收藏夹：{display_title}")
+                else:
+                    lines.append(f"{item.index}. 已收藏：{display_title}")
+            except ProviderError as exc:
+                lines.append(
+                    f"{item.index}. 收藏失败：{title}（{exc.code.value}: {exc.message}）"
+                )
+                if exc.code in {
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    ProviderErrorCode.CAPTCHA,
+                }:
+                    auth_hint = await self._trigger_remote_auth_recovery(
+                        umo=event.unified_msg_origin
+                    )
+                    interrupted = True
+                    break
+            except Exception as exc:
+                lines.append(f"{item.index}. 收藏失败：{title}（{exc}）")
+
+        if interrupted:
+            remaining_count = len(selected_items) - (len(lines) - 1)
+            if remaining_count > 0:
+                lines.append(
+                    f"后续 {remaining_count} 个商品未继续处理，请先完成登录恢复后重试。"
+                )
+        if auth_hint:
+            lines.append(auth_hint)
+
+        yield event.plain_result("\n".join(lines))
+        event.stop_event()
+        return
 
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):
@@ -1110,6 +1209,7 @@ def _render_recommendation_preview(recommendation: RecommendationResult) -> str:
         lines.append(f"   理由：{item.reason}")
         lines.append(f"   风险：{item.risk}")
         lines.append(f"   链接：{item.url}")
+    lines.append(recommendation_reply_hint())
     lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
     return "\n".join(lines)
 
@@ -1238,6 +1338,7 @@ def _render_query_recommendation_preview(
         lines.append(f"   理由：{item.reason}")
         lines.append(f"   风险：{item.risk}")
         lines.append(f"   链接：{item.url}")
+    lines.append(recommendation_reply_hint())
     lines.append(f"可再次执行 /闲鱼 查询 {recommendation.keyword}")
     return "\n".join(lines)
 

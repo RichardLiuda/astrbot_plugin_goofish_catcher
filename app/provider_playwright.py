@@ -19,9 +19,12 @@ except ModuleNotFoundError:
 
 from .config import PluginSettings
 from .provider import ProviderConfigurationError
-from .types import NormalizedItem, ProviderError, ProviderErrorCode
+from .types import FavoriteItemResult, NormalizedItem, ProviderError, ProviderErrorCode
 
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
+_DETAIL_FAVORITE_BUTTON_SELECTOR = "div[class*='buttons--'] div[class*='right--']"
+_FAVORITE_HINT_TEXT = "收藏"
+_FAVORITED_HINT_TEXT = "已收藏"
 
 
 class PlaywrightSearchProvider:
@@ -186,6 +189,119 @@ class PlaywrightSearchProvider:
 
         return list(unique.values())
 
+    async def favorite_item(
+        self,
+        *,
+        url: str,
+        timeout_sec: int,
+        item_id: str | None = None,
+    ) -> FavoriteItemResult:
+        browser = await self._ensure_browser()
+        timeout_ms = max(5, timeout_sec) * 1000
+        context = await browser.new_context(**self._build_context_kwargs())
+        page = await context.new_page()
+        if hasattr(page, "set_default_timeout"):
+            page.set_default_timeout(timeout_ms)
+
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            await self._maybe_wait_for_network_idle(page, timeout_ms)
+            await page.wait_for_timeout(1200)
+
+            page_error = await self._classify_favorite_page_state(page)
+            if page_error is not None:
+                raise page_error
+
+            favorite_button = await self._wait_for_favorite_button(page, timeout_ms)
+            button_text = await favorite_button.inner_text()
+            title = _normalize_item_page_title(await page.title())
+            resolved_url = str(getattr(page, "url", "") or url).strip() or url
+            resolved_item_id = (
+                (item_id or "").strip()
+                or _extract_item_id_from_url(resolved_url)
+                or _extract_item_id_from_url(url)
+            )
+
+            state = _classify_favorite_button_text(button_text)
+            if state == "already_favorited":
+                await self._persist_context_storage_state(context)
+                return FavoriteItemResult(
+                    status="already_favorited",
+                    url=resolved_url,
+                    item_id=resolved_item_id or None,
+                    title=title or None,
+                )
+            if state != "favoritable":
+                raise ProviderError(
+                    ProviderErrorCode.PARSE_ERROR,
+                    "favorite button state is not recognizable",
+                )
+
+            await favorite_button.click(timeout=max(2500, min(timeout_ms, 8_000)))
+            try:
+                await page.wait_for_function(
+                    """
+                    (selector) => {
+                      const el = document.querySelector(selector);
+                      if (!el) {
+                        return false;
+                      }
+                      const text = (el.innerText || "").trim();
+                      return text.includes("已收藏");
+                    }
+                    """,
+                    arg=_DETAIL_FAVORITE_BUTTON_SELECTOR,
+                    timeout=max(2500, min(timeout_ms, 8_000)),
+                )
+            except TimeoutError as exc:
+                page_error = await self._classify_favorite_page_state(page)
+                if page_error is not None:
+                    raise page_error from exc
+                latest_text = ""
+                try:
+                    latest_text = await favorite_button.inner_text()
+                except Exception:
+                    latest_text = ""
+                if _classify_favorite_button_text(latest_text) != "already_favorited":
+                    raise ProviderError(
+                        ProviderErrorCode.TIMEOUT,
+                        "favorite button did not switch to collected state in time",
+                    ) from exc
+
+            await self._persist_context_storage_state(context)
+            return FavoriteItemResult(
+                status="favorited",
+                url=resolved_url,
+                item_id=resolved_item_id or None,
+                title=title or None,
+            )
+        except TimeoutError as exc:
+            timeout_error = await self._classify_timeout_page_state(page)
+            if timeout_error is not None:
+                raise timeout_error from exc
+            raise ProviderError(
+                ProviderErrorCode.TIMEOUT,
+                f"playwright timeout while favoriting item: {exc}",
+            ) from exc
+        except PlaywrightError as exc:
+            raise ProviderError(
+                ProviderErrorCode.UNKNOWN,
+                f"playwright page error: {exc}",
+                retry_after_sec=300,
+            ) from exc
+        finally:
+            await context.close()
+
+    def _build_context_kwargs(self) -> dict[str, Any]:
+        context_kwargs: dict[str, Any] = {
+            "viewport": {"width": 1280, "height": 800},
+        }
+        if self.settings.playwright_storage_state_path is not None:
+            storage_path: Path = self.settings.playwright_storage_state_path
+            if storage_path.exists():
+                context_kwargs["storage_state"] = str(storage_path)
+        return context_kwargs
+
     async def _fetch_single_page(
         self,
         *,
@@ -194,16 +310,7 @@ class PlaywrightSearchProvider:
         page_index: int,
         timeout_ms: int,
     ) -> list[NormalizedItem]:
-        context_kwargs: dict[str, Any] = {
-            "viewport": {"width": 1280, "height": 800},
-        }
-
-        if self.settings.playwright_storage_state_path is not None:
-            storage_path: Path = self.settings.playwright_storage_state_path
-            if storage_path.exists():
-                context_kwargs["storage_state"] = str(storage_path)
-
-        context = await browser.new_context(**context_kwargs)
+        context = await browser.new_context(**self._build_context_kwargs())
         page = await context.new_page()
         captured_payloads: list[dict[str, Any] | list[Any]] = []
         error_flags: set[str] = set()
@@ -348,6 +455,17 @@ class PlaywrightSearchProvider:
                 storage_path,
                 exc,
             )
+
+    async def _wait_for_favorite_button(self, page, timeout_ms: int):
+        wait_timeout_ms = max(2500, min(timeout_ms, 10_000))
+        await page.wait_for_selector(
+            _DETAIL_FAVORITE_BUTTON_SELECTOR,
+            timeout=wait_timeout_ms,
+        )
+        return page.locator(_DETAIL_FAVORITE_BUTTON_SELECTOR).first
+
+    async def _classify_favorite_page_state(self, page) -> ProviderError | None:
+        return await self._classify_timeout_page_state(page)
 
     def _build_search_url(self, *, keyword: str) -> str:
         return f"{self.BASE_URL}/search?q={quote(keyword)}"
@@ -653,6 +771,24 @@ def _extract_item_id_from_url(url: str) -> str | None:
     if match:
         return match.group(1)
     return None
+
+
+def _classify_favorite_button_text(text: str) -> str:
+    normalized = str(text or "").strip()
+    if _FAVORITED_HINT_TEXT in normalized:
+        return "already_favorited"
+    if _FAVORITE_HINT_TEXT in normalized:
+        return "favoritable"
+    return "unknown"
+
+
+def _normalize_item_page_title(title: str) -> str:
+    text = str(title or "").strip()
+    if text.endswith("_闲鱼"):
+        text = text[: -len("_闲鱼")].strip()
+    if text.endswith(" - 闲不住？上闲鱼！"):
+        text = ""
+    return text
 
 
 def _extract_price(data: dict[str, Any]) -> float | None:

@@ -83,6 +83,14 @@ class RecommendationResult:
     fallback_reason: str | None = None
 
 
+@dataclass(slots=True)
+class FavoriteItemResult:
+    status: str
+    url: str
+    item_id: str | None = None
+    title: str | None = None
+
+
 class ProviderErrorCode(str, Enum):
     DEPENDENCY_MISSING = "DEPENDENCY_MISSING"
     AUTH_REQUIRED = "AUTH_REQUIRED"

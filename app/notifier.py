@@ -10,6 +10,7 @@ from astrbot.api.event import MessageChain
 from astrbot.api.star import Context
 
 from .detector import EventPayload
+from .reply_favorite import recommendation_reply_hint
 from .types import NormalizedItem, RecommendationResult
 
 
@@ -151,6 +152,7 @@ class Notifier:
             lines.append(f"   风险：{item.risk}")
             lines.append(f"   链接：{item.url}")
 
+        lines.append(recommendation_reply_hint())
         lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
         text = "\n".join(lines)
         sent = await self._send_to_umo(umo, text)
