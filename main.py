@@ -9,6 +9,7 @@ from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
@@ -477,26 +478,40 @@ class GoofishCatcherPlugin(Star):
         outline_reply_text, outline_selection_text = extract_reply_context_from_outline(
             outline_text
         )
-        selection_text = (
-            extract_non_reply_text(messages)
-            or raw_message_text
-            or outline_selection_text
+        selection_candidates = [
+            extract_non_reply_text(messages),
+            outline_selection_text,
+            raw_message_text,
+        ]
+        selection_text = next(
+            (candidate for candidate in selection_candidates if candidate),
+            None,
         )
-        reply_text = extract_reply_text(messages) or outline_reply_text
+        reply_candidates = [
+            extract_reply_text(messages),
+            outline_reply_text,
+        ]
+        reply_text = next((candidate for candidate in reply_candidates if candidate), None)
         if reply_text:
             logger.debug(
-                "[goofish_catcher] inspect reply favorite candidate: selection_text=%r raw_message_str=%r outline_selection_text=%r component_types=%s",
-                selection_text,
+                "[goofish_catcher] inspect reply favorite candidate: selection_candidates=%r raw_message_str=%r outline_selection_text=%r component_types=%s",
+                selection_candidates,
                 raw_message_text,
                 outline_selection_text,
                 [type(component).__name__ for component in messages],
             )
-        selections = parse_reply_selection(selection_text or "")
+        selections = None
+        for candidate in selection_candidates:
+            parsed = parse_reply_selection(candidate or "")
+            if parsed is not None:
+                selections = parsed
+                selection_text = candidate
+                break
         if selections is None:
             if reply_text:
                 logger.debug(
-                    "[goofish_catcher] reply favorite skipped: selection parse failed, selection_text=%r raw_message_str=%r outline_selection_text=%r outline=%r",
-                    selection_text,
+                    "[goofish_catcher] reply favorite skipped: selection parse failed, selection_candidates=%r raw_message_str=%r outline_selection_text=%r outline=%r",
+                    selection_candidates,
                     raw_message_text,
                     outline_selection_text,
                     outline_text,
@@ -609,6 +624,24 @@ class GoofishCatcherPlugin(Star):
         if result is None:
             return
         yield result.stop_event()
+        return
+
+    @filter.on_llm_request(priority=10000)
+    async def intercept_reply_favorite_before_llm(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> None:
+        del req
+        if not self._ready:
+            return
+        result = await self._build_reply_favorite_result(event)
+        if result is None:
+            return
+        logger.info("[goofish_catcher] intercept reply favorite before llm request")
+        await event.send(result)
+        event.should_call_llm(False)
+        event.stop_event()
         return
 
     @filter.command_group("闲鱼", alias={"goofish"})
