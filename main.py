@@ -425,8 +425,7 @@ class GoofishCatcherPlugin(Star):
                 message = await self.remote_auth_coordinator.start_login(
                     umo=event.unified_msg_origin
                 )
-                yield event.plain_result(message)
-                event.stop_event()
+                yield event.plain_result(message).stop_event()
                 return
             should_complete = await (
                 self.remote_auth_coordinator.should_auto_complete_from_message(
@@ -451,16 +450,15 @@ class GoofishCatcherPlugin(Star):
                 storage=self.storage,
                 scheduler=self.scheduler,
             )
-            yield event.plain_result(message)
-            event.stop_event()
+            yield event.plain_result(message).stop_event()
             return
         except ProviderError as exc:
-            yield event.plain_result(f"保存登录态失败：{exc.code.value}\n{exc.message}")
-            event.stop_event()
+            yield event.plain_result(
+                f"保存登录态失败：{exc.code.value}\n{exc.message}"
+            ).stop_event()
             return
         except Exception as exc:
-            yield event.plain_result(f"保存登录态失败：{exc}")
-            event.stop_event()
+            yield event.plain_result(f"保存登录态失败：{exc}").stop_event()
             return
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 21)
@@ -481,8 +479,7 @@ class GoofishCatcherPlugin(Star):
             return
 
         if target.error_message:
-            yield event.plain_result(target.error_message)
-            event.stop_event()
+            yield event.plain_result(target.error_message).stop_event()
             return
 
         selected_items, invalid = map_reply_selection(target, selections)
@@ -492,22 +489,22 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(
                 f"序号超出范围：{invalid_text}\n"
                 f"当前可选范围：1-{max_index}"
-            )
-            event.stop_event()
+            ).stop_event()
             return
         if not selected_items:
-            yield event.plain_result("未识别到可收藏的商品序号，请重新引用推荐消息后再试。")
-            event.stop_event()
+            yield event.plain_result(
+                "未识别到可收藏的商品序号，请重新引用推荐消息后再试。"
+            ).stop_event()
             return
         if self._provider_error:
             yield event.plain_result(
                 f"Provider 当前不可用，暂时无法执行收藏。\n原因：{self._provider_error}"
-            )
-            event.stop_event()
+            ).stop_event()
             return
         if self.provider is None:
-            yield event.plain_result("插件内部错误：抓取组件不可用，请重启后重试。")
-            event.stop_event()
+            yield event.plain_result(
+                "插件内部错误：抓取组件不可用，请重启后重试。"
+            ).stop_event()
             return
 
         lines = ["收藏结果："]
@@ -551,8 +548,7 @@ class GoofishCatcherPlugin(Star):
         if auth_hint:
             lines.append(auth_hint)
 
-        yield event.plain_result("\n".join(lines))
-        event.stop_event()
+        yield event.plain_result("\n".join(lines)).stop_event()
         return
 
     @filter.command_group("闲鱼", alias={"goofish"})
