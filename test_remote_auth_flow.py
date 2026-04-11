@@ -23,6 +23,7 @@ from app.provider_retry import (
 from app.remote_auth_recovery import ActiveRemoteAuthFlow, RemoteAuthRecoveryCoordinator
 from app.storage import SubscriptionStorage
 from app.types import FavoriteItemResult, ProviderError, ProviderErrorCode
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 
 def build_settings(base_dir: Path) -> PluginSettings:
@@ -909,6 +910,114 @@ class PlaywrightOperationSerializationTests(unittest.IsolatedAsyncioTestCase):
                 ["start:camera-b", "end:camera-b", "start:camera-a", "end:camera-a"],
             ),
         )
+
+
+class _FakePaginationLocator:
+    def __init__(self, texts: list[str]) -> None:
+        self.texts = texts
+        self.clicked_texts: list[str] = []
+        self.filled_values: list[str] = []
+
+    async def count(self) -> int:
+        return len(self.texts)
+
+    def nth(self, index: int) -> "_FakePaginationLocatorItem":
+        return _FakePaginationLocatorItem(self, self.texts[index])
+
+    @property
+    def first(self) -> "_FakePaginationLocatorItem":
+        value = self.texts[0] if self.texts else ""
+        return _FakePaginationLocatorItem(self, value)
+
+
+class _FakePaginationLocatorItem:
+    def __init__(self, parent: _FakePaginationLocator, text: str) -> None:
+        self.parent = parent
+        self.text = text
+
+    async def inner_text(self) -> str:
+        return self.text
+
+    async def click(self, timeout: int | None = None) -> None:
+        del timeout
+        self.parent.clicked_texts.append(self.text)
+
+    async def fill(self, value: str, timeout: int | None = None) -> None:
+        del timeout
+        self.parent.filled_values.append(value)
+
+
+class _FakePaginationPage:
+    def __init__(self, *, texts: list[str] | None = None) -> None:
+        self.timeouts: list[int] = []
+        self.wait_for_function_calls = 0
+        self.page_boxes = _FakePaginationLocator(texts or ["1", "2"])
+        self.page_input = _FakePaginationLocator([""])
+        self.confirm_button = _FakePaginationLocator(["GO"])
+
+    async def evaluate(self, script: str) -> None:
+        del script
+
+    async def wait_for_timeout(self, timeout: int) -> None:
+        self.timeouts.append(timeout)
+
+    async def wait_for_selector(self, selector: str, timeout: int) -> None:
+        del selector, timeout
+
+    def locator(self, selector: str):
+        if "search-pagination-page-box" in selector:
+            return self.page_boxes
+        if "search-pagination-to-page-input" in selector:
+            return self.page_input
+        if "search-pagination-to-page-confirm-button" in selector:
+            return self.confirm_button
+        raise AssertionError(f"Unexpected selector: {selector}")
+
+    async def wait_for_function(self, script: str, arg: int, timeout: int) -> None:
+        del script, arg, timeout
+        self.wait_for_function_calls += 1
+        raise PlaywrightTimeoutError("pager active class did not update in time")
+
+
+class PlaywrightPaginationGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup_temp_dir)
+        self.base_dir = Path(self._temp_dir.name)
+
+    async def _cleanup_temp_dir(self) -> None:
+        self._temp_dir.cleanup()
+
+    async def test_navigate_to_page_index_returns_false_when_page_is_missing(self) -> None:
+        settings = build_settings(self.base_dir)
+        provider = PlaywrightSearchProvider(settings)
+        page = _FakePaginationPage(texts=["1"])
+
+        available = await provider._navigate_to_page_index(
+            page=page,
+            page_index=2,
+            timeout_ms=20_000,
+        )
+
+        self.assertFalse(available)
+        self.assertEqual(page.wait_for_function_calls, 0)
+        self.assertEqual(page.page_boxes.clicked_texts, [])
+        self.assertEqual(page.page_input.filled_values, [])
+
+    async def test_navigate_to_page_index_keeps_waiting_when_target_page_exists(self) -> None:
+        settings = build_settings(self.base_dir)
+        provider = PlaywrightSearchProvider(settings)
+        page = _FakePaginationPage(texts=["1", "2"])
+
+        with self.assertRaises(PlaywrightTimeoutError):
+            await provider._navigate_to_page_index(
+                page=page,
+                page_index=2,
+                timeout_ms=20_000,
+            )
+
+        self.assertEqual(page.wait_for_function_calls, 1)
+        self.assertEqual(page.page_boxes.clicked_texts, ["2"])
 
 
 class RemoteAuthAutoCompleteTests(unittest.IsolatedAsyncioTestCase):

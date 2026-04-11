@@ -589,11 +589,19 @@ class PlaywrightSearchProvider:
                     timeout_ms=timeout_ms,
                 )
                 captured_payloads.clear()
-                await self._navigate_to_page_index(
+                page_available = await self._navigate_to_page_index(
                     page=page,
                     page_index=page_index,
                     timeout_ms=timeout_ms,
                 )
+                if not page_available:
+                    logger.info(
+                        "[goofish_catcher] page=%s not available for keyword=%s",
+                        page_index,
+                        keyword,
+                    )
+                    await self._persist_context_storage_state(context)
+                    return []
                 await self._maybe_wait_for_network_idle(page, timeout_ms)
 
             items = await self._wait_for_items_ready(
@@ -689,7 +697,7 @@ class PlaywrightSearchProvider:
         page,
         page_index: int,
         timeout_ms: int,
-    ) -> None:
+    ) -> bool:
         pager_timeout_ms = max(2500, min(10000, timeout_ms // 2))
         await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
         await page.wait_for_timeout(600)
@@ -714,6 +722,9 @@ class PlaywrightSearchProvider:
         if target is not None:
             await target.click(timeout=pager_timeout_ms)
         else:
+            available_pages = await self._extract_visible_page_numbers(page_boxes)
+            if available_pages and max(available_pages) < page_index:
+                return False
             page_input = page.locator(
                 "input[class*='search-pagination-to-page-input']"
             ).first
@@ -736,6 +747,20 @@ class PlaywrightSearchProvider:
             timeout=pager_timeout_ms,
         )
         await page.wait_for_timeout(600)
+        return True
+
+    async def _extract_visible_page_numbers(self, page_boxes) -> list[int]:
+        values: list[int] = []
+        for idx in range(await page_boxes.count()):
+            candidate = page_boxes.nth(idx)
+            try:
+                text = (await candidate.inner_text()).strip()
+            except Exception:
+                continue
+            if not text.isdigit():
+                continue
+            values.append(int(text))
+        return values
 
     async def _extract_items_from_dom(self, page) -> list[NormalizedItem]:
         try:
