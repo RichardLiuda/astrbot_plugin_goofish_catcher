@@ -2,8 +2,6 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
-
 ## [2.2.2] - 2026-04-19
 
 ### Added
