@@ -458,6 +458,15 @@ class AdminService:
             payload.get("pages", current.pages if current else self.settings.default_pages)
             or self.settings.default_pages
         )
+        recommend_max_price_raw = payload.get(
+            "recommend_max_price",
+            current.recommend_max_price if current else None,
+        )
+        recommend_max_price = (
+            float(recommend_max_price_raw)
+            if recommend_max_price_raw not in (None, "")
+            else None
+        )
         drop_abs = float(
             payload.get(
                 "drop_abs",
@@ -491,6 +500,11 @@ class AdminService:
             "keyword": keyword,
             "interval_sec": max(30, interval_sec),
             "pages": max(1, min(pages, self.settings.max_pages)),
+            "recommend_max_price": (
+                max(0.0, recommend_max_price)
+                if recommend_max_price is not None
+                else None
+            ),
             "drop_abs": max(0.0, drop_abs),
             "drop_pct": max(0.0, drop_pct),
             "new_window_sec": max(60, new_window_sec),
@@ -547,6 +561,7 @@ class AdminService:
                 keyword=sub.keyword,
                 candidates=candidates,
                 top_k=self.settings.llm_top_k,
+                recommend_max_price=sub.recommend_max_price,
             )
             if recommendation.top:
                 await self.scheduler.persist_notifications(
@@ -673,6 +688,7 @@ class AdminService:
             keyword=sub.keyword,
             interval_sec=sub.interval_sec,
             pages=sub.pages,
+            recommend_max_price=sub.recommend_max_price,
             drop_abs=sub.drop_abs,
             drop_pct=sub.drop_pct,
             new_window_sec=sub.new_window_sec,

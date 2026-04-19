@@ -78,6 +78,7 @@ export function SubscriptionsPage({ notify }) {
 			...form,
 			interval_sec: toNumberOrNull(form.interval_sec),
 			pages: toNumberOrNull(form.pages),
+			recommend_max_price: toNumberOrNull(form.recommend_max_price),
 			drop_abs: toNumberOrNull(form.drop_abs),
 			drop_pct: toNumberOrNull(form.drop_pct),
 			new_window_sec: toNumberOrNull(form.new_window_sec),
@@ -141,6 +142,7 @@ export function SubscriptionsPage({ notify }) {
 							setEditing({
 								interval_sec: 600,
 								pages: 1,
+								recommend_max_price: '',
 								drop_abs: 50,
 								drop_pct: 0.05,
 								new_window_sec: 1800,
@@ -268,6 +270,17 @@ export function SubscriptionsPage({ notify }) {
 													<${TableCell}>
 														<${Typography}
 															variant="body2"
+														>
+															推荐价
+															${item.recommend_max_price == null
+																? '不限'
+																: `≤${formatMoney(
+																		item.recommend_max_price
+																	)}`}
+														<//>
+														<${Typography}
+															variant="caption"
+															color="text.secondary"
 														>
 															降价
 															${formatMoney(

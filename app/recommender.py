@@ -93,8 +93,25 @@ class GoofishRecommender:
         keyword: str,
         candidates: list[RecommendationCandidate],
         top_k: int | None = None,
+        recommend_max_price: float | None = None,
     ) -> RecommendationResult:
-        if not candidates:
+        effective_candidates = _filter_candidates_by_price(
+            candidates,
+            recommend_max_price=recommend_max_price,
+        )
+        if not effective_candidates:
+            if candidates and recommend_max_price is not None:
+                return RecommendationResult(
+                    keyword=keyword,
+                    summary=(
+                        f"已按价格阈值 ￥{recommend_max_price:.2f} 过滤，"
+                        "当前没有候选商品。"
+                    ),
+                    top=[],
+                    total_candidates=0,
+                    used_llm=False,
+                    fallback_reason="PRICE_THRESHOLD_EMPTY",
+                )
             return RecommendationResult(
                 keyword=keyword,
                 summary="本轮没有上新或降价候选。",
@@ -105,7 +122,7 @@ class GoofishRecommender:
             )
 
         picked_top_k = max(1, top_k or self.settings.llm_top_k)
-        limited_candidates = candidates[: self.settings.llm_max_candidates]
+        limited_candidates = effective_candidates[: self.settings.llm_max_candidates]
         llm_result: RecommendationResult | None = None
         fallback_reason: str | None = None
 
@@ -128,7 +145,7 @@ class GoofishRecommender:
             fallback_reason = "LLM_DISABLED"
 
         if llm_result is not None:
-            llm_result.total_candidates = len(candidates)
+            llm_result.total_candidates = len(effective_candidates)
             return llm_result
 
         return self._analyze_with_heuristic(
@@ -136,7 +153,7 @@ class GoofishRecommender:
             candidates=limited_candidates,
             top_k=picked_top_k,
             fallback_reason=fallback_reason or "LLM_FAILED",
-            total_candidates=len(candidates),
+            total_candidates=len(effective_candidates),
         )
 
     def _resolve_provider_id(
@@ -413,6 +430,16 @@ def _safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _filter_candidates_by_price(
+    candidates: list[RecommendationCandidate],
+    *,
+    recommend_max_price: float | None,
+) -> list[RecommendationCandidate]:
+    if recommend_max_price is None:
+        return candidates
+    return [candidate for candidate in candidates if float(candidate.price) <= recommend_max_price]
 
 
 def _parse_json_maybe_fenced(raw_text: str) -> dict[str, Any]:

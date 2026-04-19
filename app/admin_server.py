@@ -34,6 +34,7 @@ class SubscriptionRequest(BaseModel):
     keyword: str | None = None
     interval_sec: int | None = Field(default=None, ge=1)
     pages: int | None = Field(default=None, ge=1)
+    recommend_max_price: float | None = Field(default=None, ge=0)
     drop_abs: float | None = Field(default=None, ge=0)
     drop_pct: float | None = Field(default=None, ge=0)
     new_window_sec: int | None = Field(default=None, ge=1)
@@ -176,7 +177,7 @@ def create_admin_app(plugin: Any) -> FastAPI:
 
     @app.post("/api/subscriptions")
     async def create_subscription(payload: SubscriptionRequest, _: None = Depends(require_admin)):
-        return {"ok": True, **await service.create_subscription(payload.model_dump(exclude_none=True))}
+        return {"ok": True, **await service.create_subscription(payload.model_dump(exclude_unset=True))}
 
     @app.patch("/api/subscriptions/{sub_id}")
     async def update_subscription(
@@ -184,7 +185,7 @@ def create_admin_app(plugin: Any) -> FastAPI:
         payload: SubscriptionRequest,
         _: None = Depends(require_admin),
     ):
-        return {"ok": True, **await service.update_subscription(sub_id, payload.model_dump(exclude_none=True))}
+        return {"ok": True, **await service.update_subscription(sub_id, payload.model_dump(exclude_unset=True))}
 
     @app.delete("/api/subscriptions/{sub_id}")
     async def delete_subscription(sub_id: int, _: None = Depends(require_admin)):

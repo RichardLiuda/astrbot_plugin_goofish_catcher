@@ -336,6 +336,7 @@ class GoofishCatcherPlugin(Star):
                 keyword=sub.keyword,
                 candidates=candidates,
                 top_k=self.settings.llm_top_k,
+                recommend_max_price=sub.recommend_max_price,
             )
             if recommendation.top:
                 await self.scheduler.persist_notifications(
@@ -725,12 +726,16 @@ class GoofishCatcherPlugin(Star):
         page_count = max(1, min(page_count, self.settings.max_pages))
         interval = max(30, interval)
         umo = event.unified_msg_origin
+        current = await self.storage.get_subscription(umo, keyword)
 
         subscription, created = await self.storage.upsert_subscription(
             umo=umo,
             keyword=keyword,
             interval_sec=interval,
             pages=page_count,
+            recommend_max_price=(
+                current.recommend_max_price if current is not None else None
+            ),
             drop_abs=self.settings.default_drop_abs,
             drop_pct=self.settings.default_drop_pct,
             new_window_sec=self.settings.default_new_window_sec,
@@ -746,6 +751,8 @@ class GoofishCatcherPlugin(Star):
             f"间隔：{interval}s，页数：{page_count}\n"
             f"降价阈值：￥{subscription.drop_abs:.2f} 或 {subscription.drop_pct:.1%}"
         )
+        if subscription.recommend_max_price is not None:
+            message += f"\n推荐价格阈值：≤￥{subscription.recommend_max_price:.2f}"
         if self._provider_error:
             message += (
                 "\n⚠️ 当前 Provider 不可用，任务不会执行。"
@@ -793,7 +800,9 @@ class GoofishCatcherPlugin(Star):
             status = "启用" if sub.enabled else f"暂停({sub.paused_reason or 'manual'})"
             next_run = _format_ts(sub.next_run_at)
             lines.append(
-                f"- {sub.keyword} | {status} | 每{sub.interval_sec}s | pages={sub.pages} | 下次={next_run}"
+                f"- {sub.keyword} | {status} | 每{sub.interval_sec}s | pages={sub.pages} | "
+                f"推荐价≤{f'￥{sub.recommend_max_price:.2f}' if sub.recommend_max_price is not None else '不限'} | "
+                f"下次={next_run}"
             )
         yield event.plain_result("\n".join(lines))
 

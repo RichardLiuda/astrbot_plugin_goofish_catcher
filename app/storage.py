@@ -207,6 +207,17 @@ class SubscriptionStorage:
             )
             await conn.execute("PRAGMA user_version = 2;")
             await conn.commit()
+            version = 2
+
+        if version < 3:
+            await conn.execute(
+                """
+                ALTER TABLE subscriptions
+                ADD COLUMN recommend_max_price REAL DEFAULT NULL
+                """
+            )
+            await conn.execute("PRAGMA user_version = 3;")
+            await conn.commit()
 
     @staticmethod
     def _row_to_subscription(row: aiosqlite.Row) -> Subscription:
@@ -216,6 +227,11 @@ class SubscriptionStorage:
             keyword=str(row["keyword"]),
             interval_sec=int(row["interval_sec"]),
             pages=int(row["pages"]),
+            recommend_max_price=(
+                float(row["recommend_max_price"])
+                if row["recommend_max_price"] is not None
+                else None
+            ),
             drop_abs=float(row["drop_abs"]),
             drop_pct=float(row["drop_pct"]),
             new_window_sec=int(row["new_window_sec"]),
@@ -270,6 +286,7 @@ class SubscriptionStorage:
         keyword: str,
         interval_sec: int,
         pages: int,
+        recommend_max_price: float | None,
         drop_abs: float,
         drop_pct: float,
         new_window_sec: int,
@@ -292,15 +309,17 @@ class SubscriptionStorage:
             await conn.execute(
                 """
                 INSERT INTO subscriptions (
-                    umo, keyword, interval_sec, pages, drop_abs, drop_pct,
+                    umo, keyword, interval_sec, pages, recommend_max_price,
+                    drop_abs, drop_pct,
                     new_window_sec, cooldown_sec, enabled, paused_reason,
                     last_run_at, next_run_at, consecutive_failures,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?)
                 ON CONFLICT(umo, keyword) DO UPDATE SET
                     interval_sec = excluded.interval_sec,
                     pages = excluded.pages,
+                    recommend_max_price = excluded.recommend_max_price,
                     drop_abs = excluded.drop_abs,
                     drop_pct = excluded.drop_pct,
                     new_window_sec = excluded.new_window_sec,
@@ -315,6 +334,7 @@ class SubscriptionStorage:
                     keyword,
                     interval_sec,
                     pages,
+                    recommend_max_price,
                     drop_abs,
                     drop_pct,
                     new_window_sec,
@@ -502,6 +522,7 @@ class SubscriptionStorage:
                     keyword=sub.keyword,
                     interval_sec=sub.interval_sec,
                     pages=sub.pages,
+                    recommend_max_price=sub.recommend_max_price,
                     drop_abs=sub.drop_abs,
                     drop_pct=sub.drop_pct,
                     new_window_sec=sub.new_window_sec,
@@ -1074,6 +1095,7 @@ class SubscriptionStorage:
         keyword: str,
         interval_sec: int,
         pages: int,
+        recommend_max_price: float | None,
         drop_abs: float,
         drop_pct: float,
         new_window_sec: int,
@@ -1089,6 +1111,7 @@ class SubscriptionStorage:
                     keyword = ?,
                     interval_sec = ?,
                     pages = ?,
+                    recommend_max_price = ?,
                     drop_abs = ?,
                     drop_pct = ?,
                     new_window_sec = ?,
@@ -1101,6 +1124,7 @@ class SubscriptionStorage:
                     keyword,
                     interval_sec,
                     pages,
+                    recommend_max_price,
                     drop_abs,
                     drop_pct,
                     new_window_sec,

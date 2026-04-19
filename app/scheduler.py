@@ -335,6 +335,7 @@ class MonitoringScheduler:
                     keyword=sub.keyword,
                     candidates=candidates,
                     top_k=self.settings.llm_top_k,
+                    recommend_max_price=sub.recommend_max_price,
                 )
                 if recommendation.top:
                     sent = await self.notifier.send_recommendation_summary(

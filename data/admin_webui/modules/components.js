@@ -472,6 +472,12 @@ export function SubscriptionDialog({ open, value, onClose, onSubmit }) {
 		['keyword', '关键词', 'text', '订阅关键词，必须填写'],
 		['interval_sec', '轮询间隔（秒）', 'number', '建议不要低于 300 秒'],
 		['pages', '抓取页数', 'number', '建议 1-2 页'],
+		[
+			'recommend_max_price',
+			'推荐最高价',
+			'number',
+			'只推荐价格不高于该值的商品；留空表示不过滤'
+		],
 		['drop_abs', '绝对降价阈值', 'number', '单位：元'],
 		['drop_pct', '相对降价阈值', 'number', '例如 0.05 表示 5%'],
 		['new_window_sec', '上新窗口（秒）', 'number', '用于判定上新时间窗'],

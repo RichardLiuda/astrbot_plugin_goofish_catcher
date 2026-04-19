@@ -48,6 +48,7 @@ class SubscriptionSummary:
     keyword: str
     interval_sec: int
     pages: int
+    recommend_max_price: float | None
     drop_abs: float
     drop_pct: float
     new_window_sec: int
