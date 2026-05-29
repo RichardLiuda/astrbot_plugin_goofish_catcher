@@ -39,6 +39,8 @@ class SubscriptionRequest(BaseModel):
     drop_pct: float | None = Field(default=None, ge=0)
     new_window_sec: int | None = Field(default=None, ge=1)
     cooldown_sec: int | None = Field(default=None, ge=1)
+    price_min: float | None = Field(default=None, ge=0)
+    price_max: float | None = Field(default=None, ge=0)
 
 
 class QueryRequest(BaseModel):

@@ -82,7 +82,9 @@ export function SubscriptionsPage({ notify }) {
 			drop_abs: toNumberOrNull(form.drop_abs),
 			drop_pct: toNumberOrNull(form.drop_pct),
 			new_window_sec: toNumberOrNull(form.new_window_sec),
-			cooldown_sec: toNumberOrNull(form.cooldown_sec)
+			cooldown_sec: toNumberOrNull(form.cooldown_sec),
+			price_min: toNumberOrNull(form.price_min),
+			price_max: toNumberOrNull(form.price_max)
 		}
 		try {
 			if (editing?.id) {

@@ -210,10 +210,11 @@ class SubscriptionStorage:
             version = 2
 
         if version < 3:
-            await conn.execute(
+            await conn.executescript(
                 """
-                ALTER TABLE subscriptions
-                ADD COLUMN recommend_max_price REAL DEFAULT NULL
+                ALTER TABLE subscriptions ADD COLUMN recommend_max_price REAL DEFAULT NULL;
+                ALTER TABLE subscriptions ADD COLUMN price_min REAL DEFAULT NULL;
+                ALTER TABLE subscriptions ADD COLUMN price_max REAL DEFAULT NULL;
                 """
             )
             await conn.execute("PRAGMA user_version = 3;")
@@ -221,6 +222,9 @@ class SubscriptionStorage:
 
     @staticmethod
     def _row_to_subscription(row: aiosqlite.Row) -> Subscription:
+        keys = row.keys() if hasattr(row, "keys") else []
+        price_min = row["price_min"] if "price_min" in keys else None
+        price_max = row["price_max"] if "price_max" in keys else None
         return Subscription(
             id=int(row["id"]),
             umo=str(row["umo"]),
@@ -241,6 +245,8 @@ class SubscriptionStorage:
             last_run_at=row["last_run_at"],
             next_run_at=row["next_run_at"],
             consecutive_failures=int(row["consecutive_failures"]),
+            price_min=float(price_min) if price_min is not None else None,
+            price_max=float(price_max) if price_max is not None else None,
         )
 
     @staticmethod
@@ -291,6 +297,8 @@ class SubscriptionStorage:
         drop_pct: float,
         new_window_sec: int,
         cooldown_sec: int,
+        price_min: float | None = None,
+        price_max: float | None = None,
     ) -> tuple[Subscription, bool]:
         conn = self._conn_or_raise()
         now_ts = int(time.time())
@@ -313,9 +321,10 @@ class SubscriptionStorage:
                     drop_abs, drop_pct,
                     new_window_sec, cooldown_sec, enabled, paused_reason,
                     last_run_at, next_run_at, consecutive_failures,
+                    price_min, price_max,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?, ?, ?)
                 ON CONFLICT(umo, keyword) DO UPDATE SET
                     interval_sec = excluded.interval_sec,
                     pages = excluded.pages,
@@ -324,6 +333,8 @@ class SubscriptionStorage:
                     drop_pct = excluded.drop_pct,
                     new_window_sec = excluded.new_window_sec,
                     cooldown_sec = excluded.cooldown_sec,
+                    price_min = excluded.price_min,
+                    price_max = excluded.price_max,
                     enabled = 1,
                     paused_reason = NULL,
                     next_run_at = excluded.next_run_at,
@@ -340,6 +351,8 @@ class SubscriptionStorage:
                     new_window_sec,
                     cooldown_sec,
                     now_ts,
+                    price_min,
+                    price_max,
                     now_ts,
                     now_ts,
                 ),
@@ -532,6 +545,8 @@ class SubscriptionStorage:
                     last_run_at=sub.last_run_at,
                     next_run_at=now_ts,
                     consecutive_failures=0,
+                    price_min=sub.price_min,
+                    price_max=sub.price_max,
                 )
             )
         return resumed
@@ -1100,6 +1115,8 @@ class SubscriptionStorage:
         drop_pct: float,
         new_window_sec: int,
         cooldown_sec: int,
+        price_min: float | None = None,
+        price_max: float | None = None,
     ) -> Subscription | None:
         conn = self._conn_or_raise()
         now_ts = int(time.time())
@@ -1116,6 +1133,8 @@ class SubscriptionStorage:
                     drop_pct = ?,
                     new_window_sec = ?,
                     cooldown_sec = ?,
+                    price_min = ?,
+                    price_max = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -1129,6 +1148,8 @@ class SubscriptionStorage:
                     drop_pct,
                     new_window_sec,
                     cooldown_sec,
+                    price_min,
+                    price_max,
                     now_ts,
                     sub_id,
                 ),

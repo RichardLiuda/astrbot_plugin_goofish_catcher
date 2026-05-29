@@ -481,7 +481,9 @@ export function SubscriptionDialog({ open, value, onClose, onSubmit }) {
 		['drop_abs', '绝对降价阈值', 'number', '单位：元'],
 		['drop_pct', '相对降价阈值', 'number', '例如 0.05 表示 5%'],
 		['new_window_sec', '上新窗口（秒）', 'number', '用于判定上新时间窗'],
-		['cooldown_sec', '通知冷却（秒）', 'number', '相同商品事件的通知间隔']
+		['cooldown_sec', '通知冷却（秒）', 'number', '相同商品事件的通知间隔'],
+		['price_min', '最低价（元）', 'number', '0 或留空表示不限'],
+		['price_max', '最高价（元）', 'number', '0 或留空表示不限']
 	]
 
 	return html`

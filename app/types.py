@@ -22,6 +22,8 @@ class Subscription:
     last_run_at: int | None
     next_run_at: int | None
     consecutive_failures: int
+    price_min: float | None = None
+    price_max: float | None = None
 
 
 @dataclass(slots=True)

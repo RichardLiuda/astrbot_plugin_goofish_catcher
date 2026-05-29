@@ -495,6 +495,18 @@ class AdminService:
             )
             or self.settings.default_cooldown_sec
         )
+        price_min = self._normalize_price_bound(
+            payload,
+            key="price_min",
+            current=getattr(current, "price_min", None) if current else None,
+        )
+        price_max = self._normalize_price_bound(
+            payload,
+            key="price_max",
+            current=getattr(current, "price_max", None) if current else None,
+        )
+        if price_min is not None and price_max is not None and price_min > price_max:
+            raise ValueError("price_min cannot be greater than price_max")
         return {
             "umo": umo,
             "keyword": keyword,
@@ -509,7 +521,27 @@ class AdminService:
             "drop_pct": max(0.0, drop_pct),
             "new_window_sec": max(60, new_window_sec),
             "cooldown_sec": max(60, cooldown_sec),
+            "price_min": price_min,
+            "price_max": price_max,
         }
+
+    @staticmethod
+    def _normalize_price_bound(
+        payload: dict[str, Any],
+        *,
+        key: str,
+        current: float | None,
+    ) -> float | None:
+        if key not in payload:
+            return current
+        raw = payload[key]
+        if raw is None or raw == "":
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return current
+        return value if value > 0 else None
 
     async def _run_manual_subscription_check(self, sub: Subscription) -> dict[str, Any]:
         if self.plugin._provider_error:
@@ -698,6 +730,8 @@ class AdminService:
             last_run_at=sub.last_run_at,
             next_run_at=sub.next_run_at,
             consecutive_failures=sub.consecutive_failures,
+            price_min=sub.price_min,
+            price_max=sub.price_max,
         )
 
     def _settings_to_editable_values(self) -> dict[str, Any]:

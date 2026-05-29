@@ -38,6 +38,15 @@ EVENT_NEW = "NEW"
 EVENT_PRICE_DROP = "PRICE_DROP"
 
 
+def _matches_price_range(item: NormalizedItem, sub: Subscription) -> bool:
+    price = item.price
+    if sub.price_min is not None and price < sub.price_min:
+        return False
+    if sub.price_max is not None and price > sub.price_max:
+        return False
+    return True
+
+
 def calculate_retry_delay(
     *,
     failure_count: int,
@@ -165,10 +174,11 @@ class MonitoringScheduler:
         now_ts: int,
     ) -> tuple[list[RecommendationCandidate], int]:
         """Process externally fetched items and keep storage/state consistent."""
+        price_scoped = [item for item in items if _matches_price_range(item, sub)]
         filtered_items, filter_mode = await self.recommender.prefilter_items(
             umo=sub.umo,
             keyword=sub.keyword,
-            items=items,
+            items=price_scoped,
         )
         logger.info(
             "[goofish_catcher] sub=%s manual prefilter %s -> %s (%s)",
@@ -514,6 +524,10 @@ class MonitoringScheduler:
         if not raw_items:
             return [], "EMPTY", 0
 
+        raw_items = [item for item in raw_items if _matches_price_range(item, sub)]
+        if not raw_items:
+            return [], "PRICE_RANGE_FILTER", 0
+
         raw_item_ids = [item.item_id for item in raw_items]
         filtered_ids = await self.storage.get_filtered_item_ids(sub.id, raw_item_ids)
         pending_items = [item for item in raw_items if item.item_id not in filtered_ids]
@@ -548,7 +562,11 @@ class MonitoringScheduler:
         items: list,
         now_ts: int,
     ) -> list[RecommendationCandidate]:
-        normalized_items = [item for item in items if item.price >= 0]
+        normalized_items = [
+            item
+            for item in items
+            if item.price >= 0 and _matches_price_range(item, sub)
+        ]
         if not normalized_items:
             return []
 
