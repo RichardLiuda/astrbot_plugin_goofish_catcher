@@ -210,14 +210,27 @@ class SubscriptionStorage:
             version = 2
 
         if version < 3:
-            await conn.executescript(
-                """
-                ALTER TABLE subscriptions ADD COLUMN recommend_max_price REAL DEFAULT NULL;
-                ALTER TABLE subscriptions ADD COLUMN price_min REAL DEFAULT NULL;
-                ALTER TABLE subscriptions ADD COLUMN price_max REAL DEFAULT NULL;
-                """
+            await conn.execute(
+                "ALTER TABLE subscriptions ADD COLUMN recommend_max_price REAL DEFAULT NULL"
             )
             await conn.execute("PRAGMA user_version = 3;")
+            await conn.commit()
+            version = 3
+
+        if version < 4:
+            col_rows = await (
+                await conn.execute("PRAGMA table_info(subscriptions)")
+            ).fetchall()
+            existing_cols = {row[1] for row in col_rows}
+            if "price_min" not in existing_cols:
+                await conn.execute(
+                    "ALTER TABLE subscriptions ADD COLUMN price_min REAL DEFAULT NULL"
+                )
+            if "price_max" not in existing_cols:
+                await conn.execute(
+                    "ALTER TABLE subscriptions ADD COLUMN price_max REAL DEFAULT NULL"
+                )
+            await conn.execute("PRAGMA user_version = 4;")
             await conn.commit()
 
     @staticmethod
