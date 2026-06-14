@@ -761,7 +761,7 @@ class GoofishCatcherPlugin(Star):
         yield event.plain_result(message)
 
     @goofish.command("退订", alias={"unsubscribe", "unwatch"})
-    async def unsubscribe(self, event: AstrMessageEvent, keyword: str):
+    async def unsubscribe(self, event: AstrMessageEvent, keyword: GreedyStr):
         """删除当前会话下指定关键词的订阅。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
@@ -807,7 +807,7 @@ class GoofishCatcherPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
     @goofish.command("暂停", alias={"pause"})
-    async def pause(self, event: AstrMessageEvent, keyword: str):
+    async def pause(self, event: AstrMessageEvent, keyword: GreedyStr):
         """暂停指定关键词订阅，不再参与自动轮询。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
@@ -824,7 +824,7 @@ class GoofishCatcherPlugin(Star):
         yield event.plain_result(f"已暂停订阅：{keyword}")
 
     @goofish.command("恢复", alias={"resume"})
-    async def resume(self, event: AstrMessageEvent, keyword: str):
+    async def resume(self, event: AstrMessageEvent, keyword: GreedyStr):
         """恢复已暂停订阅，并立即入队一次检查。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
@@ -845,7 +845,7 @@ class GoofishCatcherPlugin(Star):
         yield event.plain_result(f"已恢复订阅：{keyword}")
 
     @goofish.command("立即检查", alias={"checknow", "run"})
-    async def check_now(self, event: AstrMessageEvent, keyword: str = ""):
+    async def check_now(self, event: AstrMessageEvent, keyword: GreedyStr = ""):
         """对订阅执行立即检查并返回推荐；不填关键词则批量入队当前会话全部订阅。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
@@ -989,7 +989,7 @@ class GoofishCatcherPlugin(Star):
         event: AstrMessageEvent,
         keyword: GreedyStr = "",
     ):
-        """免订阅查询：整段关键词可包含空格，可选 --pages/-p 指定页数。"""
+        """免订阅查询：整段关键词可包含空格，可选 --pages/-p 指定页数，--min-price/--max-price 过滤价格区间。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
@@ -1009,7 +1009,7 @@ class GoofishCatcherPlugin(Star):
             message_query_args=_extract_subcommand_args(event.get_message_str()),
             parsed_keyword=str(keyword).strip(),
         )
-        keyword_text, page_count = _parse_query_input(
+        keyword_text, page_count, price_min, price_max = _parse_query_input(
             raw_keyword=raw_query_args,
             default_pages=self.settings.default_pages,
             max_pages=self.settings.max_pages,
@@ -1033,6 +1033,12 @@ class GoofishCatcherPlugin(Star):
                 keyword=keyword_text,
                 items=raw_items,
             )
+            if price_min is not None or price_max is not None:
+                filtered_items = [
+                    item for item in filtered_items
+                    if (price_min is None or item.price >= price_min)
+                    and (price_max is None or item.price <= price_max)
+                ]
             candidates = _build_query_candidates(
                 keyword=keyword_text,
                 items=filtered_items,
@@ -1051,6 +1057,8 @@ class GoofishCatcherPlugin(Star):
                     raw_total=len(raw_items),
                     filtered_total=len(filtered_items),
                     filter_mode=filter_mode,
+                    price_min=price_min,
+                    price_max=price_max,
                 )
             )
             return
@@ -1425,11 +1433,13 @@ def _parse_query_input(
     *,
     default_pages: int,
     max_pages: int,
-) -> tuple[str, int]:
+) -> tuple[str, int, float | None, float | None]:
     text = raw_keyword.strip()
     page_count = max(1, min(default_pages, max_pages))
+    price_min: float | None = None
+    price_max: float | None = None
     if not text:
-        return "", page_count
+        return "", page_count, price_min, price_max
 
     matches = list(
         re.finditer(
@@ -1444,7 +1454,24 @@ def _parse_query_input(
         text = f"{text[: matched.start()]} {text[matched.end() :]}"
         text = re.sub(r"\s+", " ", text).strip()
         text = re.sub(r"^[，,。.!?]+|[，,。.!?]+$", "", text).strip()
-    return text, page_count
+
+    for flag_re, is_min in [
+        (r"(?<!\S)(?:--min-price|--min)(?:\s*=\s*|\s+)?(\d+(?:\.\d+)?)\b", True),
+        (r"(?<!\S)(?:--max-price|--max)(?:\s*=\s*|\s+)?(\d+(?:\.\d+)?)\b", False),
+    ]:
+        flag_matches = list(re.finditer(flag_re, text, flags=re.IGNORECASE))
+        if flag_matches:
+            m = flag_matches[-1]
+            val = float(m.group(1))
+            if is_min:
+                price_min = val
+            else:
+                price_max = val
+            text = f"{text[: m.start()]} {text[m.end() :]}"
+            text = re.sub(r"\s+", " ", text).strip()
+            text = re.sub(r"^[，,。.!?]+|[，,。.!?]+$", "", text).strip()
+
+    return text, page_count, price_min, price_max
 
 
 def _render_query_recommendation_preview(
@@ -1454,11 +1481,22 @@ def _render_query_recommendation_preview(
     raw_total: int,
     filtered_total: int,
     filter_mode: str,
+    price_min: float | None = None,
+    price_max: float | None = None,
 ) -> str:
     lines = [
         f"【查询推荐】关键词：{recommendation.keyword}",
         f"抓取页数：{page_count} | 原始结果：{raw_total} | 初筛后：{filtered_total}",
         f"初筛模式：{filter_mode}",
+    ]
+    if price_min is not None or price_max is not None:
+        parts = []
+        if price_min is not None:
+            parts.append(f"≥￥{price_min:.0f}")
+        if price_max is not None:
+            parts.append(f"≤￥{price_max:.0f}")
+        lines.append(f"价格区间：{' '.join(parts)}")
+    lines += [
         f"候选数：{recommendation.total_candidates} | 推荐数：{len(recommendation.top)}",
         f"分析方式：{'LLM' if recommendation.used_llm else 'Heuristic'}",
         f"总体建议：{recommendation.summary}",
@@ -1477,7 +1515,12 @@ def _render_query_recommendation_preview(
         lines.append(f"   风险：{item.risk}")
         lines.append(f"   链接：{item.url}")
     lines.append(recommendation_reply_hint())
-    lines.append(f"可再次执行 /闲鱼 查询 {recommendation.keyword}")
+    re_execute = f"/闲鱼 查询 {recommendation.keyword}"
+    if price_min is not None:
+        re_execute += f" --min-price {price_min:.0f}"
+    if price_max is not None:
+        re_execute += f" --max-price {price_max:.0f}"
+    lines.append(f"可再次执行 {re_execute}")
     return "\n".join(lines)
 
 
