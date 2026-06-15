@@ -83,6 +83,11 @@ class GoofishCatcherPlugin(Star):
         self._admin_webui = AdminWebuiServer(self)
         self._start_lock = asyncio.Lock()
         self._reload_lock = asyncio.Lock()
+        # Heartbeat: periodic login-state probe for playwright_local mode.
+        self._heartbeat_task: asyncio.Task | None = None
+        # Interval in seconds; 0 means disabled.
+        _HEARTBEAT_INTERVAL_SEC = 1800  # 30 minutes
+        self._heartbeat_interval_sec: int = _HEARTBEAT_INTERVAL_SEC
 
     async def initialize(self) -> None:
         async with self._reload_lock:
@@ -113,6 +118,7 @@ class GoofishCatcherPlugin(Star):
                 logger.warning("[goofish_catcher] skip start, scheduler is missing")
                 return
             await self.scheduler.start()
+            self._ensure_heartbeat_started()
 
     async def terminate(self) -> None:
         await self._safe_close("admin_webui", self._admin_webui.stop)
@@ -211,7 +217,10 @@ class GoofishCatcherPlugin(Star):
             settings=self.settings,
         )
         try:
-            self.provider = build_provider(self.settings)
+            self.provider = build_provider(
+                self.settings,
+                llm_call=self._make_llm_call() if self.settings.llm_enabled else None,
+            )
             (
                 self._provider_health,
                 self._provider_health_checked_at,
@@ -277,8 +286,10 @@ class GoofishCatcherPlugin(Star):
         )
         if self._loaded:
             await self._ensure_scheduler_started()
+            self._ensure_heartbeat_started()
 
     async def _close_runtime(self, *, close_storage: bool) -> None:
+        self._cancel_heartbeat()
         if self.scheduler is not None:
             await self._safe_close("scheduler", self.scheduler.stop)
         if self.remote_auth_coordinator is not None:
@@ -358,6 +369,163 @@ class GoofishCatcherPlugin(Star):
                 exc,
                 exc_info=True,
             )
+
+    def _make_llm_call(self):
+        """Return an async callable(prompt, system_prompt) -> str backed by
+        the configured AstrBot LLM provider, for use as the agent fallback
+        inside PlaywrightSearchProvider.  Returns None when no provider is
+        available so callers can skip the LLM path gracefully."""
+        context = self.context
+        settings = self.settings
+
+        async def _llm_call(prompt: str, system_prompt: str) -> str:
+            provider_id: str | None = None
+            if settings.llm_provider_id:
+                provider_id = settings.llm_provider_id
+            else:
+                provider = context.get_all_providers()
+                if provider:
+                    try:
+                        provider_id = str(provider[0].meta().id)
+                    except Exception:
+                        pass
+            if not provider_id:
+                return ""
+            try:
+                resp = await context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.0,
+                    max_tokens=1200,
+                )
+                return (getattr(resp, "completion_text", "") or "").strip()
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher][agent] llm_call failed: %s", exc
+                )
+                return ""
+
+        return _llm_call
+
+    # ── Heartbeat ────────────────────────────────────────────────────────────
+
+    def _ensure_heartbeat_started(self) -> None:
+        """Start the heartbeat task if not already running.
+
+        Only active for playwright_local mode — remote mode has its own
+        health-check mechanism via RemoteAuthRecoveryCoordinator.
+        """
+        if self.settings.provider_mode != PROVIDER_MODE_PLAYWRIGHT_LOCAL:
+            return
+        if self._heartbeat_interval_sec <= 0:
+            return
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            return
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(),
+            name="goofish-catcher-heartbeat",
+        )
+        logger.info(
+            "[goofish_catcher] heartbeat started, interval=%ss",
+            self._heartbeat_interval_sec,
+        )
+
+    def _cancel_heartbeat(self) -> None:
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodically probe Goofish to detect session expiry early.
+
+        On auth failure, mirrors exactly what the scheduler does:
+        pause all subscriptions + trigger auth recovery + notify users.
+        """
+        try:
+            # Initial delay: wait one full interval before the first probe
+            # so we don't hammer Goofish right after startup.
+            await asyncio.sleep(self._heartbeat_interval_sec)
+
+            while True:
+                await self._run_heartbeat_probe()
+                await asyncio.sleep(self._heartbeat_interval_sec)
+        except asyncio.CancelledError:
+            raise
+
+    async def _run_heartbeat_probe(self) -> None:
+        provider = self.provider
+        if provider is None:
+            return
+
+        check_login = getattr(provider, "check_login_state", None)
+        if not callable(check_login):
+            return  # only PlaywrightSearchProvider has this method
+
+        logger.info("[goofish_catcher] heartbeat: probing login state")
+        try:
+            state: str = await asyncio.wait_for(
+                check_login(timeout_sec=15),
+                timeout=25,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[goofish_catcher] heartbeat: probe timed out, skip")
+            return
+        except Exception as exc:
+            logger.warning("[goofish_catcher] heartbeat: probe error: %s", exc)
+            return
+
+        logger.info("[goofish_catcher] heartbeat: login state = %s", state)
+
+        if state == "ok":
+            return  # all good, nothing to do
+
+        if state not in ("auth_required", "captcha"):
+            # "error" = browser not ready yet, skip silently
+            return
+
+        # Session expired or captcha wall — mirror the scheduler's auth-failure
+        # path: pause all subscriptions and trigger recovery.
+        if self.storage is None or self.remote_auth_coordinator is None:
+            return
+
+        paused = await self.storage.pause_all_enabled_subscriptions(state.upper())
+        logger.warning(
+            "[goofish_catcher] heartbeat: detected %s, paused %d subscriptions",
+            state,
+            paused,
+        )
+
+        if state == "auth_required":
+            try:
+                # Use a synthetic umo=None so the coordinator broadcasts to the
+                # first available user, same as it does for remote mode.
+                await self.remote_auth_coordinator.handle_provider_auth_failure(
+                    umo=None,
+                    sub_id=None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher] heartbeat: auth recovery trigger failed: %s",
+                    exc,
+                )
+            if self.notifier is not None:
+                try:
+                    umos: list[str] = []
+                    if self.storage is not None:
+                        umos = await self.storage.get_all_subscriber_umos()
+                    await self.notifier.broadcast_alert(
+                        code="AUTH_REQUIRED",
+                        message=(
+                            "登录态已过期（心跳检测），"
+                            "所有订阅已暂停。请发送 /闲鱼 登录 重新扫码。"
+                        ),
+                        umos=umos,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[goofish_catcher] heartbeat: broadcast_alert failed: %s", exc
+                    )
 
     async def _recycle_local_provider_browser(self) -> None:
         provider = self.provider

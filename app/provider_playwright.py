@@ -25,6 +25,11 @@ except ModuleNotFoundError:
 
 from .config import PluginSettings
 from .provider import ProviderConfigurationError
+from .provider_agent import (
+    extract_items_via_llm,
+    check_login_via_llm,
+    find_favorite_button_via_llm,
+)
 from .types import FavoriteItemResult, NormalizedItem, ProviderError, ProviderErrorCode
 
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
@@ -40,8 +45,12 @@ _EMBEDDED_LOGIN_MARKERS = (
 class PlaywrightSearchProvider:
     BASE_URL = "https://www.goofish.com"
 
-    def __init__(self, settings: PluginSettings) -> None:
+    def __init__(self, settings: PluginSettings, *, llm_call=None) -> None:
         self.settings = settings
+        # Optional: async callable(prompt: str, system_prompt: str) -> str
+        # Injected by the plugin main to enable AX-tree-based LLM fallback
+        # when CSS selectors break after a Goofish frontend update.
+        self._llm_call = llm_call
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._persistent_context: BrowserContext | None = None
@@ -671,11 +680,46 @@ class PlaywrightSearchProvider:
 
     async def _wait_for_favorite_button(self, page, timeout_ms: int):
         wait_timeout_ms = max(2500, min(timeout_ms, 10_000))
-        await page.wait_for_selector(
-            _DETAIL_FAVORITE_BUTTON_SELECTOR,
-            timeout=wait_timeout_ms,
-        )
-        return page.locator(_DETAIL_FAVORITE_BUTTON_SELECTOR).first
+        try:
+            await page.wait_for_selector(
+                _DETAIL_FAVORITE_BUTTON_SELECTOR,
+                timeout=wait_timeout_ms,
+            )
+            return page.locator(_DETAIL_FAVORITE_BUTTON_SELECTOR).first
+        except TimeoutError:
+            # ── Agent fallback: CSS class-based selector timed out (likely a
+            # frontend update changed the class names).  Ask the LLM to find
+            # the button by its accessible name instead.
+            if self._llm_call is None:
+                raise
+            logger.info(
+                "[goofish_catcher][agent] CSS favorite selector timed out, "
+                "trying AX+LLM fallback"
+            )
+            result = await find_favorite_button_via_llm(
+                page,
+                llm_call=self._llm_call,
+                timeout_sec=8,
+            )
+            if result is None or result["status"] == "unknown":
+                logger.warning(
+                    "[goofish_catcher][agent] LLM could not locate favorite button"
+                )
+                raise
+            button_name = result["button_name"]
+            if not button_name:
+                raise
+            # Locate by accessible name — stable across class-name changes.
+            locator = page.get_by_role("button", name=button_name).first
+            if await locator.count() == 0:
+                locator = page.get_by_text(button_name).first
+            logger.info(
+                "[goofish_catcher][agent] LLM located favorite button: "
+                "name=%r status=%s",
+                button_name,
+                result["status"],
+            )
+            return locator
 
     async def _classify_favorite_page_state(
         self,
@@ -687,6 +731,69 @@ class PlaywrightSearchProvider:
             page,
             error_flags=error_flags,
         )
+
+    async def check_login_state(self, *, timeout_sec: int = 15) -> str:
+        """Probe Goofish and return the current auth state.
+
+        Returns one of:
+          ``"ok"``            – browser is reachable and session is valid
+          ``"auth_required"`` – session expired / not logged in
+          ``"captcha"``       – CAPTCHA wall detected
+          ``"error"``         – browser not initialised or network failure
+
+        This method is intentionally lightweight: it opens a minimal page,
+        checks URL / HTML markers (no CSS selectors, no LLM), and closes the
+        page immediately.  Safe to call from a periodic heartbeat task.
+        """
+        if self._persistent_context is None and self._browser is None:
+            return "error"
+
+        timeout_ms = max(5, timeout_sec) * 1000
+        try:
+            context, should_close = await self._open_operation_context()
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] heartbeat: failed to open context: %s", exc
+            )
+            return "error"
+
+        page = None
+        try:
+            page = await context.new_page()
+            error_flags: set[str] = set()
+            self._attach_page_state_watchers(page, error_flags)
+
+            await page.goto(
+                self.BASE_URL,
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
+            await self._maybe_wait_for_network_idle(page, timeout_ms)
+
+            err = await self._classify_timeout_page_state(page, error_flags=error_flags)
+            if err is None:
+                return "ok"
+            if err.code == ProviderErrorCode.AUTH_REQUIRED:
+                return "auth_required"
+            if err.code == ProviderErrorCode.CAPTCHA:
+                return "captcha"
+            return "error"
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] heartbeat: probe failed: %s", exc
+            )
+            return "error"
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            if should_close:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
 
     def _build_search_url(self, *, keyword: str) -> str:
         return f"{self.BASE_URL}/search?q={quote(keyword)}"
@@ -969,6 +1076,26 @@ class PlaywrightSearchProvider:
                 ProviderErrorCode.CAPTCHA,
                 "captcha detected on goofish page",
             )
+
+        # ── Agent fallback: heuristic rules found nothing suspicious.
+        # Ask the LLM to visually interpret the AX tree as a last-resort check.
+        # Only fires when all hard-coded URL / HTML markers have missed, so it
+        # adds no latency to the normal (logged-in) path.
+        if self._llm_call is not None:
+            logged_in = await check_login_via_llm(
+                page,
+                llm_call=self._llm_call,
+                timeout_sec=8,
+            )
+            if logged_in is False:
+                logger.info(
+                    "[goofish_catcher][agent] LLM login check reports not logged in"
+                )
+                return ProviderError(
+                    ProviderErrorCode.AUTH_REQUIRED,
+                    "goofish login wall detected by LLM (heuristics missed)",
+                )
+
         return None
 
     async def _wait_for_items_ready(
@@ -1014,7 +1141,41 @@ class PlaywrightSearchProvider:
         payload_items = self._extract_items_from_payloads(captured_payloads)
         if payload_items:
             return payload_items
-        return await self._extract_items_from_dom(page)
+
+        dom_items = await self._extract_items_from_dom(page)
+        if dom_items:
+            return dom_items
+
+        # ── Agent fallback: CSS selectors may have broken after a frontend update.
+        # Fall through to AX Tree + LLM extraction only when both fast paths
+        # returned nothing, so normal operation has zero LLM cost.
+        if self._llm_call is not None:
+            keyword = ""
+            try:
+                from urllib.parse import parse_qs, urlparse
+                keyword = parse_qs(urlparse(page.url).query).get("q", [""])[0]
+            except Exception:
+                pass
+            logger.info(
+                "[goofish_catcher][agent] CSS selectors returned nothing, "
+                "falling back to AX+LLM extraction (keyword=%r)",
+                keyword,
+            )
+            llm_items = await extract_items_via_llm(
+                page,
+                keyword=keyword,
+                llm_call=self._llm_call,
+                timeout_sec=max(10, (timeout_ms // 1000) - 2),
+            )
+            if llm_items:
+                logger.info(
+                    "[goofish_catcher][agent] AX+LLM extracted %d items",
+                    len(llm_items),
+                )
+                return llm_items
+            logger.warning("[goofish_catcher][agent] AX+LLM extraction also empty")
+
+        return []
 
     def _extract_items_from_payloads(
         self, payloads: list[dict[str, Any] | list[Any]]

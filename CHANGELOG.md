@@ -2,6 +2,19 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.0] - 2026-06-16
+
+### Added
+
+- 心跳检测：playwright_local 模式下每 30 分钟主动探测一次登录态，检测到会话失效时自动暂停所有订阅、触发登录恢复流程并广播告警通知，无需等到下次定时抓取才发现掉线。
+- LLM Agent 降级兜底：当 CSS 选择器因闲鱼前端更新而失效时，自动回退到 AX Tree + LLM 提取商品列表、检测登录状态及定位收藏按钮，提升对前端变更的健壮性。
+- `Notifier` 新增 `broadcast_alert` 方法，支持向多个用户批量广播告警消息。
+- `Storage` 新增 `pause_all_enabled_subscriptions` 及 `get_all_subscriber_umos` 方法，供心跳检测批量操作使用。
+
+### Fixed
+
+- 关键词预筛（prefilter）被拒绝的价格合规商品现在也会写入 `items` 表，确保所有符合价格区间的商品均有数据库记录，便于后续价格趋势等分析功能使用。此前这些商品仅进入 `filtered_items` 去重缓存，价格字段缺失。
+
 ## [2.2.5] - 2026-06-11
 
 ### Added

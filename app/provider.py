@@ -38,7 +38,7 @@ class ProviderConfigurationError(RuntimeError):
     """Raised when provider configuration is invalid."""
 
 
-def build_provider(settings: PluginSettings) -> SearchProvider:
+def build_provider(settings: PluginSettings, *, llm_call=None) -> SearchProvider:
     if settings.provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL:
         try:
             from .provider_playwright import PlaywrightSearchProvider
@@ -48,7 +48,7 @@ def build_provider(settings: PluginSettings) -> SearchProvider:
                 "Run: uv pip install playwright && python -m playwright install chromium"
             ) from exc
 
-        return PlaywrightSearchProvider(settings)
+        return PlaywrightSearchProvider(settings, llm_call=llm_call)
 
     if settings.provider_mode == PROVIDER_MODE_REMOTE_REST:
         try:

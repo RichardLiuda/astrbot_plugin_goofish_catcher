@@ -219,3 +219,8 @@ tests/
 storage_state.json
 worker_config.json
 node_modules/
+
+
+
+docs
+thirdparty

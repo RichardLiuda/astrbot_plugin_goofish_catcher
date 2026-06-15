@@ -180,6 +180,38 @@ class Notifier:
         )
         return sent
 
+    async def broadcast_alert(
+        self,
+        *,
+        code: str,
+        message: str,
+        umos: list[str] | None = None,
+    ) -> None:
+        """Send an alert to a list of umos (or no-op when umos is empty).
+
+        Callers should resolve the umo list from storage.get_all_subscriber_umos()
+        before calling this method.
+        """
+        if not umos:
+            return
+        text = (
+            f"⚠️【闲鱼监控告警】\n"
+            f"错误码：{code}\n"
+            f"说明：{message}"
+        )
+        for umo in umos:
+            try:
+                await self._send_to_umo(umo, text)
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher] broadcast_alert to umo=%s failed: %s",
+                    umo,
+                    exc,
+                )
+        await self._send_webhook(
+            {"event_type": "ALERT", "error_code": code, "message": message}
+        )
+
     async def _send_to_umo(self, umo: str, text: str) -> bool:
         try:
             await self.context.send_message(umo, MessageChain().message(text))

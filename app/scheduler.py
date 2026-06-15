@@ -175,21 +175,27 @@ class MonitoringScheduler:
     ) -> tuple[list[RecommendationCandidate], int]:
         """Process externally fetched items and keep storage/state consistent."""
         price_scoped = [item for item in items if _matches_price_range(item, sub)]
-        filtered_items, filter_mode = await self.recommender.prefilter_items(
+        kept_items, filter_mode = await self.recommender.prefilter_items(
             umo=sub.umo,
             keyword=sub.keyword,
             items=price_scoped,
         )
+        # 被关键词预筛拒绝的价格合规商品也写入 items 表，供后续分析使用
+        kept_ids = {item.item_id for item in kept_items}
+        rejected_items = [item for item in price_scoped if item.item_id not in kept_ids]
+        if rejected_items:
+            await self.storage.upsert_items_bulk(sub.id, rejected_items, now_ts)
         logger.info(
-            "[goofish_catcher] sub=%s manual prefilter %s -> %s (%s)",
+            "[goofish_catcher] sub=%s manual prefilter %s -> %s (%s), rejected_stored=%s",
             sub.id,
             len(items),
-            len(filtered_items),
+            len(kept_items),
             filter_mode,
+            len(rejected_items),
         )
-        candidates = await self._process_items(sub, filtered_items, now_ts)
+        candidates = await self._process_items(sub, kept_items, now_ts)
         await self.storage.update_schedule_success(sub.id, now_ts, sub.interval_sec)
-        return candidates, len(filtered_items)
+        return candidates, len(kept_items)
 
     async def _enqueue_sub_id(self, sub_id: int) -> bool:
         async with self._inflight_lock:
@@ -544,11 +550,15 @@ class MonitoringScheduler:
             items=pending_items,
         )
         kept_ids = {item.item_id for item in kept_items}
+        # 关键词预筛拒绝的商品：新商品写入 items 表（价格合规，保留供分析），
+        # 同时写 filtered_items 作为去重缓存，避免下轮重复进入预筛。
         rejected_new_items = [
             item
             for item in pending_items
             if item.item_id not in kept_ids and item.item_id not in existing_map
         ]
+        if rejected_new_items:
+            await self.storage.upsert_items_bulk(sub.id, rejected_new_items, now_ts)
         await self.storage.upsert_filtered_items_bulk(
             sub.id,
             rejected_new_items,

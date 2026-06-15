@@ -459,6 +459,34 @@ class SubscriptionStorage:
             )
             await conn.commit()
 
+    async def pause_all_enabled_subscriptions(self, reason: str) -> int:
+        """Pause every currently-enabled subscription.  Returns the number
+        of rows updated (i.e. subscriptions that were actually running)."""
+        conn = self._conn_or_raise()
+        now_ts = int(time.time())
+        async with self._write_lock:
+            cursor = await conn.execute(
+                """
+                UPDATE subscriptions
+                SET enabled = 0,
+                    paused_reason = ?,
+                    updated_at = ?
+                WHERE enabled = 1
+                """,
+                (reason, now_ts),
+            )
+            await conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
+
+    async def get_all_subscriber_umos(self) -> list[str]:
+        """Return the distinct umo values across all subscriptions."""
+        conn = self._conn_or_raise()
+        async with conn.execute(
+            "SELECT DISTINCT umo FROM subscriptions WHERE umo IS NOT NULL"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [str(row[0]) for row in rows if row[0]]
+
     async def resume_subscription(self, sub_id: int, now_ts: int) -> None:
         conn = self._conn_or_raise()
         async with self._write_lock:
