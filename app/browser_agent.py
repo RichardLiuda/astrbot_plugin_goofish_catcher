@@ -21,7 +21,7 @@ try:
 except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
-from .provider_agent import ax_tree_to_text, _extract_json_object
+from .provider_agent import _extract_json_object
 
 # ── 全局活跃实例计数 ──────────────────────────────────────────────────────────
 _active_agents: int = 0
@@ -30,8 +30,8 @@ _active_agents: int = 0
 
 _GOOFISH_BASE = "https://www.goofish.com"
 _ALLOWED_DOMAIN = "goofish.com"
-_MAX_HISTORY = 8       # 历史记录最多保留步数
-_AX_MAX_NODES = 800    # AX Tree 最大节点数（比调度器的 600 略多，供 agent 感知更多上下文）
+_MAX_HISTORY = 8        # 历史记录最多保留步数
+_AX_MAX_CHARS = 20_000  # aria_snapshot 字符上限，防止 prompt 过长
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -97,7 +97,7 @@ _STEP_PROMPT_TEMPLATE = """\
 ## 历史操作记录
 {history}
 
-## 当前页面无障碍树（最多 {max_nodes} 个节点）
+## 当前页面无障碍树
 {ax_tree_text}
 
 输出你的下一步动作（仅输出 JSON 对象）：\
@@ -210,7 +210,6 @@ class GofishBrowserAgent:
             (self._page, "page"),
             (self._context, "context"),
             (self._browser, "browser"),
-            (self._playwright, "playwright"),
         ]:
             if obj is not None:
                 try:
@@ -219,6 +218,13 @@ class GofishBrowserAgent:
                     logger.debug(
                         "[goofish_catcher][browser_agent] %s close error: %s", name, e
                     )
+        if self._playwright is not None:
+            try:
+                await self._playwright.stop()
+            except Exception as e:
+                logger.debug(
+                    "[goofish_catcher][browser_agent] playwright stop error: %s", e
+                )
         self._page = None
         self._context = None
         self._browser = None
@@ -254,17 +260,7 @@ class GofishBrowserAgent:
 
         for step in range(1, self._max_steps + 1):
             # ① 快照 AX Tree
-            try:
-                snapshot = await self._page.accessibility.snapshot()
-            except Exception as exc:
-                logger.warning(
-                    "[goofish_catcher][browser_agent] ax snapshot error at step %d: %s",
-                    step,
-                    exc,
-                )
-                snapshot = None
-
-            ax_text = ax_tree_to_text(snapshot, max_nodes=_AX_MAX_NODES) if snapshot else "(无法获取页面结构)"
+            ax_text = await self._get_ax_text()
             current_url = str(getattr(self._page, "url", "") or _GOOFISH_BASE)
 
             # ② 构建 prompt 并调用 LLM
@@ -274,7 +270,6 @@ class GofishBrowserAgent:
                 max_steps=self._max_steps,
                 current_url=current_url,
                 history=_format_history(history),
-                max_nodes=_AX_MAX_NODES,
                 ax_tree_text=ax_text,
             )
 
@@ -479,6 +474,33 @@ class GofishBrowserAgent:
             return f"提取失败: {exc}"
 
     # ── 辅助 ──────────────────────────────────────────────────────────────────
+
+    async def _get_ax_text(self) -> str:
+        """Get the page's accessibility tree as text.
+
+        Playwright ≥ 1.41 removed page.accessibility and replaced it with
+        Locator.aria_snapshot() which returns a YAML-like string directly
+        usable by the LLM.
+        """
+        try:
+            text = await self._page.locator("body").aria_snapshot(timeout=5_000)
+            if text:
+                return text[:_AX_MAX_CHARS]
+        except Exception as exc:
+            logger.debug(
+                "[goofish_catcher][browser_agent] aria_snapshot error: %s", exc
+            )
+        # Fallback for old Playwright (<1.41): page.accessibility.snapshot() → dict
+        try:
+            from .provider_agent import ax_tree_to_text
+            snapshot = await self._page.accessibility.snapshot()  # type: ignore[attr-defined]
+            if snapshot:
+                return ax_tree_to_text(snapshot, max_nodes=800)
+        except Exception as exc:
+            logger.debug(
+                "[goofish_catcher][browser_agent] accessibility.snapshot error: %s", exc
+            )
+        return "(无法获取页面结构)"
 
     def _build_launch_args(self) -> list[str]:
         args = ["--disable-blink-features=AutomationControlled"]
