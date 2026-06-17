@@ -28,6 +28,15 @@ _EMBEDDED_LOGIN_MARKERS = (
     "alibaba-login-box",
 )
 
+# Button texts that indicate a one-click / quick login option is available.
+# Clicking one of these should log the user in without QR scanning.
+_QUICK_LOGIN_TEXTS = (
+    "快速进入",
+    "快速登录",
+    "一键登录",
+    "快捷登录",
+)
+
 
 def get_astrbot_root() -> Path:
     if root := os.getenv("ASTRBOT_ROOT"):
@@ -395,6 +404,31 @@ class GoofishLoginSession:
             await self._page.wait_for_load_state("networkidle", timeout=3000)
         except Exception:
             await self._page.wait_for_timeout(600)
+
+    async def try_quick_login(self) -> bool:
+        """Click a quick-login button if one is visible on the current page.
+
+        Returns True if a button was found and clicked (page may have changed).
+        Should be called after start_login_session(); if it returns True the
+        caller must re-validate with validate_login() to confirm success.
+        """
+        if self._page is None:
+            return False
+        for text in _QUICK_LOGIN_TEXTS:
+            try:
+                locator = self._page.get_by_text(text, exact=True).first
+                if await locator.count() > 0:
+                    logger.info(
+                        "[goofish_catcher] quick login option found: %r, clicking", text
+                    )
+                    await locator.click(timeout=3_000)
+                    await self._settle_page()
+                    return True
+            except Exception as exc:
+                logger.debug(
+                    "[goofish_catcher] quick login click failed for %r: %s", text, exc
+                )
+        return False
 
 
 def _payload_ret_summary(payload: dict[str, Any]) -> str:

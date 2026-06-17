@@ -118,6 +118,45 @@ class LocalAuthSessionController:
             )
             try:
                 await session.start_login_session()
+
+                # Try quick login before falling back to QR scan flow.
+                try:
+                    clicked = await session.try_quick_login()
+                    if clicked:
+                        validation = await session.validate_login()
+                        if validation.get("ok"):
+                            logger.info(
+                                "[goofish_catcher] quick login validated OK, auto-saving session"
+                            )
+                            save_result = await save_login_session_state(
+                                session,
+                                stable_path=self.settings.plugin_data_dir / "storage_state.json",
+                            )
+                            session_transferred = False
+                            if callable(self.on_after_confirm):
+                                session_transferred = bool(
+                                    await self.on_after_confirm(session)
+                                )
+                            if not session_transferred:
+                                await session.close()
+                                await _cleanup_profile_dir(
+                                    profile_dir, enabled=cleanup_profile_dir
+                                )
+                            return {
+                                "ok": True,
+                                "auto_login_done": True,
+                                "session_id": None,
+                                "status": "auto_login",
+                                "screenshot_base64": "",
+                                "page_url": "",
+                                "saved_at": int(time.time()),
+                                "saved_path": str(save_result["saved_path"]),
+                            }
+                except Exception as quick_exc:
+                    logger.warning(
+                        "[goofish_catcher] quick login attempt failed: %s", quick_exc
+                    )
+
                 active_session = LocalAuthSession(
                     session_id=uuid4().hex,
                     started_at=int(time.time()),

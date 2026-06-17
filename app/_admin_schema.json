@@ -1,0 +1,288 @@
+{
+  "provider_mode": {
+    "type": "string",
+    "description": "抓取模式",
+    "hint": "`playwright_local` 为本地浏览器，`remote_rest` 为远程 Worker",
+    "options": [
+      "playwright_local",
+      "remote_rest"
+    ],
+    "default": "playwright_local"
+  },
+  "playwright_executable_path": {
+    "type": "string",
+    "description": "浏览器可执行文件",
+    "hint": "只在本地模式使用；可填写系统 Chrome/Chromium 路径，留空时使用 Playwright 自带 Chromium，例如 `C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`",
+    "default": ""
+  },
+  "playwright_block_assets": {
+    "type": "bool",
+    "description": "拦截资源",
+    "hint": "建议开启；远程模式由远程主机自己的 worker 配置决定",
+    "default": true
+  },
+  "playwright_force_direct": {
+    "type": "bool",
+    "description": "直连浏览器",
+    "hint": "建议开启，减少系统代理导致的 IP 波动；远程模式由远程主机自己的 worker 配置决定",
+    "default": true
+  },
+  "remote_base_url": {
+    "type": "string",
+    "description": "远程地址",
+    "hint": "远程模式必填，例如 `https://worker.example.com`，不要带结尾斜杠",
+    "default": ""
+  },
+  "remote_headers": {
+    "type": "list",
+    "description": "远程 Header",
+    "hint": "每行一个 `Header: Value`；Cloudflare Access 常用两行：`CF-Access-Client-Id: ...` 和 `CF-Access-Client-Secret: ...`",
+    "default": [],
+    "items": {
+      "type": "string"
+    }
+  },
+  "remote_api_key": {
+    "type": "string",
+    "description": "远程 API Key",
+    "hint": "远程 Worker 自己启用 API Key 鉴权时填写；走 Cloudflare Access 则留空",
+    "default": ""
+  },
+  "remote_timeout_sec": {
+    "type": "int",
+    "description": "远程超时（秒）",
+    "hint": "一般保持 20 秒；远程主机较慢时可调到 30-45",
+    "default": 20
+  },
+  "remote_healthcheck_on_init": {
+    "type": "bool",
+    "description": "启动检查",
+    "hint": "建议开启；启动时先探测远程 `/health`",
+    "default": true
+  },
+  "remote_healthcheck_timeout_sec": {
+    "type": "int",
+    "description": "检查超时（秒）",
+    "hint": "默认 10 秒；网络较慢时再调大",
+    "default": 10
+  },
+  "default_interval_sec": {
+    "type": "int",
+    "description": "默认轮询间隔（秒）",
+    "hint": "新建订阅时默认使用；建议不要低于 300 秒，过高频率容易触发风控",
+    "default": 600
+  },
+  "default_pages": {
+    "type": "int",
+    "description": "默认抓取页数",
+    "hint": "新建订阅或查询时的默认页数；建议 1-2 页",
+    "default": 1
+  },
+  "max_pages": {
+    "type": "int",
+    "description": "最大抓取页数",
+    "hint": "会限制订阅和查询的页数上限；远程 Worker 也建议保持较小值",
+    "default": 2
+  },
+  "scheduler_tick_sec": {
+    "type": "int",
+    "description": "调度扫描间隔（秒）",
+    "hint": "调度器多久检查一次待执行订阅；一般 10-30 秒足够",
+    "default": 15
+  },
+  "max_concurrency": {
+    "type": "int",
+    "description": "最大并发 Worker 数",
+    "hint": "建议先保持 1；并发过高容易触发闲鱼风控或让浏览器不稳定",
+    "default": 1
+  },
+  "queue_max_size": {
+    "type": "int",
+    "description": "任务队列最大长度",
+    "hint": "一般不用改，默认值已足够",
+    "default": 256
+  },
+  "fetch_timeout_sec": {
+    "type": "int",
+    "description": "单次抓取超时（秒）",
+    "hint": "本地或远程 Provider 的单次抓取超时；网络较慢时可调大到 30-45",
+    "default": 20
+  },
+  "max_retries": {
+    "type": "int",
+    "description": "最大重试次数",
+    "hint": "调度失败后的最大自动重试次数",
+    "default": 3
+  },
+  "retry_base_sec": {
+    "type": "int",
+    "description": "重试基础退避（秒）",
+    "hint": "失败后第一次重试等待时间",
+    "default": 30
+  },
+  "retry_max_sec": {
+    "type": "int",
+    "description": "重试最大退避（秒）",
+    "hint": "连续失败时的最大等待时间",
+    "default": 900
+  },
+  "default_new_window_sec": {
+    "type": "int",
+    "description": "上新判定时间窗（秒）",
+    "hint": "商品发布时间落在这个窗口内时会更倾向判定为上新",
+    "default": 1800
+  },
+  "default_drop_abs": {
+    "type": "float",
+    "description": "默认绝对降价阈值（元）",
+    "hint": "价格下降超过这个金额会触发降价候选",
+    "default": 50.0
+  },
+  "default_drop_pct": {
+    "type": "float",
+    "description": "默认相对降价阈值（0-1）",
+    "hint": "例如 0.05 表示 5%",
+    "default": 0.05
+  },
+  "default_cooldown_sec": {
+    "type": "int",
+    "description": "默认通知冷却（秒）",
+    "hint": "同一商品相同事件的通知冷却时间",
+    "default": 21600
+  },
+  "webhook_url": {
+    "type": "string",
+    "description": "可选 Webhook 地址",
+    "hint": "不需要额外回调通知时留空",
+    "default": ""
+  },
+  "llm_enabled": {
+    "type": "bool",
+    "description": "启用 LLM 推荐分析",
+    "hint": "关闭后只用启发式规则，不调用大模型进行推荐排序",
+    "default": true
+  },
+  "llm_provider_id": {
+    "_special": "select_provider",
+    "type": "string",
+    "description": "推荐分析模型",
+    "hint": "留空时优先使用当前会话模型，再回退到第一个可用模型",
+    "default": ""
+  },
+  "llm_prefilter_provider_id": {
+    "_special": "select_provider",
+    "type": "string",
+    "description": "初筛模型",
+    "hint": "仅用于原始结果相关性初筛；留空时回退到推荐分析模型",
+    "default": ""
+  },
+  "llm_timeout_sec": {
+    "type": "int",
+    "description": "推荐分析超时（秒）",
+    "hint": "超时后会自动回退到启发式推荐",
+    "default": 25
+  },
+  "llm_top_k": {
+    "type": "int",
+    "description": "推荐返回 TopK 数量",
+    "hint": "建议 3-5，过大可读性会变差",
+    "default": 3
+  },
+  "llm_min_score": {
+    "type": "float",
+    "description": "最低推荐分",
+    "hint": "低于该分数的商品不会出现在最终推荐中；0 表示不过滤，建议范围 0-100",
+    "default": 0.0
+  },
+  "llm_max_candidates": {
+    "type": "int",
+    "description": "参与推荐分析的最大候选数",
+    "hint": "候选越多越慢；建议保持默认",
+    "default": 20
+  },
+  "llm_recommend_prompt": {
+    "type": "string",
+    "description": "推荐提示词",
+    "hint": "商品推荐阶段使用；支持 `$keyword`、`$top_k`、`$candidates_json` 三个占位符",
+    "default": "关键词: $keyword\n候选条目（最多推荐 $top_k 条）:\n$candidates_json\n\n请输出 JSON，字段必须包含 summary 和 top。"
+  },
+  "llm_prefilter_enabled": {
+    "type": "bool",
+    "description": "启用 LLM 初筛",
+    "hint": "关闭后只用规则初筛",
+    "default": true
+  },
+  "llm_prefilter_timeout_sec": {
+    "type": "int",
+    "description": "初筛超时（秒）",
+    "hint": "超时后会自动回退到规则初筛",
+    "default": 6
+  },
+  "llm_prefilter_max_items": {
+    "type": "int",
+    "description": "参与初筛的最大原始商品数",
+    "hint": "越大越慢，保持默认通常足够",
+    "default": 30
+  },
+  "llm_prefilter_prompt": {
+    "type": "string",
+    "description": "筛选提示词",
+    "hint": "结果筛选阶段使用；支持 `$keyword`、`$items_json` 两个占位符",
+    "default": "关键词: $keyword\n商品列表: $items_json\n请只做“商品相关性筛选”，忽略价格、功能优劣、成色。\n输出 JSON: {\"keep_item_ids\": [\"...\"]}"
+  },
+  "llm_agent_enabled": {
+    "type": "bool",
+    "description": "启用浏览器 Agent",
+    "hint": "开启后 LLM 可调用 goofish_browser_task；关闭后只保留脚本化工具",
+    "default": true
+  },
+  "llm_agent_provider_id": {
+    "_special": "select_provider",
+    "type": "string",
+    "description": "浏览器 Agent 模型",
+    "hint": "用于 goofish_browser_task 的 ReAct 推理；留空时回退到推荐分析模型",
+    "default": ""
+  },
+  "llm_agent_headless": {
+    "type": "bool",
+    "description": "Agent 浏览器无头模式",
+    "hint": "true = 后台静默运行；false = 显示浏览器窗口（便于调试）",
+    "default": false
+  },
+  "llm_agent_max_concurrent": {
+    "type": "int",
+    "description": "浏览器 Agent 最大并发数",
+    "hint": "每个 Agent 任务启动一个独立 Chromium 进程；建议不超过 3",
+    "default": 3
+  },
+  "llm_agent_step_timeout_sec": {
+    "type": "int",
+    "description": "Agent 每步 LLM 超时（秒）",
+    "hint": "每步 ReAct 推理的最大等待时间；AX Tree 较大时建议 60 秒以上",
+    "default": 60
+  },
+  "admin_webui_enabled": {
+    "type": "bool",
+    "description": "启用管理后台",
+    "hint": "开启后在插件进程内启动 WebUI 管理端口",
+    "default": false
+  },
+  "admin_webui_host": {
+    "type": "string",
+    "description": "后台监听地址",
+    "hint": "默认绑定 `127.0.0.1`，建议通过反向代理或隧道暴露",
+    "default": "127.0.0.1"
+  },
+  "admin_webui_port": {
+    "type": "int",
+    "description": "后台端口",
+    "hint": "默认 `8790`，避免与其他服务冲突",
+    "default": 8790
+  },
+  "admin_webui_api_key": {
+    "type": "string",
+    "description": "后台 API Key",
+    "hint": "启用后台时必须配置，用于登录认证",
+    "default": ""
+  }
+}

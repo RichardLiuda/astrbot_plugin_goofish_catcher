@@ -18,6 +18,10 @@ except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 AUTH_PAUSE_REASONS = ("AUTH_REQUIRED", "CAPTCHA")
+# Returned by handle_provider_auth_failure / start_login when quick login
+# succeeded automatically (no QR scan needed).  The caller in main.py detects
+# this and runs the subscription-resume logic directly.
+AUTO_LOGIN_DONE_SENTINEL = "AUTO_LOGIN_DONE"
 REMOTE_AUTH_COMMAND_PREFIXES = (
     "/闲鱼",
     "/goofish",
@@ -88,6 +92,8 @@ class RemoteAuthRecoveryCoordinator:
                 return None
 
             payload = await self.auth_controller.start_auth_session(force_restart=False)
+            if payload.get("auto_login_done"):
+                return AUTO_LOGIN_DONE_SENTINEL
             started_at = _safe_int(payload.get("started_at")) or int(time.time())
             self._set_active_flow(
                 ActiveRemoteAuthFlow(
@@ -129,6 +135,9 @@ class RemoteAuthRecoveryCoordinator:
             payload = await self.auth_controller.start_auth_session(
                 force_restart=force_restart
             )
+            if payload.get("auto_login_done"):
+                await self._clear_active_flow_locked()
+                return AUTO_LOGIN_DONE_SENTINEL
             existing_ids = (
                 set(self._active_flow.affected_subscription_ids)
                 if self._active_flow is not None

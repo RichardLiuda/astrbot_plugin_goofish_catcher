@@ -171,6 +171,16 @@ class PluginSettings:
     llm_prefilter_max_items: int = 30
     llm_recommend_prompt: str = DEFAULT_LLM_RECOMMEND_PROMPT
     llm_prefilter_prompt: str = DEFAULT_LLM_PREFILTER_PROMPT
+    # Whether the browser agent tool (goofish_browser_task) is available to the LLM
+    llm_agent_enabled: bool = True
+    # Browser agent LLM provider (falls back to llm_provider_id when None)
+    llm_agent_provider_id: str | None = None
+    # Max number of concurrent browser agent tasks (each is an independent Chromium process)
+    llm_agent_max_concurrent: int = 3
+    # Whether the agent browser runs headless (False = visible window, useful for debugging)
+    llm_agent_headless: bool = False
+    # Per-step LLM call timeout for the browser agent (seconds)
+    llm_agent_step_timeout_sec: int = 60
     admin_webui_enabled: bool = False
     admin_webui_host: str = DEFAULT_ADMIN_WEBUI_HOST
     admin_webui_port: int = DEFAULT_ADMIN_WEBUI_PORT
@@ -351,6 +361,11 @@ def load_plugin_settings(
         ),
         llm_prefilter_max_items=max(1, _as_int(raw.get("llm_prefilter_max_items"), 30)),
         llm_prefilter_prompt=llm_prefilter_prompt,
+        llm_agent_enabled=_as_bool(raw.get("llm_agent_enabled"), True),
+        llm_agent_provider_id=str(raw.get("llm_agent_provider_id", "")).strip() or None,
+        llm_agent_max_concurrent=max(1, _as_int(raw.get("llm_agent_max_concurrent"), 3)),
+        llm_agent_headless=_as_bool(raw.get("llm_agent_headless"), False),
+        llm_agent_step_timeout_sec=max(15, _as_int(raw.get("llm_agent_step_timeout_sec"), 60)),
         admin_webui_enabled=_as_bool(raw.get("admin_webui_enabled"), False),
         admin_webui_host=admin_webui_host,
         admin_webui_port=admin_webui_port,

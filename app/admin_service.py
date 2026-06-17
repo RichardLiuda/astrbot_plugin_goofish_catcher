@@ -774,6 +774,11 @@ class AdminService:
             "llm_prefilter_timeout_sec": settings.llm_prefilter_timeout_sec,
             "llm_prefilter_max_items": settings.llm_prefilter_max_items,
             "llm_prefilter_prompt": settings.llm_prefilter_prompt,
+            "llm_agent_enabled": settings.llm_agent_enabled,
+            "llm_agent_provider_id": settings.llm_agent_provider_id or "",
+            "llm_agent_headless": settings.llm_agent_headless,
+            "llm_agent_max_concurrent": settings.llm_agent_max_concurrent,
+            "llm_agent_step_timeout_sec": settings.llm_agent_step_timeout_sec,
             "admin_webui_enabled": settings.admin_webui_enabled,
             "admin_webui_host": settings.admin_webui_host or DEFAULT_ADMIN_WEBUI_HOST,
             "admin_webui_port": settings.admin_webui_port or DEFAULT_ADMIN_WEBUI_PORT,
@@ -835,7 +840,7 @@ class AdminService:
     def _load_config_schema(self) -> dict[str, Any]:
         if self._config_schema_cache is not None:
             return self._config_schema_cache
-        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema_path = Path(__file__).resolve().parent / "_admin_schema.json"
         self._config_schema_cache = json.loads(schema_path.read_text(encoding="utf-8"))
         return self._config_schema_cache
 
@@ -911,6 +916,17 @@ class AdminService:
                 "id": "notify",
                 "title": "通知与 Webhook",
                 "fields": ["webhook_url"],
+            },
+            {
+                "id": "agent",
+                "title": "浏览器 Agent",
+                "fields": [
+                    "llm_agent_enabled",
+                    "llm_agent_provider_id",
+                    "llm_agent_headless",
+                    "llm_agent_max_concurrent",
+                    "llm_agent_step_timeout_sec",
+                ],
             },
             {
                 "id": "admin",

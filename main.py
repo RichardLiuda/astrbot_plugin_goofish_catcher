@@ -959,6 +959,8 @@ class GoofishCatcherPlugin(Star):
         """
         if err := self._llm_tools_guard():
             return err
+        if not self.settings.llm_agent_enabled:
+            return "浏览器 Agent 功能已关闭。如需启用，请在插件设置中开启「启用浏览器 Agent」。搜索商品请使用 goofish_search_live，订阅管理请使用 goofish_*_subscription。"
         if self._agent_semaphore is None:
             return "插件尚未初始化，请稍后重试。"
         if self.provider is None:
