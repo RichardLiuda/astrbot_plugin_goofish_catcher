@@ -1041,6 +1041,80 @@ class GoofishCatcherPlugin(Star):
         result = await _run()
         return result[:4000] if len(result) > 4000 else result
 
+    @llm_tool(name="goofish_search_live")
+    async def goofish_search_live(
+        self,
+        event: AstrMessageEvent,
+        keyword: str,
+        pages: int = 1,
+        min_price: float = 0,
+        max_price: float = 0,
+    ) -> str:
+        """实时搜索闲鱼商品（直接调脚本，速度快，无需浏览器 Agent）。
+        结果以列表形式发出，用户可引用该消息并回复序号来快速收藏商品。
+        优先用此工具处理搜索需求；仅当需要查看商品详情页或执行收藏等页面操作时才用 goofish_browser_task。
+
+        Args:
+            keyword(string): 搜索关键词
+            pages(integer): 搜索页数，默认 1，最多 3
+            min_price(number): 最低价格（元），0 表示不限
+            max_price(number): 最高价格（元），0 表示不限
+        """
+        if err := self._llm_tools_guard():
+            return err
+        if self.provider is None:
+            return "搜索组件未就绪，请稍后重试。"
+
+        pages = max(1, min(int(pages), 3))
+        min_price = float(min_price) if min_price else 0.0
+        max_price = float(max_price) if max_price else 0.0
+
+        try:
+            items = await self._search_with_captcha_retry(keyword=keyword, pages=pages)
+        except ProviderError as exc:
+            if exc.code == ProviderErrorCode.AUTH_REQUIRED:
+                return "闲鱼会话已过期，请先登录：/闲鱼 登录"
+            if exc.code == ProviderErrorCode.CAPTCHA:
+                return "遇到闲鱼验证码，请稍后重试。"
+            return f"搜索失败：{exc.message}"
+        except Exception as exc:
+            return f"搜索出错：{exc}"
+
+        filtered = items
+        if min_price > 0:
+            filtered = [i for i in filtered if i.price >= min_price]
+        if max_price > 0:
+            filtered = [i for i in filtered if i.price <= max_price]
+
+        if not filtered:
+            return (
+                f"搜索「{keyword}」共 {len(items)} 件，"
+                f"价格过滤后 0 件（条件：{'≥¥' + str(int(min_price)) if min_price else ''}{'≤¥' + str(int(max_price)) if max_price else ''}）。"
+            )
+
+        rendered = _render_live_search_results(
+            keyword=keyword,
+            items=filtered[:20],
+            raw_total=len(items),
+            min_price=min_price or None,
+            max_price=max_price or None,
+        )
+        try:
+            await self.context.send_message(
+                event.unified_msg_origin,
+                MessageChain().message(rendered),
+            )
+        except Exception as exc:
+            logger.warning("[goofish_catcher] goofish_search_live send failed: %s", exc)
+
+        shown = min(len(filtered), 20)
+        return (
+            f"已搜索「{keyword}」，共 {len(items)} 件"
+            + (f"，价格过滤后 {len(filtered)} 件" if len(filtered) != len(items) else "")
+            + f"，已展示前 {shown} 件。"
+            "用户可引用上方消息并回复序号（如 1 或 1 3）来收藏商品，无需额外操作。"
+        )
+
     @llm_tool(name="goofish_get_overview")
     async def goofish_get_overview(self, event: AstrMessageEvent) -> str:
         """获取闲鱼监控系统的整体运行状态，包括订阅数量、最近抓取成功率、调度器状态等。
@@ -2029,6 +2103,32 @@ def _render_remote_status_lines(
     if provider_error:
         lines.append(f"- 远程 Worker 错误：{provider_error}")
     return lines
+
+
+def _render_live_search_results(
+    keyword: str,
+    items: list[NormalizedItem],
+    raw_total: int,
+    min_price: float | None = None,
+    max_price: float | None = None,
+) -> str:
+    price_parts: list[str] = []
+    if min_price:
+        price_parts.append(f"≥¥{min_price:.0f}")
+    if max_price:
+        price_parts.append(f"≤¥{max_price:.0f}")
+    price_str = f" | 价格：{' '.join(price_parts)}" if price_parts else ""
+    lines = [
+        f"【查询推荐】关键词：{keyword}",
+        f"实时搜索 | 共 {raw_total} 件 → 展示 {len(items)} 件{price_str}",
+        "",
+    ]
+    for idx, item in enumerate(items, start=1):
+        lines.append(f"{idx}. [¥{item.price:.0f}] {item.title}")
+        lines.append(f"   价格：¥{item.price:.2f}")
+        lines.append(f"   链接：{item.url}")
+    lines.append(recommendation_reply_hint())
+    return "\n".join(lines)
 
 
 def _render_recommendation_preview(recommendation: RecommendationResult) -> str:
