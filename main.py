@@ -1062,7 +1062,7 @@ class GoofishCatcherPlugin(Star):
 
         Args:
             keyword(string): 搜索关键词
-            pages(integer): 搜索页数，默认 1，最多 3
+            pages(number): 搜索页数，默认 1，最多 3
             min_price(number): 最低价格（元），0 表示不限
             max_price(number): 最高价格（元），0 表示不限
         """
