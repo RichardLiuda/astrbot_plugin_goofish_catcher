@@ -1,0 +1,40 @@
+# 技能：收藏商品
+
+**工具**：无需工具（引用回复）或 `goofish_browser_task`  
+**场景**：用户想收藏某个具体商品。
+
+## 方式一：引用搜索结果回复序号（推荐）
+
+**前提**：先用 `goofish_search_live` 获取搜索结果，系统已发出 `【查询推荐】` 格式消息。
+
+**用户操作**：引用该消息，回复 `1`（收藏第 1 个）或 `1 3`（收藏第 1、3 个）
+
+**系统处理**：`intercept_reply_favorite_before_llm` 拦截 → `parse_reply_target` 解析 → `_do_favorite_item` 执行收藏 → **LLM 不参与**
+
+收藏成功回复：`已收藏：{标题} ¥{价格}`  
+失败回复（会话过期）：提示重新登录
+
+## 方式二：通过浏览器 Agent
+
+当用户给出具体商品链接，或需要在详情页确认信息后收藏时使用：
+
+```
+goofish_browser_task(task="打开 https://www.goofish.com/item?id=XXXXX 并收藏这个商品")
+```
+
+Agent 会：
+1. `navigate` → 商品详情页
+2. 在 AX 树中找到 `[button] "收藏"` 或 `[button] "已收藏"`
+3. 若未收藏，`click` → 等待文本变为「已收藏」
+4. `done` → 返回结果
+
+## 收藏 API 细节
+
+收藏按钮 CSS 选择器：`div[class*='buttons--'] div[class*='right--']`  
+文本状态：`"收藏"` = 可收藏 / `"已收藏"` = 已收藏
+
+## 注意事项
+
+- 会话过期时收藏会失败并报 `AUTH_REQUIRED`——提示用户 `/闲鱼 登录`
+- 若用户未先搜索就要求「收藏某类商品」，先调 `goofish_search_live` 展示列表，让用户选择序号
+- 批量收藏（如「把前 3 个都收藏」）可一次提供 `1 2 3` 序号，系统按序处理
