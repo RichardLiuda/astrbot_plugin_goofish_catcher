@@ -76,14 +76,23 @@ _SYSTEM_PROMPT = """\
 - 页面出现"滑块"、"验证码"文字
 
 ## 可用动作及字段
-- navigate:  url（字符串，必须是 goofish.com 域名）
-- click:     target（元素名称/可见文本），role（可选：link/button/textbox/heading/listitem）
-- type:      target（输入框名称），text（要输入的内容）
-- scroll:    direction（down 或 up）
-- wait:      seconds（数字，0.5 到 5）
-- extract:   description（要提取什么内容）
-- done:      result（任务完成摘要或提取的数据）
-- fail:      reason（失败原因，如 AUTH_REQUIRED / CAPTCHA / 其他描述）
+- navigate:      url（字符串，必须是 goofish.com 域名）
+- extract_items: 无额外字段。**提取当前页面全部商品**（自动走 JSON 拦截 → DOM 降级，速度与纯脚本相当）
+- click:         target（元素名称/可见文本），role（可选：link/button/textbox/heading/listitem）
+- type:          target（输入框名称），text（要输入的内容）
+- scroll:        direction（down 或 up）
+- wait:          seconds（数字，0.5 到 5）
+- extract:       description（用 LLM 从 AX 树提取指定信息，仅在无法用 extract_items 时使用）
+- done:          result（任务完成摘要或提取的数据）
+- fail:          reason（失败原因，如 AUTH_REQUIRED / CAPTCHA / 其他描述）
+
+## 搜索任务的标准路径（最快）
+1. `navigate` → `https://www.goofish.com/search?q={关键词}`
+2. `extract_items`（无需等待，直接提取）
+3. 若返回空，`scroll` 一次再 `extract_items`
+4. `done` 并汇总结果
+
+**不要**用 AX 树手动读取商品标题和价格，`extract_items` 比 LLM 解析 AX 树快 10 倍且更准确。
 """
 
 _STEP_PROMPT_TEMPLATE = """\
@@ -157,6 +166,9 @@ class GofishBrowserAgent:
         self._browser = None
         self._context = None
         self._page = None
+        # 拦截到的 JSON 响应 payload，供 extract_items 使用
+        self._captured_payloads: list[Any] = []
+        self._page = None
 
     # ── 生命周期 ──────────────────────────────────────────────────────────────
 
@@ -202,6 +214,22 @@ class GofishBrowserAgent:
 
         self._context = await self._browser.new_context(**context_kwargs)
         self._page = await self._context.new_page()
+
+        # 拦截 JSON 响应，供 extract_items 动作使用（零额外延迟）
+        captured = self._captured_payloads
+
+        async def _on_response(response) -> None:
+            ct = (response.headers.get("content-type") or "").lower()
+            if "json" not in ct:
+                return
+            try:
+                payload = await response.json()
+                if isinstance(payload, (dict, list)):
+                    captured.append(payload)
+            except Exception:
+                pass
+
+        self._page.on("response", _on_response)
         return self
 
     async def __aexit__(self, *exc_info) -> None:
@@ -374,6 +402,9 @@ class GofishBrowserAgent:
                 ax_text=ax_text,
             )
 
+        if action == "extract_items":
+            return await self._do_extract_items()
+
         return f"未知动作 {action!r}，跳过"
 
     async def _do_navigate(self, url: str) -> str:
@@ -452,6 +483,112 @@ class GofishBrowserAgent:
             return f"向{('上' if direction == 'up' else '下')}滚动 ✓"
         except Exception as exc:
             return f"滚动失败: {exc}"
+
+    async def _do_extract_items(self) -> str:
+        """用既有的快速抓取逻辑提取当前页面的商品列表。
+
+        优先从拦截到的 JSON 响应中提取（与 PlaywrightSearchProvider 相同的逻辑），
+        降级到 DOM 提取。不需要 LLM，速度与纯脚本模式相当。
+        提取完成后清空 payload 缓存，避免翻页后数据串台。
+        """
+        import json as _json
+        from .provider_playwright import (
+            _normalize_url,
+            _extract_item_id_from_url,
+            _parse_price,
+            _pick_first_text,
+            _extract_price,
+        )
+
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        # ── Tier 1: JSON payload（零额外延迟，与 PlaywrightSearchProvider 同路径）──
+        def _try_normalize(data: dict) -> dict[str, Any] | None:
+            title = _pick_first_text(
+                data, ("title", "item_title", "name", "itemName", "subject")
+            )
+            if not title:
+                return None
+            url = _normalize_url(
+                _pick_first_text(data, ("url", "item_url", "detail_url", "jumpUrl")),
+                _GOOFISH_BASE,
+            )
+            item_id = _pick_first_text(
+                data, ("item_id", "itemId", "id", "auctionId", "targetId", "itemid")
+            )
+            if not item_id and url:
+                item_id = _extract_item_id_from_url(url)
+            if not item_id:
+                return None
+            price = _extract_price(data)
+            if price is None:
+                return None
+            if not url:
+                url = f"{_GOOFISH_BASE}/item?id={item_id}"
+            return {"item_id": item_id, "title": title, "price": price, "url": url}
+
+        stack: list[Any] = list(self._captured_payloads)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                candidate = _try_normalize(node)
+                if candidate and candidate["item_id"] not in seen:
+                    seen.add(candidate["item_id"])
+                    items.append(candidate)
+                for v in node.values():
+                    if isinstance(v, (dict, list)):
+                        stack.append(v)
+            elif isinstance(node, list):
+                for child in node:
+                    if isinstance(child, (dict, list)):
+                        stack.append(child)
+
+        # ── Tier 2: DOM fallback ──────────────────────────────────────────────
+        if not items:
+            try:
+                cards = await self._page.eval_on_selector_all(
+                    "a[href*='item']",
+                    """(nodes) => nodes.slice(0, 80).map(n => ({
+                        href: n.href || n.getAttribute('href') || '',
+                        text: (n.innerText || '').trim(),
+                        title: ((n.innerText || '').trim().split('\\n')[0] || '').trim(),
+                    }))""",
+                )
+                for card in cards:
+                    url = _normalize_url(card.get("href"), _GOOFISH_BASE)
+                    if not url:
+                        continue
+                    item_id = _extract_item_id_from_url(url)
+                    title = str(card.get("title", "")).strip()
+                    price = _parse_price(card.get("text"))
+                    if not item_id or not title or price is None:
+                        continue
+                    if item_id in seen:
+                        continue
+                    seen.add(item_id)
+                    items.append(
+                        {"item_id": item_id, "title": title, "price": price, "url": url}
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher][browser_agent] extract_items DOM error: %s", exc
+                )
+
+        self._captured_payloads.clear()
+
+        if not items:
+            return (
+                "当前页面未提取到商品。"
+                "可能原因：页面尚未完全加载（先 scroll 再试）、触发了登录墙或验证码。"
+            )
+
+        logger.info(
+            "[goofish_catcher][browser_agent] extract_items: %d items from %s",
+            len(items),
+            self._page.url,
+        )
+        return _json.dumps(items[:60], ensure_ascii=False)
 
     async def _do_extract(self, description: str, ax_text: str) -> str:
         """对当前页面内容做二次 LLM 提取，不导航。"""
