@@ -1012,6 +1012,22 @@ class GoofishCatcherPlugin(Star):
                 )
 
         async def _run() -> str:
+            if settings.provider_mode == PROVIDER_MODE_REMOTE_REST:
+                run_agent_fn = getattr(provider, "run_agent_task", None)
+                if not callable(run_agent_fn):
+                    return "远程 Worker 不支持浏览器 Agent，请升级 Worker 版本。"
+                try:
+                    return await run_agent_fn(
+                        task,
+                        timeout_ms=5 * 60 * 1000,
+                        step_callback=_step_cb,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[goofish_catcher][browser_agent] remote task failed: %s", exc, exc_info=True
+                    )
+                    return f"浏览器任务执行失败：{exc}"
+
             logger.debug(
                 "[goofish_catcher][browser_agent] waiting for semaphore — task=%r sem_free=%d",
                 task[:80],

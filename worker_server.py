@@ -11,18 +11,21 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
     from .app.auth_session import AUTH_SESSION_TIMEOUT_SEC
+    from .app.browser_agent import GofishBrowserAgent
     from .app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
     from .app.login_session import GoofishLoginSession
     from .app.provider_playwright import PlaywrightSearchProvider
     from .app.types import FavoriteItemResult, ProviderError, ProviderErrorCode
 except ImportError:
     from app.auth_session import AUTH_SESSION_TIMEOUT_SEC
+    from app.browser_agent import GofishBrowserAgent
     from app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
     from app.login_session import GoofishLoginSession
     from app.provider_playwright import PlaywrightSearchProvider
@@ -56,6 +59,11 @@ class FavoriteRequest(BaseModel):
     timeout_ms: int = Field(default=20_000, ge=1_000)
 
 
+class AgentRequest(BaseModel):
+    task: str = Field(min_length=1)
+    timeout_ms: int = Field(default=300_000, ge=5_000)
+
+
 @dataclass(slots=True)
 class WorkerAuthConfig:
     api_key: str | None
@@ -72,6 +80,18 @@ class WorkerAuthConfig:
         ):
             return "configured"
         return "disabled"
+
+
+@dataclass(slots=True)
+class WorkerLLMConfig:
+    api_key: str
+    base_url: str  # OpenAI-compatible endpoint including /v1
+    model: str
+    step_timeout_sec: int
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key and self.model)
 
 
 @dataclass(slots=True)
@@ -281,6 +301,8 @@ class WorkerRuntime:
     login_manager: WorkerLoginSessionManager | None = None
     provider_error: str | None = None
     provider_error_code: ProviderErrorCode = ProviderErrorCode.UNKNOWN
+    llm_config: WorkerLLMConfig | None = None
+    agent_semaphore: asyncio.Semaphore | None = None
 
 
 def build_worker_settings_from_env() -> PluginSettings:
@@ -370,6 +392,10 @@ def build_worker_settings_from_env() -> PluginSettings:
         llm_prefilter_enabled=False,
         llm_prefilter_timeout_sec=6,
         llm_prefilter_max_items=30,
+        llm_agent_enabled=_cfg_bool(config, "agent_enabled", "GOOFISH_WORKER_AGENT_ENABLED", True),
+        llm_agent_headless=_cfg_bool(config, "agent_headless", "GOOFISH_WORKER_AGENT_HEADLESS", True),
+        llm_agent_max_concurrent=max(1, _cfg_int(config, "agent_max_concurrent", "GOOFISH_WORKER_AGENT_MAX_CONCURRENT", 3)),
+        llm_agent_step_timeout_sec=max(15, _cfg_int(config, "agent_step_timeout_sec", "GOOFISH_WORKER_AGENT_STEP_TIMEOUT_SEC", 60)),
     )
 
 
@@ -399,18 +425,71 @@ def build_worker_auth_from_env() -> WorkerAuthConfig:
     )
 
 
+def build_worker_llm_from_env() -> WorkerLLMConfig | None:
+    config = load_worker_config()
+    api_key = _cfg_optional_str(config, "llm_api_key", "GOOFISH_WORKER_LLM_API_KEY")
+    if not api_key:
+        return None
+    base_url = _cfg_str(
+        config, "llm_base_url", "GOOFISH_WORKER_LLM_BASE_URL", "https://api.openai.com/v1"
+    ).rstrip("/")
+    model = _cfg_str(config, "llm_model", "GOOFISH_WORKER_LLM_MODEL", "gpt-4o-mini")
+    step_timeout_sec = max(15, _cfg_int(config, "llm_step_timeout_sec", "GOOFISH_WORKER_LLM_STEP_TIMEOUT_SEC", 60))
+    return WorkerLLMConfig(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        step_timeout_sec=step_timeout_sec,
+    )
+
+
+def _make_worker_llm_call(llm_config: WorkerLLMConfig):
+    chat_url = f"{llm_config.base_url}/chat/completions"
+    auth_header = f"Bearer {llm_config.api_key}"
+    model = llm_config.model
+    req_timeout = llm_config.step_timeout_sec + 10
+
+    async def _llm_call(prompt: str, system_prompt: str) -> str:
+        async with httpx.AsyncClient(timeout=req_timeout) as client:
+            response = await client.post(
+                chat_url,
+                headers={"Authorization": auth_header, "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+            )
+        response.raise_for_status()
+        data = response.json()
+        content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        return str(content)
+
+    return _llm_call
+
+
 def create_runtime_from_env() -> WorkerRuntime:
     auth = build_worker_auth_from_env()
+    llm_config = build_worker_llm_from_env()
     settings: PluginSettings | None = None
     try:
         settings = build_worker_settings_from_env()
         provider = PlaywrightSearchProvider(settings)
         login_manager = WorkerLoginSessionManager(settings, provider=provider)
+        agent_semaphore = (
+            asyncio.Semaphore(settings.llm_agent_max_concurrent)
+            if settings.llm_agent_enabled and llm_config is not None
+            else None
+        )
         return WorkerRuntime(
             settings=settings,
             provider=provider,
             auth=auth,
             login_manager=login_manager,
+            llm_config=llm_config,
+            agent_semaphore=agent_semaphore,
         )
     except ModuleNotFoundError as exc:
         return WorkerRuntime(
@@ -426,6 +505,7 @@ def create_runtime_from_env() -> WorkerRuntime:
                 "uv run python -m playwright install chromium chromium-headless-shell"
             ),
             provider_error_code=ProviderErrorCode.DEPENDENCY_MISSING,
+            llm_config=llm_config,
         )
     except Exception as exc:
         return WorkerRuntime(
@@ -437,6 +517,7 @@ def create_runtime_from_env() -> WorkerRuntime:
             ),
             provider_error=str(exc),
             provider_error_code=ProviderErrorCode.UNKNOWN,
+            llm_config=llm_config,
         )
 
 
@@ -752,6 +833,118 @@ def create_app(runtime: WorkerRuntime | None = None) -> FastAPI:
                 code=ProviderErrorCode.UNKNOWN,
                 message=str(exc),
             )
+
+    @app.post("/v1/agent")
+    async def run_agent_task(
+        req: AgentRequest,
+        authorization: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+        cf_access_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+        cf_access_client_secret: str | None = Header(
+            None,
+            alias="CF-Access-Client-Secret",
+        ),
+    ):
+        current_runtime = _get_runtime(app)
+        _verify_request_auth(
+            current_runtime.auth,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            cf_access_client_id=cf_access_client_id,
+            cf_access_client_secret=cf_access_client_secret,
+        )
+        if current_runtime.provider_error or current_runtime.provider is None:
+            return _error_response(
+                status_code=503,
+                code=current_runtime.provider_error_code,
+                message=current_runtime.provider_error or "worker provider is unavailable",
+            )
+        settings = current_runtime.settings
+        if (
+            settings is None
+            or not settings.llm_agent_enabled
+            or current_runtime.llm_config is None
+            or current_runtime.agent_semaphore is None
+        ):
+            return _error_response(
+                status_code=503,
+                code=ProviderErrorCode.UNKNOWN,
+                message="browser agent is not configured on this worker",
+            )
+
+        sem = current_runtime.agent_semaphore
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=0.05)
+        except asyncio.TimeoutError:
+            return _error_response(
+                status_code=503,
+                code=ProviderErrorCode.UNKNOWN,
+                message="all agent slots are busy, please retry later",
+            )
+
+        llm_config = current_runtime.llm_config
+        provider = current_runtime.provider
+        task_str = req.task
+        timeout_sec = max(5.0, req.timeout_ms / 1000)
+
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _step_callback(step: int, action: str, summary: str) -> None:
+            await queue.put(
+                {"type": "step", "step": step, "action": action, "text": summary}
+            )
+
+        async def _run_bg() -> None:
+            try:
+                storage_state = await provider.export_storage_state()
+                llm_call = _make_worker_llm_call(llm_config)
+                async with GofishBrowserAgent(
+                    storage_state=storage_state,
+                    llm_call=llm_call,
+                    step_timeout_sec=settings.llm_agent_step_timeout_sec,
+                    headless=settings.llm_agent_headless,
+                    executable_path=settings.playwright_executable_path,
+                    force_direct=settings.playwright_force_direct,
+                ) as agent:
+                    result = await asyncio.wait_for(
+                        agent.run(task_str, step_callback=_step_callback),
+                        timeout=timeout_sec,
+                    )
+                await queue.put({"type": "done", "result": result})
+            except asyncio.TimeoutError:
+                await queue.put(
+                    {"type": "error", "code": "TIMEOUT", "message": "agent task timed out"}
+                )
+            except Exception as exc:
+                logger.exception("[goofish_catcher] worker agent task failed: %s", exc)
+                await queue.put(
+                    {"type": "error", "code": "UNKNOWN", "message": str(exc)}
+                )
+            finally:
+                sem.release()
+                await queue.put(None)  # sentinel — end of stream
+
+        async def _sse_stream():
+            bg_task = asyncio.create_task(_run_bg())
+            try:
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        break
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            finally:
+                if not bg_task.done():
+                    bg_task.cancel()
+                    try:
+                        await bg_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+        return StreamingResponse(
+            _sse_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return app
 

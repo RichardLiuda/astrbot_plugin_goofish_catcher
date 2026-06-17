@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -253,6 +254,80 @@ class RemoteSearchProvider:
             data=data,
             parse_error_message="remote auth cancel json root is not an object",
             ok_error_message="remote auth cancel did not return ok=true",
+        )
+
+    async def run_agent_task(
+        self,
+        task: str,
+        *,
+        timeout_ms: int = 300_000,
+        step_callback: Callable[[int, str, str], Awaitable[None]] | None = None,
+    ) -> str:
+        url = f"{self.settings.remote_base_url.rstrip('/')}/v1/agent"
+        headers = self._build_remote_headers(include_content_type=True)
+        payload = {"task": task, "timeout_ms": timeout_ms}
+        # Read timeout = agent timeout + margin for SSE teardown; connect timeout stays short
+        read_timeout = max(30, timeout_ms // 1000 + 30)
+        timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=10.0, pool=5.0)
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, headers=headers, json=payload) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        try:
+                            data = json.loads(body)
+                        except ValueError:
+                            data = None
+                        _raise_for_remote_error(response, data)
+                        raise ProviderError(
+                            ProviderErrorCode.NETWORK_ERROR,
+                            f"remote agent endpoint returned {response.status_code}",
+                        )
+
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            event = json.loads(line[6:])
+                        except (ValueError, KeyError):
+                            continue
+
+                        event_type = str(event.get("type", ""))
+                        if event_type == "step" and step_callback is not None:
+                            try:
+                                await step_callback(
+                                    int(event.get("step", 0)),
+                                    str(event.get("action", "")),
+                                    str(event.get("text", "")),
+                                )
+                            except Exception:
+                                pass
+                        elif event_type == "done":
+                            return str(event.get("result", ""))
+                        elif event_type == "error":
+                            code = _map_remote_error_code(str(event.get("code", "UNKNOWN")))
+                            raise ProviderError(
+                                code,
+                                str(event.get("message", "remote agent failed")),
+                            )
+
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise ProviderError(
+                ProviderErrorCode.TIMEOUT,
+                f"remote agent stream timeout: {exc}",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError(
+                ProviderErrorCode.NETWORK_ERROR,
+                f"remote agent stream error: {exc}",
+            ) from exc
+
+        raise ProviderError(
+            ProviderErrorCode.UNKNOWN,
+            "remote agent stream ended without a done or error event",
         )
 
 
