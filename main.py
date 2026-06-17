@@ -945,11 +945,17 @@ class GoofishCatcherPlugin(Star):
         event: AstrMessageEvent,
         task: str,
     ) -> str:
-        """在闲鱼网站上用浏览器执行指定操作。适用于搜索商品、查看商品详情、收藏商品等需要直接操作网页的任务。
-        任务会在后台执行，完成后结果会发送到当前对话。
+        """用真实浏览器处理无法用固定工具完成的复杂或不规则任务，例如：
+        查看某个卖家的其他在售商品、判断商品图片中的瑕疵、处理需要多步页面交互的操作。
+
+        常规操作请用对应的专用工具，不要用此工具：
+        - 搜索商品 → goofish_search_live
+        - 管理订阅 → goofish_*_subscription
+        - 查历史数据 → goofish_list_items / goofish_get_item_detail
+        - 收藏（从列表）→ 引用回复序号
 
         Args:
-            task(string): 要在闲鱼上执行的具体操作，例如"搜索尼康Z9，查看第一个商品的详情页并收藏它"
+            task(string): 用自然语言描述需要在闲鱼上完成的具体任务
         """
         if err := self._llm_tools_guard():
             return err
