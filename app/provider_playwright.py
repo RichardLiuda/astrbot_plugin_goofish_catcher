@@ -100,6 +100,36 @@ class PlaywrightSearchProvider:
             launch_kwargs["executable_path"] = str(executable_path)
         return launch_kwargs
 
+    async def export_storage_state(self) -> dict[str, Any] | None:
+        """Export the current browser session's cookies/localStorage as an in-memory dict.
+
+        Used by GofishBrowserAgent to inherit login state without sharing the
+        user_data_dir file lock (Chromium only allows one process per directory).
+
+        Returns None when no session is available.
+        """
+        # Preferred: live context export (most up-to-date cookies)
+        if self._persistent_context is not None:
+            try:
+                return await self._persistent_context.storage_state()
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher] export_storage_state from context failed: %s", exc
+                )
+
+        # Fallback: read from the persisted storage_state.json file
+        state_path = self.settings.playwright_storage_state_path
+        if state_path is not None and state_path.exists():
+            import json as _json
+            try:
+                return _json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher] export_storage_state from file failed: %s", exc
+                )
+
+        return None
+
     async def close(self) -> None:
         if self._persistent_context is not None:
             try:
@@ -586,6 +616,10 @@ class PlaywrightSearchProvider:
                 page,
                 error_flags=error_flags,
             )
+            if page_error is not None and page_error.code == ProviderErrorCode.AUTH_REQUIRED:
+                if await self._try_quick_login(page, context):
+                    page_error = None
+                    error_flags.discard("auth")
             if page_error is not None:
                 raise page_error
 
@@ -632,10 +666,12 @@ class PlaywrightSearchProvider:
                     "captcha response detected",
                 )
             if "auth" in error_flags:
-                raise ProviderError(
-                    ProviderErrorCode.AUTH_REQUIRED,
-                    "authentication required by goofish",
-                )
+                if not await self._try_quick_login(page, context):
+                    raise ProviderError(
+                        ProviderErrorCode.AUTH_REQUIRED,
+                        "authentication required by goofish",
+                    )
+                error_flags.discard("auth")
             if not items:
                 logger.info(
                     "[goofish_catcher] page=%s no items after wait, payloads=%s",
@@ -663,6 +699,32 @@ class PlaywrightSearchProvider:
                 await page.close()
             if should_close_context:
                 await context.close()
+
+    async def _try_quick_login(self, page, context) -> bool:
+        """若页面弹出「快速进入」一键登录对话框（已记住账号），自动点击恢复会话。
+
+        Returns True 表示点击成功并已保存新 storage_state；False 表示未找到按钮。
+        """
+        try:
+            btn = page.get_by_role("button", name="快速进入").first
+            if not await btn.is_visible(timeout=2_000):
+                return False
+            logger.info("[goofish_catcher] '快速进入' dialog detected — auto-clicking to restore session")
+            await btn.click(timeout=3_000)
+            # 等待弹窗消失
+            try:
+                await page.get_by_role("button", name="快速进入").wait_for(
+                    state="hidden", timeout=8_000
+                )
+            except Exception:
+                pass
+            await page.wait_for_timeout(1_000)
+            await self._persist_context_storage_state(context)
+            logger.info("[goofish_catcher] quick login succeeded, storage_state refreshed")
+            return True
+        except Exception as exc:
+            logger.debug("[goofish_catcher] _try_quick_login: %s", exc)
+            return False
 
     async def _persist_context_storage_state(self, context) -> None:
         storage_path = self.settings.playwright_storage_state_path
