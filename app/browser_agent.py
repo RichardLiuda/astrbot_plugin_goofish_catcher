@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -265,8 +266,16 @@ class GofishBrowserAgent:
 
     # ── 公开 API ──────────────────────────────────────────────────────────────
 
-    async def run(self, task: str) -> str:
-        """执行任务，返回结果摘要字符串。"""
+    async def run(
+        self,
+        task: str,
+        step_callback: Callable[[int, str, str], Awaitable[None]] | None = None,
+    ) -> str:
+        """执行任务，返回结果摘要字符串。
+
+        step_callback(step, action, summary) 在每个关键步骤执行后被调用，
+        可用于向用户推送进度通知。仅 navigate / extract_items / click / fail / done 步骤触发。
+        """
         if self._page is None:
             raise RuntimeError("agent has not been started (use async with)")
 
@@ -285,6 +294,15 @@ class GofishBrowserAgent:
             )
 
         history: list[str] = []
+
+        async def _notify(step: int, action: str, summary: str) -> None:
+            if step_callback is not None:
+                try:
+                    await step_callback(step, action, summary)
+                except Exception as cb_exc:
+                    logger.debug(
+                        "[goofish_catcher][browser_agent] step_callback error: %s", cb_exc
+                    )
 
         for step in range(1, self._max_steps + 1):
             # ① 快照 AX Tree
@@ -348,6 +366,7 @@ class GofishBrowserAgent:
                     step,
                     reason,
                 )
+                await _notify(step, "fail", f"任务失败：{reason}")
                 return f"任务失败：{reason}"
 
             step_result = await self._execute_action(action_dict, ax_text)
@@ -355,6 +374,19 @@ class GofishBrowserAgent:
             # 裁剪历史，只保留最近 N 步
             if len(history) > _MAX_HISTORY:
                 history = history[-_MAX_HISTORY:]
+
+            # ⑤ 通知关键步骤
+            _NOTIFY_ACTIONS = {"navigate", "extract_items", "click"}
+            if action in _NOTIFY_ACTIONS:
+                if action == "navigate":
+                    url = str(action_dict.get("url", ""))
+                    short_url = url if len(url) <= 60 else url[:57] + "..."
+                    summary = f"访问 {short_url}"
+                elif action == "extract_items":
+                    summary = step_result if len(step_result) < 80 else "已提取商品列表"
+                else:
+                    summary = f"点击 {action_dict.get('target', '')}"
+                await _notify(step, action, summary)
 
         return f"任务未在 {self._max_steps} 步内完成，请尝试更具体的描述。"
 

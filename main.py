@@ -7,15 +7,17 @@ from datetime import datetime
 from sys import maxsize
 from typing import Any
 
-from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api import AstrBotConfig, logger, llm_tool
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
 from .app.activity_monitor import ActivityMonitor
 from .app.admin_server import AdminWebuiServer
+from .app.admin_service import AdminService
 from .app.auth_session import LocalAuthSessionController
+from .app.browser_agent import GofishBrowserAgent
 from .app.config import (
     PROVIDER_MODE_PLAYWRIGHT_LOCAL,
     PROVIDER_MODE_REMOTE_REST,
@@ -42,7 +44,7 @@ from .app.reply_favorite import (
     parse_reply_target,
     recommendation_reply_hint,
 )
-from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator
+from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator, AUTH_PAUSE_REASONS, AUTO_LOGIN_DONE_SENTINEL
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
 from .app.storage import SubscriptionStorage
@@ -88,6 +90,10 @@ class GoofishCatcherPlugin(Star):
         # Interval in seconds; 0 means disabled.
         _HEARTBEAT_INTERVAL_SEC = 1800  # 30 minutes
         self._heartbeat_interval_sec: int = _HEARTBEAT_INTERVAL_SEC
+        # Admin service facade (initialized in _configure_runtime)
+        self._admin_service: AdminService | None = None
+        # Semaphore limiting concurrent browser agent tasks (each is an independent Chromium process)
+        self._agent_semaphore: asyncio.Semaphore | None = None
 
     async def initialize(self) -> None:
         async with self._reload_lock:
@@ -284,6 +290,10 @@ class GoofishCatcherPlugin(Star):
             self.settings.provider_mode,
             self.settings.db_path,
         )
+        self._admin_service = AdminService(self)
+        self._agent_semaphore = asyncio.Semaphore(
+            self.settings.llm_agent_max_concurrent
+        )
         if self._loaded:
             await self._ensure_scheduler_started()
             self._ensure_heartbeat_started()
@@ -407,6 +417,49 @@ class GoofishCatcherPlugin(Star):
                 return ""
 
         return _llm_call
+
+    def _make_agent_llm_call(self):
+        """Return an async callable for the browser agent.
+
+        Uses llm_agent_provider_id when configured, otherwise falls back to
+        llm_provider_id.  Uses a higher max_tokens budget so the agent can
+        reason over large AX trees and produce detailed results.
+        """
+        context = self.context
+        settings = self.settings
+
+        async def _agent_llm_call(prompt: str, system_prompt: str) -> str:
+            provider_id: str | None = None
+            # Prefer the dedicated agent provider, fall back to the general one
+            for pid in (settings.llm_agent_provider_id, settings.llm_provider_id):
+                if pid:
+                    provider_id = pid
+                    break
+            if not provider_id:
+                provider = context.get_all_providers()
+                if provider:
+                    try:
+                        provider_id = str(provider[0].meta().id)
+                    except Exception:
+                        pass
+            if not provider_id:
+                return ""
+            try:
+                resp = await context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.0,
+                    max_tokens=2500,
+                )
+                return (getattr(resp, "completion_text", "") or "").strip()
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher][browser_agent] llm_call failed: %s", exc
+                )
+                return ""
+
+        return _agent_llm_call
 
     # ── Heartbeat ────────────────────────────────────────────────────────────
 
@@ -572,10 +625,13 @@ class GoofishCatcherPlugin(Star):
         if self.remote_auth_coordinator is None:
             return None
         try:
-            return await self.remote_auth_coordinator.handle_provider_auth_failure(
+            result = await self.remote_auth_coordinator.handle_provider_auth_failure(
                 umo=umo,
                 sub_id=sub_id,
             )
+            if result == AUTO_LOGIN_DONE_SENTINEL:
+                return await self._resume_subs_after_auto_login()
+            return result
         except ProviderError as exc:
             logger.warning(
                 "[goofish_catcher] failed to trigger auth recovery: %s",
@@ -598,6 +654,24 @@ class GoofishCatcherPlugin(Star):
                 f"{exc}\n"
                 "可稍后发送 /闲鱼 登录 重试。"
             )
+
+    async def _resume_subs_after_auto_login(self) -> str:
+        """Resume paused subscriptions after an automatic quick login."""
+        if self.storage is None:
+            return "已自动快速登录。"
+        now_ts = int(time.time())
+        resumed = await self.storage.resume_subscriptions_by_pause_reasons(
+            AUTH_PAUSE_REASONS, now_ts=now_ts
+        )
+        enqueued = 0
+        if self.scheduler is not None:
+            for sub in resumed:
+                if await self.scheduler.enqueue_manual_check(sub.id):
+                    enqueued += 1
+        return (
+            f"已自动快速登录（无需扫码）。"
+            f"已恢复订阅 {len(resumed)} 个，重新入队 {enqueued} 个。"
+        )
 
     async def _search_with_captcha_retry(
         self,
@@ -641,6 +715,8 @@ class GoofishCatcherPlugin(Star):
                 message = await self.remote_auth_coordinator.start_login(
                     umo=event.unified_msg_origin
                 )
+                if message == AUTO_LOGIN_DONE_SENTINEL:
+                    message = await self._resume_subs_after_auto_login()
                 yield event.plain_result(message).stop_event()
                 return
             should_complete = await (
@@ -852,6 +928,457 @@ class GoofishCatcherPlugin(Star):
         event.should_call_llm(False)
         event.stop_event()
         return
+
+    # ── LLM Tools ─────────────────────────────────────────────────────────────
+    # 所有 @llm_tool 方法必须定义在 main.py（与插件主模块同 __module__），
+    # 否则 AstrBot 的 ft.handler.__module__ == metadata.module_path 检查会失败。
+
+    def _llm_tools_guard(self) -> str | None:
+        """Return an error message if the plugin isn't ready, else None."""
+        if self._admin_service is None:
+            return "插件尚未初始化，请稍后重试。"
+        return None
+
+    @llm_tool(name="goofish_browser_task")
+    async def goofish_browser_task(
+        self,
+        event: AstrMessageEvent,
+        task: str,
+    ) -> str:
+        """在闲鱼网站上用浏览器执行指定操作。适用于搜索商品、查看商品详情、收藏商品等需要直接操作网页的任务。
+        任务会在后台执行，完成后结果会发送到当前对话。
+
+        Args:
+            task(string): 要在闲鱼上执行的具体操作，例如"搜索尼康Z9，查看第一个商品的详情页并收藏它"
+        """
+        if err := self._llm_tools_guard():
+            return err
+        if self._agent_semaphore is None:
+            return "插件尚未初始化，请稍后重试。"
+        if self.provider is None:
+            return "浏览器提供者未就绪，无法执行浏览器任务。"
+
+        umo = event.unified_msg_origin
+        context = self.context
+        settings = self.settings
+        provider = self.provider
+        semaphore = self._agent_semaphore
+        llm_call = self._make_agent_llm_call()
+
+        # Count how many agent tasks are already queued/running
+        pending_agent_tasks = sum(
+            1 for t in asyncio.all_tasks()
+            if t.get_name() == "goofish-browser-agent" and not t.done()
+        )
+        sem_value = semaphore._value  # current free slots
+        logger.info(
+            "[goofish_catcher][browser_agent] NEW TASK ENQUEUED — task=%r "
+            "pending_tasks=%d semaphore_free=%d max_concurrent=%d umo=%s",
+            task[:80],
+            pending_agent_tasks,
+            sem_value,
+            settings.llm_agent_max_concurrent,
+            umo,
+        )
+        if pending_agent_tasks >= settings.llm_agent_max_concurrent * 2:
+            logger.warning(
+                "[goofish_catcher][browser_agent] TOO MANY QUEUED TASKS "
+                "pending=%d max_concurrent=%d — dropping this request",
+                pending_agent_tasks,
+                settings.llm_agent_max_concurrent,
+            )
+            return (
+                f"当前已有 {pending_agent_tasks} 个浏览器任务在排队，"
+                "请等待前面的任务完成后再试。"
+            )
+
+        async def _step_cb(step: int, _action: str, summary: str) -> None:
+            try:
+                await context.send_message(
+                    umo,
+                    MessageChain().message(f"[浏览器] 步骤{step}: {summary}"),
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[goofish_catcher][browser_agent] step_cb send failed: %s", exc
+                )
+
+        async def _run() -> str:
+            logger.debug(
+                "[goofish_catcher][browser_agent] waiting for semaphore — task=%r sem_free=%d",
+                task[:80],
+                semaphore._value,
+            )
+            async with semaphore:
+                logger.info(
+                    "[goofish_catcher][browser_agent] semaphore acquired — task=%r sem_free=%d",
+                    task[:80],
+                    semaphore._value,
+                )
+                export_fn = getattr(provider, "export_storage_state", None)
+                storage_state = await export_fn() if callable(export_fn) else None
+                try:
+                    async with GofishBrowserAgent(
+                        storage_state=storage_state,
+                        llm_call=llm_call,
+                        headless=settings.llm_agent_headless,
+                        step_timeout_sec=settings.llm_agent_step_timeout_sec,
+                        executable_path=settings.playwright_executable_path,
+                        force_direct=settings.playwright_force_direct,
+                    ) as agent:
+                        result = await agent.run(task, step_callback=_step_cb)
+                except Exception as exc:
+                    logger.warning(
+                        "[goofish_catcher][browser_agent] task failed: %s", exc, exc_info=True
+                    )
+                    result = f"浏览器任务执行失败：{exc}"
+                logger.info(
+                    "[goofish_catcher][browser_agent] semaphore released — task=%r",
+                    task[:80],
+                )
+            return result
+
+        result = await _run()
+        return result[:4000] if len(result) > 4000 else result
+
+    @llm_tool(name="goofish_get_overview")
+    async def goofish_get_overview(self, event: AstrMessageEvent) -> str:
+        """获取闲鱼监控系统的整体运行状态，包括订阅数量、最近抓取成功率、调度器状态等。
+
+        Args:
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+        data = await self._admin_service.get_overview()
+        # 精简：去掉 trends 和 recent_alerts 的详细内容
+        slim = {k: v for k, v in data.items() if k not in ("trends", "recent_alerts", "provider_health")}
+        slim["recent_alerts_count"] = len(data.get("recent_alerts") or [])
+        return _json.dumps(slim, ensure_ascii=False)
+
+    @llm_tool(name="goofish_list_subscriptions")
+    async def goofish_list_subscriptions(
+        self,
+        event: AstrMessageEvent,
+        keyword: str = "",
+        status: str = "all",
+    ) -> str:
+        """查询闲鱼监控订阅列表。
+
+        Args:
+            keyword(string): 按关键词过滤，为空则显示全部
+            status(string): 状态过滤，可选值：all（全部）/ enabled（运行中）/ paused（已暂停）
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+        data = await self._admin_service.list_subscriptions(
+            keyword=keyword, status=status, limit=20
+        )
+        items = data.get("items") or []
+        slim_items = [
+            {
+                "id": it.get("id"),
+                "keyword": it.get("keyword"),
+                "enabled": it.get("enabled"),
+                "interval_sec": it.get("interval_sec"),
+                "price_min": it.get("price_min"),
+                "price_max": it.get("price_max"),
+                "last_run_at": it.get("last_run_at"),
+            }
+            for it in items
+        ]
+        return _json.dumps(
+            {"items": slim_items, "total": data.get("total", len(slim_items))},
+            ensure_ascii=False,
+        )
+
+    @llm_tool(name="goofish_create_subscription")
+    async def goofish_create_subscription(
+        self,
+        event: AstrMessageEvent,
+        keyword: str,
+        interval_sec: int = 0,
+        pages: int = 0,
+        price_min: float = 0,
+        price_max: float = 0,
+    ) -> str:
+        """创建一个新的闲鱼关键词监控订阅，系统会定时搜索并推送新商品或降价通知。
+
+        Args:
+            keyword(string): 要监控的搜索关键词
+            interval_sec(number): 检查间隔秒数，0 表示使用系统默认值
+            pages(number): 每次搜索的页数，0 表示使用系统默认值
+            price_min(number): 最低价格过滤（元），0 表示不限
+            price_max(number): 最高价格过滤（元），0 表示不限
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+        payload: dict[str, Any] = {
+            "keyword": keyword,
+            "umo": event.unified_msg_origin,
+        }
+        if interval_sec > 0:
+            payload["interval_sec"] = interval_sec
+        if pages > 0:
+            payload["pages"] = pages
+        if price_min > 0:
+            payload["price_min"] = price_min
+        if price_max > 0:
+            payload["price_max"] = price_max
+        try:
+            data = await self._admin_service.create_subscription(payload)
+        except (KeyError, ValueError) as exc:
+            return f"创建订阅失败：{exc}"
+        sub = data.get("subscription") or {}
+        return _json.dumps(
+            {"created": data.get("created"), "id": sub.get("id"), "keyword": sub.get("keyword")},
+            ensure_ascii=False,
+        )
+
+    @llm_tool(name="goofish_update_subscription")
+    async def goofish_update_subscription(
+        self,
+        event: AstrMessageEvent,
+        sub_id: int,
+        keyword: str = "",
+        interval_sec: int = 0,
+        pages: int = 0,
+        price_min: float = -1,
+        price_max: float = -1,
+    ) -> str:
+        """修改已有订阅的参数。只传需要修改的字段，不传则保持原值不变。
+
+        Args:
+            sub_id(number): 要修改的订阅 ID
+            keyword(string): 新关键词，为空则不修改
+            interval_sec(number): 新检查间隔秒数，0 表示不修改
+            pages(number): 新页数，0 表示不修改
+            price_min(number): 新最低价格，-1 表示不修改，0 表示清除限制
+            price_max(number): 新最高价格，-1 表示不修改，0 表示清除限制
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+        payload: dict[str, Any] = {}
+        if keyword:
+            payload["keyword"] = keyword
+        if interval_sec > 0:
+            payload["interval_sec"] = interval_sec
+        if pages > 0:
+            payload["pages"] = pages
+        if price_min >= 0:
+            payload["price_min"] = price_min if price_min > 0 else None
+        if price_max >= 0:
+            payload["price_max"] = price_max if price_max > 0 else None
+        try:
+            data = await self._admin_service.update_subscription(sub_id, payload)
+        except (KeyError, ValueError) as exc:
+            return f"更新订阅失败：{exc}"
+        sub = data.get("subscription") or {}
+        return _json.dumps(
+            {"id": sub.get("id"), "keyword": sub.get("keyword"), "updated": True},
+            ensure_ascii=False,
+        )
+
+    @llm_tool(name="goofish_delete_subscription")
+    async def goofish_delete_subscription(
+        self,
+        event: AstrMessageEvent,
+        sub_id: int,
+    ) -> str:
+        """删除指定的闲鱼监控订阅。删除后无法恢复，相关抓取历史仍保留在数据库中。
+
+        Args:
+            sub_id(number): 要删除的订阅 ID
+        """
+        if err := self._llm_tools_guard():
+            return err
+        try:
+            await self._admin_service.delete_subscription(sub_id)
+        except KeyError as exc:
+            return f"删除失败：{exc}"
+        return f"订阅 {sub_id} 已删除。"
+
+    @llm_tool(name="goofish_pause_subscription")
+    async def goofish_pause_subscription(
+        self,
+        event: AstrMessageEvent,
+        sub_id: int,
+    ) -> str:
+        """暂停指定的闲鱼监控订阅，暂停期间不再自动抓取，可随时恢复。
+
+        Args:
+            sub_id(number): 要暂停的订阅 ID
+        """
+        if err := self._llm_tools_guard():
+            return err
+        try:
+            await self._admin_service.pause_subscription(sub_id)
+        except KeyError as exc:
+            return f"暂停失败：{exc}"
+        return f"订阅 {sub_id} 已暂停。"
+
+    @llm_tool(name="goofish_resume_subscription")
+    async def goofish_resume_subscription(
+        self,
+        event: AstrMessageEvent,
+        sub_id: int,
+    ) -> str:
+        """恢复已暂停的闲鱼监控订阅，恢复后将在下一个调度周期重新开始抓取。
+
+        Args:
+            sub_id(number): 要恢复的订阅 ID
+        """
+        if err := self._llm_tools_guard():
+            return err
+        try:
+            await self._admin_service.resume_subscription(sub_id)
+        except KeyError as exc:
+            return f"恢复失败：{exc}"
+        return f"订阅 {sub_id} 已恢复。"
+
+    @llm_tool(name="goofish_check_subscription")
+    async def goofish_check_subscription(
+        self,
+        event: AstrMessageEvent,
+        sub_id: int,
+    ) -> str:
+        """立即触发一次订阅的抓取和分析，不等待下次定时调度。
+
+        Args:
+            sub_id(number): 要立即检查的订阅 ID
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+        try:
+            data = await self._admin_service.check_subscription(sub_id)
+        except (KeyError, ValueError) as exc:
+            return f"立即检查失败：{exc}"
+        return _json.dumps(data, ensure_ascii=False)[:2000]
+
+    @llm_tool(name="goofish_list_items")
+    async def goofish_list_items(
+        self,
+        event: AstrMessageEvent,
+        search: str = "",
+        sub_id: int = 0,
+        min_price: float = 0,
+        max_price: float = 0,
+        sort_by: str = "last_seen_at",
+        limit: int = 20,
+    ) -> str:
+        """查询数据库中已抓取的闲鱼商品列表，支持按标题关键词、价格区间、排序方式筛选。
+
+        Args:
+            search(string): 按商品标题搜索，支持模糊匹配，为空则不限
+            sub_id(number): 按订阅 ID 过滤，0 表示不限
+            min_price(number): 最低价格（元），0 表示不限
+            max_price(number): 最高价格（元），0 表示不限
+            sort_by(string): 排序字段，可选：last_seen_at（最近出现）/ first_seen_at（最早入库）/ price（价格）
+            limit(number): 返回数量上限，最大 20
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+        limit = max(1, min(20, limit))
+        data = await self._admin_service.list_items(
+            search=search,
+            sub_id=sub_id if sub_id > 0 else None,
+            min_price=min_price if min_price > 0 else None,
+            max_price=max_price if max_price > 0 else None,
+            sort_by=sort_by,
+            sort_order="desc",
+            limit=limit,
+        )
+        items = data.get("items") or []
+        slim_items = [
+            {
+                "item_id": it.get("item_id"),
+                "title": it.get("title"),
+                "price": it.get("price"),
+                "url": it.get("url"),
+                "last_seen_at": it.get("last_seen_at"),
+                "first_seen_at": it.get("first_seen_at"),
+            }
+            for it in items
+        ]
+        return _json.dumps(
+            {"items": slim_items, "total": data.get("total", len(slim_items))},
+            ensure_ascii=False,
+        )
+
+    @llm_tool(name="goofish_get_item_detail")
+    async def goofish_get_item_detail(
+        self,
+        event: AstrMessageEvent,
+        item_id: str,
+    ) -> str:
+        """查询某个闲鱼商品的详细信息，包括基本信息、价格历史（最近10条）和通知记录（最近5条）。
+
+        Args:
+            item_id(string): 商品 ID（可从 goofish_list_items 的结果中获取）
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+        try:
+            data = await self._admin_service.get_item_detail(item_id)
+        except KeyError as exc:
+            return f"商品不存在：{exc}"
+        # 截断价格历史和通知记录
+        item_data = {
+            "item": data.get("item"),
+            "price_history": (data.get("price_history") or [])[:10],
+            "notifications": (data.get("notifications") or [])[:5],
+            "subscription_count": len(data.get("subscriptions") or []),
+        }
+        result = _json.dumps(item_data, ensure_ascii=False)
+        return result[:3000] if len(result) > 3000 else result
+
+    @llm_tool(name="goofish_check_login")
+    async def goofish_check_login(self, event: AstrMessageEvent) -> str:
+        """检查闲鱼账号的当前登录状态。用于判断是否需要重新登录。"""
+        if err := self._llm_tools_guard():
+            return err
+        provider = self.provider
+        check_fn = getattr(provider, "check_login_state", None) if provider else None
+        if not callable(check_fn):
+            return "当前 provider 不支持登录状态检测。"
+        state = await check_fn(timeout_sec=15)
+        return {
+            "ok": "当前登录状态正常，无需操作。",
+            "auth_required": "登录态已过期，需要重新登录。请调用 goofish_start_login 发起登录流程。",
+            "captcha": "当前被验证码/风控拦截，需要手动处理后再重试。",
+            "error": "检测失败（浏览器未初始化或网络错误），请稍后重试。",
+        }.get(state, f"未知登录状态：{state}")
+
+    @llm_tool(name="goofish_start_login")
+    async def goofish_start_login(self, event: AstrMessageEvent) -> str:
+        """发起闲鱼登录流程。会优先尝试自动快速登录；若页面显示的是二维码且必须扫码，
+        则将二维码截图发送到当前对话，用户扫码后回复任意消息即可完成登录。
+
+        仅在 check_login 返回 auth_required 时才需要调用此工具。
+        """
+        if err := self._llm_tools_guard():
+            return err
+        if self.remote_auth_coordinator is None:
+            return "当前 provider 未启用登录恢复流程。"
+        try:
+            result = await self.remote_auth_coordinator.start_login(
+                umo=event.unified_msg_origin
+            )
+            if result == AUTO_LOGIN_DONE_SENTINEL:
+                return await self._resume_subs_after_auto_login()
+            return result or "登录流程已启动。"
+        except ProviderError as exc:
+            return f"启动登录失败：{exc.code.value} - {exc.message}"
+        except Exception as exc:
+            return f"启动登录失败：{exc}"
+
+    # ── Commands ──────────────────────────────────────────────────────────────
 
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):
@@ -1266,6 +1793,8 @@ class GoofishCatcherPlugin(Star):
             message = await self.remote_auth_coordinator.start_login(
                 umo=event.unified_msg_origin
             )
+            if message == AUTO_LOGIN_DONE_SENTINEL:
+                message = await self._resume_subs_after_auto_login()
             yield event.plain_result(message)
             return
         except ProviderError as exc:
