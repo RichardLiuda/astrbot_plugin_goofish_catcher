@@ -1,28 +1,35 @@
-# 技能总览：闲鱼插件 LLM 工具
+# 闲鱼插件技能总览
 
-本目录是插件全部 LLM 工具的操作指南，按功能域分组。
+本目录是插件全部操作技能的单一来源，供两层 agent 使用：
 
-## 快速决策树
+- **AstrBot 主 LLM agent**（用户直接对话的 AI）：决定调哪个 `@llm_tool`
+- **GofishBrowserAgent**（`app/browser_agent.py`）：决定每步执行哪个浏览器动作
+
+---
+
+## 快速决策树（主 LLM agent）
 
 ```
 用户想要...
-├── 搜索/查询行情        → goofish_search_live          → docs/skills/search.md
+├── 搜索/查询行情        → goofish_search_live          → skills/search.md
 ├── 收藏商品
-│   ├── 从搜索结果收藏   → 引用回复序号（无需工具）    → docs/skills/favorite.md
-│   └── 收藏指定链接     → goofish_browser_task         → docs/skills/agent.md
+│   ├── 从搜索结果收藏   → 引用回复序号（无需工具）    → skills/favorite.md
+│   └── 收藏指定链接     → goofish_browser_task         → skills/agent.md
 ├── 订阅/监控
-│   ├── 新建监控         → goofish_create_subscription  → docs/skills/subscribe.md
-│   ├── 管理已有订阅     → goofish_*_subscription       → docs/skills/subscribe.md
-│   └── 立即触发检查     → goofish_check_subscription   → docs/skills/subscribe.md
-├── 查看历史数据         → goofish_list_items            → docs/skills/data-and-status.md
-├── 查商品详情           → goofish_get_item_detail       → docs/skills/data-and-status.md
-├── 系统状态/登录        → goofish_get_overview /        → docs/skills/data-and-status.md
+│   ├── 新建监控         → goofish_create_subscription  → skills/subscribe.md
+│   ├── 管理已有订阅     → goofish_*_subscription       → skills/subscribe.md
+│   └── 立即触发检查     → goofish_check_subscription   → skills/subscribe.md
+├── 查看历史数据         → goofish_list_items            → skills/data-and-status.md
+├── 查商品详情           → goofish_get_item_detail       → skills/data-and-status.md
+├── 系统状态/登录        → goofish_get_overview /        → skills/data-and-status.md
 │                          goofish_check_login /
 │                          goofish_start_login
-└── 复杂浏览器操作       → goofish_browser_task          → docs/skills/agent.md
+└── 复杂浏览器操作       → goofish_browser_task          → skills/agent.md
 ```
 
-## 全部工具速查
+---
+
+## 全部工具速查（主 LLM agent）
 
 | 工具名 | 功能 | 详细文档 |
 |--------|------|----------|
@@ -41,9 +48,32 @@
 | `goofish_check_login` | 检查闲鱼会话状态 | [data-and-status.md](data-and-status.md) |
 | `goofish_start_login` | 启动登录流程 | [data-and-status.md](data-and-status.md) |
 
+---
+
+## 浏览器 Agent 动作速查（GofishBrowserAgent）
+
+完整文档见 [agent.md](agent.md)。
+
+| 动作 | 场景 |
+|------|------|
+| `navigate` | 第一步跳转目标 URL |
+| `extract_items` | 搜索页到达后立即提取商品，无需 LLM 逐条解析 |
+| `click` | 点击收藏按钮、链接等 |
+| `scroll` | 触发懒加载 |
+| `wait` | 等待动态内容 |
+| `extract` | 从 AX 树提取特定信息（extract_items 不适用时） |
+| `done` | 返回结果 |
+| `fail` | 遇到登录墙/验证码时终止 |
+
+**标准搜索（3 步）**：`navigate` → `extract_items` → `done`  
+**标准收藏（3 步）**：`navigate` 详情页 → `click "收藏"` → `done`
+
+---
+
 ## 关键规则
 
-1. **搜索用 `goofish_search_live`**，不用 `goofish_browser_task`
-2. **搜索结果格式支持回复收藏**：`goofish_search_live` 发出的列表，用户引用后回复序号即可触发收藏
-3. **会话过期统一处理**：所有工具遇到 `AUTH_REQUIRED` → 提示用户 `/闲鱼 登录`
-4. **数据库查询 vs 实时搜索**：`goofish_list_items` 查本地缓存，`goofish_search_live` 实时爬取
+1. **搜索用 `goofish_search_live`**，不用 `goofish_browser_task`（慢 10 倍）
+2. **搜索结果支持引用回复收藏**：发出后用户回复序号即触发，无需工具
+3. **会话过期统一处理**：所有工具遇到 `AUTH_REQUIRED` → 提示 `/闲鱼 登录`
+4. **复杂页面操作**（详情页/收藏指定链接）→ `goofish_browser_task`
+5. **浏览器 Agent 内**：搜索页到达后首选 `extract_items`，不要用 LLM 读 AX 树逐条解析商品
