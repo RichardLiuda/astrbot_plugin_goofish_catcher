@@ -2,6 +2,31 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [3.0.0] - 2026-06-19
+
+> **⚠️ 升级注意：如果你使用 `remote_rest` 模式，请务必同时更新远端 Worker 代码至同版本。** 本版本重构了浏览器 Agent 相关接口（新增 `AgentRequest`），旧版 Worker 与新版插件不兼容。
+
+### Added
+
+- **远程 Agent 执行**：远端 Worker 新增 `AgentRequest` 接口，支持将 `goofish_browser_task` 的 Agent 任务完整卸载到 Worker 机器；远程模式下本地插件进程不再需要 Playwright。
+- **浏览器 Agent 强化**：新增 `extract_items` 快速提取商品列表动作；Agent 执行进度实时推流至对话界面，LLM 可接收执行结果并继续推理；向 Agent 系统提示注入已验证的抓取脚本，提升 ReAct 循环效率与稳定性。
+- **`goofish_search_live` 工具**：新增 LLM 可调用的快速脚本化搜索工具，支持引用回复序号收藏；定位为日常搜索的首选工具，区别于面向复杂页面任务的 `goofish_browser_task`。
+- **快速进入自动点击**：二维码扫码成功后，自动检测并点击「快速进入」按钮，完成认证恢复，减少需手动介入的情况。
+- **aiocqhttp 合并转发消息**：使用 aiocqhttp 渠道时，`/闲鱼 查询` 和 `goofish_search_live` 的商品列表以合并转发消息形式发出，防止刷屏；引用转发消息回复序号仍可触发收藏（基于会话缓存匹配）。
+- **Cloudflare Access 配置优化**：「远程 Header」从逐行 `Key: Value` 文本框拆分为独立的 `CF-Access-Client-Id` / `CF-Access-Client-Secret` 输入字段，更易填写；旧格式仍向下兼容。
+- **订阅操作人工确认**：`goofish_create_subscription`、`goofish_delete_subscription`、`goofish_update_subscription` 工具要求 LLM 在执行前先向用户确认，避免误操作。
+- **`skills/` 文档目录**：新增覆盖全部 LLM 工具的详细使用指南（订阅规则、搜索工具、Agent 使用场景），作为 Agent 推理的唯一参考来源。
+
+### Changed
+
+- 插件设置页精简，Agent 相关开关合并为单一「启用浏览器 Agent」选项，减少配置项数量。
+- 浏览器 Agent 定位明确为"处理无法用固定脚本完成的不规则任务"的兜底工具，`skills/` 说明中已更新适用场景划分。
+
+### Fixed
+
+- 修复 Playwright >=1.41 兼容性问题。
+- `goofish_search_live` 的 `pages` 参数类型从 `integer` 改为 `number`，修复部分 LLM 传参时的类型不匹配。
+
 ## [2.3.0] - 2026-06-16
 
 ### Added
