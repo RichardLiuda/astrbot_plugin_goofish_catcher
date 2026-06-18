@@ -28,11 +28,33 @@
 - `0` = 清除该限制（price_min/price_max 设为 NULL）
 - 不传 keyword/interval_sec/pages 时保持原值
 
+## 人工确认规则
+
+以下三个工具在调用前**必须先向用户确认**，待用户明确回复"确认"/"好"/"是"等肯定词后再执行：
+
+| 工具 | 原因 |
+| ---- | ---- |
+| `goofish_create_subscription` | 创建持久化监控任务，会消耗系统资源 |
+| `goofish_delete_subscription` | 不可逆，同时删除该订阅下所有历史商品记录 |
+| `goofish_update_subscription` | 变更现有订阅配置 |
+
+确认格式示例：
+```
+即将为您创建订阅：关键词「徕卡M11」，价格上限 ¥5000，每 5 分钟检查一次。确认创建吗？
+```
+```
+即将删除订阅 #7（徕卡M11），同时清除其所有历史记录，此操作不可撤销。确认删除吗？
+```
+
+`goofish_pause_subscription` / `goofish_resume_subscription` / `goofish_check_subscription` 无需确认（轻量可逆或不改变数据）。
+
 ## 典型流程
 
 **新建监控**
 ```
 用户：帮我监控闲鱼上 5000 以内的徕卡M11，有新品就通知我
+LLM：即将创建订阅：关键词「徕卡M11」，价格 ≤¥5000，每 5 分钟检查一次。确认创建吗？
+用户：确认
 LLM：goofish_create_subscription(keyword="徕卡M11", price_max=5000)
 回复：已创建订阅 #7，关键词：徕卡M11，价格 ≤¥5000，每 5 分钟检查一次
 ```
@@ -41,7 +63,9 @@ LLM：goofish_create_subscription(keyword="徕卡M11", price_max=5000)
 ```
 用户：把徕卡M11 的监控预算改到 8000
 LLM：goofish_list_subscriptions(keyword="徕卡M11")  → 得到 sub_id=7
-     goofish_update_subscription(sub_id=7, price_max=8000)
+     即将修改订阅 #7：价格上限 ¥5000 → ¥8000。确认修改吗？
+用户：好的
+LLM：goofish_update_subscription(sub_id=7, price_max=8000)
 ```
 
 **临时暂停**

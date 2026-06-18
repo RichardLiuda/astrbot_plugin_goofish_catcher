@@ -45,19 +45,20 @@ _✨ 闲鱼关键词监控与商品好价推荐推送 ✨_
 - 当前仍然强制使用有头浏览器，不支持稳定的无头抓取。
 - 不提供验证码自动绕过；当前方案是“检测 CAPTCHA 或登录态失效后自动拉起补登录态流程，由你扫码继续”。
 
-## 2.2.2 当前能力
+## 2.3.0 当前能力
 
 - 支持本地模式 `playwright_local`
 - 支持远程模式 `remote_rest`
 - 支持订阅、退订、暂停、恢复、立即检查、查询、明细、状态
 - 支持后台轮询、上新检测、降价检测、去重通知
 - 支持 LLM 初筛与推荐，失败时自动回退启发式逻辑
-- 支持为单条订阅设置“推荐最高价”阈值，超过阈值的商品不会进入最终推荐
-- 支持对单条推荐消息直接“引用回复序号收藏”，可回复 `1`、`1 3`、`1,2`
+- 支持为单条订阅设置”推荐最高价”阈值，超过阈值的商品不会进入最终推荐
+- 支持对单条推荐消息直接”引用回复序号收藏”，可回复 `1`、`1 3`、`1,2`
 - 支持远端 worker 健康检查与统一错误码
 - 支持统一补登录态：二维码截图下发、扫码后回复任意消息继续、自动恢复暂停订阅
-- 支持本地与远端统一接管扫码成功后的活跃浏览器会话，减少“扫码后立刻掉登录”的问题
+- 支持本地与远端统一接管扫码成功后的活跃浏览器会话，减少”扫码后立刻掉登录”的问题
 - 支持 WebUI 管理与运行状态查看
+- **支持浏览器 Agent**：LLM 可直接调用 `goofish_browser_task` 工具，用 Chromium 执行任意复杂页面任务；远程模式下 Agent 执行卸载到远端 Worker，本地插件进程不再需要 playwright
 
 ## 先看哪份文档
 
@@ -118,6 +119,60 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 ```
 
 如果你需要 Cloudflare Access、Tunnel、worker 环境变量优先级等完整说明，直接看 [REMOTE_SETUP.md](./REMOTE_SETUP.md)。
+
+## 浏览器 Agent
+
+`goofish_browser_task` 是暴露给 LLM 的工具，让大模型可以驱动一个真实 Chromium 完成无法用固定脚本搞定的任务，比如查看卖家在售列表、判断商品图片瑕疵、多步页面交互等。
+
+### 启用条件
+
+- 插件配置中 `llm_agent_enabled = true`（默认开启）
+- AstrBot 中已配置好可用的 LLM Provider
+
+### 本地模式 Agent
+
+无需额外配置，满足启用条件即可。Agent 会在插件进程内启动独立 Chromium，登录态自动从本地 `storage_state.json` 继承。
+
+可选调整（WebUI 或 `admin_runtime_config.json`）：
+
+| 配置项 | 说明 | 默认 |
+| --- | --- | --- |
+| `llm_agent_headless` | `false` = 显示浏览器窗口，便于本地调试 | `false` |
+| `llm_agent_max_concurrent` | 同时运行的最大 Agent 数；每个 Agent 独占一个 Chromium 进程 | `3` |
+| `llm_agent_step_timeout_sec` | 每步 LLM 推理的最大等待时间（秒） | `60` |
+| `llm_agent_provider_id` | 指定用于 Agent 推理的 Provider；留空时回退到推荐分析模型 | 空 |
+
+### 远程模式 Agent
+
+远程模式下，Agent 的 Chromium 运行在 Worker 机器上，插件本地不需要 playwright。Worker 需要额外配置一个 OpenAI 兼容的 LLM API：
+
+在 `worker_config.json` 中添加：
+
+```json
+{
+  "llm_api_key": "sk-...",
+  "llm_base_url": "https://api.openai.com/v1",
+  "llm_model": "gpt-4o-mini",
+  "llm_step_timeout_sec": 60,
+  "agent_enabled": true,
+  "agent_headless": true,
+  "agent_max_concurrent": 3
+}
+```
+
+也可以用环境变量覆盖：
+
+| 环境变量 | 对应字段 | 说明 |
+| --- | --- | --- |
+| `GOOFISH_WORKER_LLM_API_KEY` | `llm_api_key` | 必填；留空则 Worker 侧 Agent 不启用 |
+| `GOOFISH_WORKER_LLM_BASE_URL` | `llm_base_url` | 默认 `https://api.openai.com/v1` |
+| `GOOFISH_WORKER_LLM_MODEL` | `llm_model` | 默认 `gpt-4o-mini` |
+| `GOOFISH_WORKER_LLM_STEP_TIMEOUT_SEC` | `llm_step_timeout_sec` | 默认 `60` |
+| `GOOFISH_WORKER_AGENT_ENABLED` | `agent_enabled` | 默认 `true` |
+| `GOOFISH_WORKER_AGENT_HEADLESS` | `agent_headless` | 默认 `true` |
+| `GOOFISH_WORKER_AGENT_MAX_CONCURRENT` | `agent_max_concurrent` | 默认 `3` |
+
+> **注意**：Worker 的 LLM 与 AstrBot 侧的 LLM Provider 完全独立。Worker 直接调用 OpenAI 兼容 API，不经过 AstrBot。
 
 ## 统一补登录态流程
 

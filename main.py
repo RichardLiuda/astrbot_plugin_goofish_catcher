@@ -9,6 +9,7 @@ from typing import Any
 
 from astrbot.api import AstrBotConfig, logger, llm_tool
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import Node, Nodes, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
@@ -43,6 +44,8 @@ from .app.reply_favorite import (
     parse_reply_selection,
     parse_reply_target,
     recommendation_reply_hint,
+    ReplyFavoriteItem,
+    ReplyFavoriteTarget,
 )
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator, AUTH_PAUSE_REASONS, AUTO_LOGIN_DONE_SENTINEL
 from .app.recommender import GoofishRecommender
@@ -85,6 +88,8 @@ class GoofishCatcherPlugin(Star):
         self._admin_webui = AdminWebuiServer(self)
         self._start_lock = asyncio.Lock()
         self._reload_lock = asyncio.Lock()
+        # Cache last search/query results per umo for aiocqhttp forwarded-message reply-to-favorite
+        self._forward_search_cache: dict[str, ReplyFavoriteTarget] = {}
         # Heartbeat: periodic login-state probe for playwright_local mode.
         self._heartbeat_task: asyncio.Task | None = None
         # Interval in seconds; 0 means disabled.
@@ -814,11 +819,19 @@ class GoofishCatcherPlugin(Star):
 
         target = parse_reply_target(reply_text)
         if target is None:
-            logger.debug(
-                "[goofish_catcher] reply favorite skipped: quoted text did not match recommendation format, preview=%r",
-                reply_text[:200],
-            )
-            return None
+            cached = self._forward_search_cache.get(event.unified_msg_origin)
+            if cached is not None:
+                logger.debug(
+                    "[goofish_catcher] reply favorite: quoted text did not match, falling back to forwarded-message cache for umo=%s",
+                    event.unified_msg_origin,
+                )
+                target = cached
+            else:
+                logger.debug(
+                    "[goofish_catcher] reply favorite skipped: quoted text did not match recommendation format, preview=%r",
+                    reply_text[:200],
+                )
+                return None
         logger.info(
             "[goofish_catcher] matched reply favorite request: source=%s selections=%s",
             target.source,
@@ -1116,20 +1129,52 @@ class GoofishCatcherPlugin(Star):
                 f"价格过滤后 0 件（条件：{'≥¥' + str(int(min_price)) if min_price else ''}{'≤¥' + str(int(max_price)) if max_price else ''}）。"
             )
 
-        rendered = _render_live_search_results(
-            keyword=keyword,
-            items=filtered[:20],
-            raw_total=len(items),
-            min_price=min_price or None,
-            max_price=max_price or None,
-        )
-        try:
-            await self.context.send_message(
-                event.unified_msg_origin,
-                MessageChain().message(rendered),
+        items_to_show = filtered[:20]
+        min_price_val = min_price or None
+        max_price_val = max_price or None
+
+        if event.get_platform_name() == "aiocqhttp":
+            nodes = _build_search_result_nodes(
+                keyword=keyword,
+                items=items_to_show,
+                raw_total=len(items),
+                min_price=min_price_val,
+                max_price=max_price_val,
             )
-        except Exception as exc:
-            logger.warning("[goofish_catcher] goofish_search_live send failed: %s", exc)
+            try:
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain([nodes]),
+                )
+            except Exception as exc:
+                logger.warning("[goofish_catcher] goofish_search_live send forward failed: %s", exc)
+            self._forward_search_cache[event.unified_msg_origin] = ReplyFavoriteTarget(
+                source="recommendation",
+                items=[
+                    ReplyFavoriteItem(
+                        index=idx,
+                        title=item.title,
+                        url=item.url,
+                        item_id=item.item_id,
+                    )
+                    for idx, item in enumerate(items_to_show, start=1)
+                ],
+            )
+        else:
+            rendered = _render_live_search_results(
+                keyword=keyword,
+                items=items_to_show,
+                raw_total=len(items),
+                min_price=min_price_val,
+                max_price=max_price_val,
+            )
+            try:
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain().message(rendered),
+                )
+            except Exception as exc:
+                logger.warning("[goofish_catcher] goofish_search_live send failed: %s", exc)
 
         shown = min(len(filtered), 20)
         return (
@@ -1843,8 +1888,8 @@ class GoofishCatcherPlugin(Star):
                 candidates=candidates,
                 top_k=self.settings.llm_top_k,
             )
-            yield event.plain_result(
-                _render_query_recommendation_preview(
+            if event.get_platform_name() == "aiocqhttp":
+                nodes = _build_query_result_nodes(
                     recommendation=recommendation,
                     page_count=page_count,
                     raw_total=len(raw_items),
@@ -1853,7 +1898,38 @@ class GoofishCatcherPlugin(Star):
                     price_min=price_min,
                     price_max=price_max,
                 )
-            )
+                try:
+                    await self.context.send_message(
+                        event.unified_msg_origin,
+                        MessageChain([nodes]),
+                    )
+                except Exception as exc:
+                    logger.warning("[goofish_catcher] query send forward failed: %s", exc)
+                if recommendation.top:
+                    self._forward_search_cache[event.unified_msg_origin] = ReplyFavoriteTarget(
+                        source="recommendation",
+                        items=[
+                            ReplyFavoriteItem(
+                                index=idx,
+                                title=item.title,
+                                url=item.url,
+                                item_id=item.item_id,
+                            )
+                            for idx, item in enumerate(recommendation.top, start=1)
+                        ],
+                    )
+            else:
+                yield event.plain_result(
+                    _render_query_recommendation_preview(
+                        recommendation=recommendation,
+                        page_count=page_count,
+                        raw_total=len(raw_items),
+                        filtered_total=len(filtered_items),
+                        filter_mode=filter_mode,
+                        price_min=price_min,
+                        price_max=price_max,
+                    )
+                )
             return
         except asyncio.TimeoutError:
             yield event.plain_result(f"查询超时（>{timeout_sec}s），请稍后重试。")
@@ -2153,6 +2229,73 @@ def _render_live_search_results(
         lines.append(f"   链接：{item.url}")
     lines.append(recommendation_reply_hint())
     return "\n".join(lines)
+
+
+def _build_search_result_nodes(
+    keyword: str,
+    items: list[NormalizedItem],
+    raw_total: int,
+    min_price: float | None = None,
+    max_price: float | None = None,
+) -> Nodes:
+    """Build a Nodes (merged-forward) message for aiocqhttp search results."""
+    price_parts: list[str] = []
+    if min_price:
+        price_parts.append(f"≥¥{min_price:.0f}")
+    if max_price:
+        price_parts.append(f"≤¥{max_price:.0f}")
+    price_str = f" | 价格：{' '.join(price_parts)}" if price_parts else ""
+    header = f"【查询推荐】关键词：{keyword}\n实时搜索 | 共 {raw_total} 件 → 展示 {len(items)} 件{price_str}"
+    node_list = [Node([Plain(header)])]
+    for idx, item in enumerate(items, start=1):
+        text = f"{idx}. {item.title}\n价格：¥{item.price:.2f}\n链接：{item.url}"
+        node_list.append(Node([Plain(text)]))
+    return Nodes(node_list)
+
+
+def _build_query_result_nodes(
+    recommendation: RecommendationResult,
+    *,
+    page_count: int,
+    raw_total: int,
+    filtered_total: int,
+    filter_mode: str,
+    price_min: float | None = None,
+    price_max: float | None = None,
+) -> Nodes:
+    """Build a Nodes (merged-forward) message for aiocqhttp query recommendation results."""
+    header_lines = [
+        f"【查询推荐】关键词：{recommendation.keyword}",
+        f"抓取页数：{page_count} | 原始结果：{raw_total} | 初筛后：{filtered_total}",
+        f"初筛模式：{filter_mode}",
+    ]
+    if price_min is not None or price_max is not None:
+        parts = []
+        if price_min is not None:
+            parts.append(f"≥￥{price_min:.0f}")
+        if price_max is not None:
+            parts.append(f"≤￥{price_max:.0f}")
+        header_lines.append(f"价格区间：{' '.join(parts)}")
+    header_lines += [
+        f"候选数：{recommendation.total_candidates} | 推荐数：{len(recommendation.top)}",
+        f"分析方式：{'LLM' if recommendation.used_llm else 'Heuristic'}",
+        f"总体建议：{recommendation.summary}",
+    ]
+    if recommendation.fallback_reason:
+        header_lines.append(f"回退原因：{recommendation.fallback_reason}")
+    if not recommendation.top:
+        header_lines.append("未产出可推荐条目，请尝试更精确的关键词后重试。")
+    node_list = [Node([Plain("\n".join(header_lines))])]
+    for idx, item in enumerate(recommendation.top, start=1):
+        text = (
+            f"{idx}. [{item.score:.1f}] {item.title}\n"
+            f"价格：￥{item.price:.2f}\n"
+            f"理由：{item.reason}\n"
+            f"风险：{item.risk}\n"
+            f"链接：{item.url}"
+        )
+        node_list.append(Node([Plain(text)]))
+    return Nodes(node_list)
 
 
 def _render_recommendation_preview(recommendation: RecommendationResult) -> str:

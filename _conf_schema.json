@@ -16,12 +16,22 @@
     "default": ""
   },
   "remote_headers": {
-    "type": "list",
+    "type": "object",
     "description": "远程 Header",
-    "hint": "每行一个 `Header: Value`；Cloudflare Access 常用两行：`CF-Access-Client-Id: ...` 和 `CF-Access-Client-Secret: ...`",
-    "default": [],
+    "hint": "Cloudflare Access 认证填写下方两项即可；如需其他 Header 请使用 `remote_headers_json`",
     "items": {
-      "type": "string"
+      "CF-Access-Client-Id": {
+        "type": "string",
+        "description": "CF-Access-Client-Id",
+        "hint": "Cloudflare Access Service Token 的 Client ID",
+        "default": ""
+      },
+      "CF-Access-Client-Secret": {
+        "type": "string",
+        "description": "CF-Access-Client-Secret",
+        "hint": "Cloudflare Access Service Token 的 Client Secret",
+        "default": ""
+      }
     }
   },
   "remote_api_key": {

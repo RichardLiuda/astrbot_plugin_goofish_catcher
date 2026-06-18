@@ -86,19 +86,30 @@ def _normalize_remote_headers(
     if raw_json:
         return raw_json
 
-    raw_list = raw.get("remote_headers")
-    if raw_list is None:
+    raw_val = raw.get("remote_headers")
+    if raw_val is None:
         return None
-    if not isinstance(raw_list, list):
+
+    # New dict format: {"Header-Name": "value", ...}
+    if isinstance(raw_val, dict):
+        headers = {
+            str(k).strip(): str(v).strip()
+            for k, v in raw_val.items()
+            if str(k).strip() and str(v).strip()
+        }
+        return json.dumps(headers, ensure_ascii=False) if headers else None
+
+    # Legacy list format: ["Header-Name: value", ...]
+    if not isinstance(raw_val, list):
         logger.warning(
-            "[%s] remote_headers should be a list, got %s",
+            "[%s] remote_headers should be a dict or list, got %s",
             plugin_name,
-            type(raw_list).__name__,
+            type(raw_val).__name__,
         )
         return None
 
     headers: dict[str, str] = {}
-    for item in raw_list:
+    for item in raw_val:
         text = str(item).strip()
         if not text:
             continue
