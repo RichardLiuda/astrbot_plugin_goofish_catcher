@@ -310,12 +310,33 @@ class AdminWebuiServer:
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(
+                "[goofish_catcher] admin webui crashed: %s",
+                exc,
+                exc_info=exc,
+            )
+        else:
+            logger.warning("[goofish_catcher] admin webui task exited unexpectedly (no error)")
+
     async def start(self) -> None:
         if self.running:
             return
         if not self.plugin.settings.admin_webui_enabled:
             return
-        self._app = create_admin_app(self.plugin)
+        try:
+            self._app = create_admin_app(self.plugin)
+        except Exception as exc:
+            logger.error(
+                "[goofish_catcher] admin webui failed to create app: %s",
+                exc,
+                exc_info=True,
+            )
+            return
         config = uvicorn.Config(
             self._app,
             host=self.plugin.settings.admin_webui_host,
@@ -325,11 +346,27 @@ class AdminWebuiServer:
         )
         self._server = uvicorn.Server(config)
         self._task = asyncio.create_task(self._server.serve(), name="goofish-admin-webui")
+        self._task.add_done_callback(self._on_task_done)
         for _ in range(100):
             if self._server.started:
                 break
             if self._task.done():
-                break
+                # Task exited before server reported started — log the cause
+                if not self._task.cancelled():
+                    exc = self._task.exception()
+                    if exc:
+                        logger.error(
+                            "[goofish_catcher] admin webui failed to start: %s",
+                            exc,
+                            exc_info=exc,
+                        )
+                    else:
+                        logger.error(
+                            "[goofish_catcher] admin webui task exited during startup with no error"
+                            " (port=%s may already be in use)",
+                            self.plugin.settings.admin_webui_port,
+                        )
+                return
             await asyncio.sleep(0.05)
         logger.info(
             "[goofish_catcher] admin webui listening on http://%s:%s",
@@ -341,6 +378,7 @@ class AdminWebuiServer:
         if self._server is not None:
             self._server.should_exit = True
         if self._task is not None:
+            self._task.remove_done_callback(self._on_task_done)
             try:
                 await self._task
             except Exception as exc:  # pragma: no cover - defensive cleanup

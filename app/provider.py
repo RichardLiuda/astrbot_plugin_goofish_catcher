@@ -17,6 +17,8 @@ class SearchProvider(Protocol):
         keyword: str,
         pages: int,
         timeout_sec: int,
+        price_lower: float | None = None,
+        price_upper: float | None = None,
     ) -> list[NormalizedItem]: ...
 
     async def favorite_item(

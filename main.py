@@ -683,6 +683,8 @@ class GoofishCatcherPlugin(Star):
         *,
         keyword: str,
         pages: int,
+        price_lower: float | None = None,
+        price_upper: float | None = None,
     ) -> list[NormalizedItem]:
         if self.provider is None:
             raise RuntimeError("抓取组件不可用")
@@ -691,6 +693,8 @@ class GoofishCatcherPlugin(Star):
             keyword=keyword,
             pages=pages,
             timeout_sec=self.settings.fetch_timeout_sec,
+            price_lower=price_lower,
+            price_upper=price_upper,
         )
 
     def _search_operation_timeout_sec(self) -> int:
@@ -1107,7 +1111,12 @@ class GoofishCatcherPlugin(Star):
         max_price = float(max_price) if max_price else 0.0
 
         try:
-            items = await self._search_with_captcha_retry(keyword=keyword, pages=pages)
+            items = await self._search_with_captcha_retry(
+                keyword=keyword,
+                pages=pages,
+                price_lower=min_price if min_price > 0 else None,
+                price_upper=max_price if max_price > 0 else None,
+            )
         except ProviderError as exc:
             if exc.code == ProviderErrorCode.AUTH_REQUIRED:
                 return "闲鱼会话已过期，请先登录：/闲鱼 登录"
@@ -1863,6 +1872,8 @@ class GoofishCatcherPlugin(Star):
                 self._search_with_captcha_retry(
                     keyword=keyword_text,
                     pages=page_count,
+                    price_lower=price_min,
+                    price_upper=price_max,
                 ),
                 timeout=timeout_sec,
             )

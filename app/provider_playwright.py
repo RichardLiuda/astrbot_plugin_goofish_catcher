@@ -320,6 +320,8 @@ class PlaywrightSearchProvider:
         keyword: str,
         pages: int,
         timeout_sec: int,
+        price_lower: float | None = None,
+        price_upper: float | None = None,
     ) -> list[NormalizedItem]:
         async with self._operation_lock:
             browser = None
@@ -335,6 +337,8 @@ class PlaywrightSearchProvider:
                     keyword=keyword,
                     page_index=page_index,
                     timeout_ms=timeout_ms,
+                    price_lower=price_lower,
+                    price_upper=price_upper,
                 )
                 for item in page_items:
                     unique[item.item_id] = item
@@ -545,6 +549,8 @@ class PlaywrightSearchProvider:
         keyword: str,
         page_index: int,
         timeout_ms: int,
+        price_lower: float | None = None,
+        price_upper: float | None = None,
     ) -> list[NormalizedItem]:
         del browser
         context, should_close_context = await self._open_operation_context()
@@ -605,7 +611,11 @@ class PlaywrightSearchProvider:
                 captured_payloads.append(payload)
 
         page.on("response", on_response)
-        search_url = self._build_search_url(keyword=keyword)
+        search_url = self._build_search_url(
+            keyword=keyword,
+            price_lower=price_lower,
+            price_upper=price_upper,
+        )
 
         try:
             await page.goto(
@@ -857,8 +867,19 @@ class PlaywrightSearchProvider:
                 except Exception:
                     pass
 
-    def _build_search_url(self, *, keyword: str) -> str:
-        return f"{self.BASE_URL}/search?q={quote(keyword)}"
+    def _build_search_url(
+        self,
+        *,
+        keyword: str,
+        price_lower: float | None = None,
+        price_upper: float | None = None,
+    ) -> str:
+        url = f"{self.BASE_URL}/search?q={quote(keyword)}"
+        if price_lower is not None and price_lower > 0:
+            url += f"&priceLower={int(price_lower)}"
+        if price_upper is not None and price_upper > 0:
+            url += f"&priceUpper={int(price_upper)}"
+        return url
 
     async def _navigate_to_page_index(
         self,

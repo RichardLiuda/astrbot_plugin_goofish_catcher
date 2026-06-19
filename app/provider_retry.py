@@ -32,6 +32,8 @@ async def search_with_captcha_retry(
     timeout_sec: int,
     captcha_retries: int = DEFAULT_CAPTCHA_RETRIES,
     retry_delay_sec: float = DEFAULT_CAPTCHA_RETRY_DELAY_SEC,
+    price_lower: float | None = None,
+    price_upper: float | None = None,
 ) -> list:
     last_exc: ProviderError | None = None
     total_attempts = max(0, captcha_retries) + 1
@@ -42,6 +44,8 @@ async def search_with_captcha_retry(
                 keyword=keyword,
                 pages=pages,
                 timeout_sec=timeout_sec,
+                price_lower=price_lower,
+                price_upper=price_upper,
             )
         except ProviderError as exc:
             if exc.code != ProviderErrorCode.CAPTCHA or attempt >= total_attempts - 1:

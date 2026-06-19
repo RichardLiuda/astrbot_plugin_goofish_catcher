@@ -123,6 +123,8 @@ class RemoteSearchProvider:
         keyword: str,
         pages: int,
         timeout_sec: int,
+        price_lower: float | None = None,
+        price_upper: float | None = None,
     ) -> list[NormalizedItem]:
         # Give the remote worker enough time to finish its own Playwright timeout
         # and send back a structured AUTH_REQUIRED/CAPTCHA/TIMEOUT response.
@@ -134,6 +136,10 @@ class RemoteSearchProvider:
             "sort": "time_desc",
             "use_login": True,
         }
+        if price_lower is not None and price_lower > 0:
+            payload["price_lower"] = price_lower
+        if price_upper is not None and price_upper > 0:
+            payload["price_upper"] = price_upper
         response, data = await self._request_json(
             method="POST",
             path="/v1/search",

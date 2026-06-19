@@ -2,6 +2,13 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [3.0.1] - 2026-06-20
+
+### Fixed
+
+- `goofish_search_live` 和 `/闲鱼 查询` 的价格过滤现在通过 URL 参数（`priceLower`/`priceUpper`）传递给闲鱼服务器端，解决了低价配件占据搜索前排导致价格过滤后 0 结果的问题。
+- Admin WebUI 启动失败时补充错误日志，方便排查端口占用等问题。
+
 ## [3.0.0] - 2026-06-19
 
 > **⚠️ 升级注意：如果你使用 `remote_rest` 模式，请务必同时更新远端 Worker 代码至同版本。** 本版本重构了浏览器 Agent 相关接口（新增 `AgentRequest`），旧版 Worker 与新版插件不兼容。
