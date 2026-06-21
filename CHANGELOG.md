@@ -2,6 +2,12 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [3.0.2] - 2026-06-22
+
+### Fixed
+
+- Admin WebUI 配置页新增"后台监听地址"（`admin_webui_host`）选项，Docker 部署时可在 UI 中直接改为 `0.0.0.0`，无需手动编辑配置文件；修复默认绑定 `127.0.0.1` 导致容器外反向代理 502 的问题。
+
 ## [3.0.1] - 2026-06-20
 
 ### Fixed

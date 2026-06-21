@@ -78,6 +78,12 @@
     "hint": "开启后在插件进程内启动 WebUI，可在浏览器中配置超时、价格阈值等高级设置",
     "default": false
   },
+  "admin_webui_host": {
+    "type": "string",
+    "description": "后台监听地址",
+    "hint": "默认 `127.0.0.1` 仅本机可访问；Docker 部署时改为 `0.0.0.0` 以允许容器外访问",
+    "default": "127.0.0.1"
+  },
   "admin_webui_port": {
     "type": "int",
     "description": "后台端口",
