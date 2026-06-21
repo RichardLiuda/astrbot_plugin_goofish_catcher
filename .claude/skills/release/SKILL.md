@@ -43,6 +43,14 @@ git diff HEAD       # 确认未提交改动
 
 日期用当天日期（`date +%Y-%m-%d`）。改动内容从对话上下文或 `git log` 提炼，不要照抄 commit message。
 
+**Worker 兼容性行**：CHANGELOG 顶部有一行：
+
+```markdown
+当前插件版本（vX.Y.Z）需要 Worker **≥ vA.B.C**。
+```
+
+每次发版都要把括号里的插件版本号更新为新版本号。**只有**本次改动涉及 Worker 接口变更（breaking change）时，才同时更新 `≥ vA.B.C` 部分。
+
 ### 4. 更新 metadata.yaml
 
 将 `version: vX.Y.Z` 改为新版本号。
