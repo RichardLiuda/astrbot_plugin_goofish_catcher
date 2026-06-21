@@ -2,6 +2,14 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## 远程 Worker 兼容性
+
+当前插件版本（v3.0.2）需要 Worker **≥ v3.0.0**。
+
+> Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
+
+---
+
 ## [3.0.2] - 2026-06-22
 
 ### Fixed
