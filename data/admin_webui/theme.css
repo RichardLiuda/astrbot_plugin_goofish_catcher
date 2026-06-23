@@ -700,6 +700,14 @@ a {
   margin-bottom: 4px;
 }
 
+/* 紧凑过滤工具栏行 */
+.filter-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .chip-row {
   display: flex;
   flex-wrap: wrap;

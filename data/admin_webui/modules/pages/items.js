@@ -16,6 +16,7 @@ import {
 	TableContainer,
 	TableHead,
 	TableRow,
+	TextField,
 	Tooltip,
 	Typography,
 	html,
@@ -35,8 +36,41 @@ import {
 	shouldHideItemByTerms,
 	statusChipProps
 } from '../utils.js'
-import { AppTextField, EmptyState, PageHeader, SurfaceCard } from '../components.js'
+import { EmptyState, PageHeader, SurfaceCard } from '../components.js'
 import { ItemDetailContent, ItemDetailDrawer } from './items-detail-drawer.js'
+
+// ── 公用 TextField sx：与 SurfaceCard 背景配合的 outlined 小尺寸输入 ─────────
+const FILTER_SX = {
+	minWidth: 0,
+	'& .MuiOutlinedInput-root': {
+		borderRadius: '10px',
+		fontSize: '0.875rem',
+	},
+	'& .MuiInputBase-input': {
+		py: '7px',
+		px: '10px',
+	},
+	'& .MuiSelect-select': {
+		py: '7px !important',
+		px: '10px !important',
+		pr: '28px !important',
+	},
+}
+
+// ── 分隔线 ──────────────────────────────────────────────────────────────────
+function FilterDivider() {
+	return html`
+		<${Box}
+			sx=${{
+				width: '1px',
+				height: 28,
+				bgcolor: 'divider',
+				flexShrink: 0,
+				display: { xs: 'none', md: 'block' }
+			}}
+		/>
+	`
+}
 
 // ── 删除确认对话框 ──────────────────────────────────────────────────────────
 function DeleteConfirmDialog({ open, count, onConfirm, onCancel, loading }) {
@@ -364,137 +398,132 @@ export function ItemsPage({ notify }) {
 				description="查看、搜索、过滤已抓取的商品，支持多选批量删除。"
 			/>
 
-			${/* ── 筛选卡片 ── */ ''}
-			<${SurfaceCard}
-				title="搜索与过滤"
-				description=${`当前显示 ${visibleTotal} / ${total} 条${
-					filters.view === 'by_subscription' ? '（按订阅分类）' : '（聚合去重）'
-				}${hiddenByBlockedTerms ? `，屏蔽词已隐藏 ${hiddenByBlockedTerms} 条` : ''}`}
-				action=${hasCustomFilters
-					? html`
-							<${Button}
-								variant="outlined"
-								size="small"
-								onClick=${() =>
-									setFilters({
-										search: '',
-										subId: '',
-										view: 'flat',
-										blockedTerms: '',
-										minPrice: '',
-										maxPrice: '',
-										sortBy: 'last_seen_at',
-										sortOrder: 'desc'
-									})}
-							>
-								清除筛选
-							<//>
-						`
-					: null}
-			>
-				<div className="items-filter-layout">
-					<div className="items-filter-section">
-						<div className="items-filter-section-title">搜索 / 屏蔽</div>
-						<div className="filter-grid items-filter-grid">
-							<${AppTextField}
-								label="搜索商品标题或商品 ID"
-								value=${filters.search}
-								onChange=${(e) =>
-									setFilters((c) => ({ ...c, search: e.target.value }))}
-								hint="支持标题关键词、商品 ID；在「按订阅」视图下也可匹配订阅关键词。"
-								wrapperSx=${{ gridColumn: { xs: 'auto', xl: 'span 2' } }}
-							/>
-							<${AppTextField}
-								label="屏蔽词（不删除，仅隐藏）"
-								value=${filters.blockedTerms}
-								onChange=${(e) =>
-									setFilters((c) => ({ ...c, blockedTerms: e.target.value }))}
-								hint=${hiddenByBlockedTerms
-									? `当前已隐藏 ${hiddenByBlockedTerms} 条，多个词可用空格、逗号或换行分隔。`
-									: '命中标题时仅隐藏显示，不影响数据库，多个词可用空格/逗号/换行分隔。'}
-								wrapperSx=${{ gridColumn: { xs: 'auto', xl: 'span 2' } }}
-							/>
-							<${AppTextField}
-								select=${true}
-								label="订阅条目"
-								value=${filters.subId}
-								onChange=${(e) =>
-									setFilters((c) => ({ ...c, subId: e.target.value }))}
-								wrapperSx=${{ gridColumn: { xs: 'auto', lg: 'span 2' } }}
-								hint=${selectedSubscription
-									? `当前：#${selectedSubscription.id} ${selectedSubscription.keyword}`
-									: '可选，只看某条订阅的商品。'}
-							>
-								<${MenuItem} value="">全部订阅<//>
-								${subscriptionOptions.map((o) => {
-									const suffix = o.enabled ? '' : '（已暂停）'
-									return html`
-										<${MenuItem} key=${o.id} value=${String(o.id)}>
-											${`#${o.id} ${o.keyword}${suffix}`}
-										<//>
-									`
-								})}
-							<//>
-						</div>
-					</div>
-					<div className="items-filter-section items-filter-section-secondary">
-						<div className="items-filter-section-title">视图 / 排序</div>
-						<div className="filter-grid items-filter-grid items-filter-grid-compact">
-							<${AppTextField}
-								select=${true}
-								label="视图模式"
-								value=${filters.view}
-								onChange=${(e) =>
-									setFilters((c) => ({ ...c, view: e.target.value }))}
-								hint="聚合模式按商品去重；按订阅模式把商品归到各条订阅下管理。"
-							>
-								<${MenuItem} value="flat">聚合去重<//>
-								<${MenuItem} value="by_subscription">按订阅分类<//>
-							<//>
-							<${AppTextField}
-								label="最低价格"
-								type="number"
-								value=${filters.minPrice}
-								onChange=${(e) =>
-									setFilters((c) => ({ ...c, minPrice: e.target.value }))}
-								hint="留空不限。"
-							/>
-							<${AppTextField}
-								label="最高价格"
-								type="number"
-								value=${filters.maxPrice}
-								onChange=${(e) =>
-									setFilters((c) => ({ ...c, maxPrice: e.target.value }))}
-								hint="留空不限。"
-							/>
-							<${AppTextField}
-								select=${true}
-								label="排序字段"
-								value=${filters.sortBy}
-								onChange=${(e) =>
-									setFilters((c) => ({ ...c, sortBy: e.target.value }))}
-							>
-								<${MenuItem} value="last_seen_at">最近发现<//>
-								<${MenuItem} value="price">价格<//>
-								<${MenuItem} value="publish_time">发布时间<//>
-								<${MenuItem} value="title">标题<//>
-								${filters.view === 'flat'
-									? html`<${MenuItem} value="subscription_count">订阅数<//>`
-									: null}
-							<//>
-							<${AppTextField}
-								select=${true}
-								label="排序方向"
-								value=${filters.sortOrder}
-								onChange=${(e) =>
-									setFilters((c) => ({ ...c, sortOrder: e.target.value }))}
-							>
-								<${MenuItem} value="desc">降序<//>
-								<${MenuItem} value="asc">升序<//>
-							<//>
-						</div>
-					</div>
-				</div>
+			${/* ── 紧凑过滤工具栏 ── */ ''}
+			<${SurfaceCard}>
+				<${Box} sx=${{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+					${/* 第一行：搜索 + 订阅 + 屏蔽词 + 清除按钮 */ ''}
+					<${Box} className="filter-bar-row">
+						<${TextField}
+							size="small"
+							variant="outlined"
+							placeholder="搜索标题 / 商品 ID"
+							value=${filters.search}
+							onChange=${(e) => setFilters((c) => ({ ...c, search: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '2 1 200px' }}
+						/>
+						<${TextField}
+							size="small"
+							variant="outlined"
+							select=${true}
+							value=${filters.subId}
+							onChange=${(e) => setFilters((c) => ({ ...c, subId: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '1 1 150px' }}
+						>
+							<${MenuItem} value="">全部订阅<//>
+							${subscriptionOptions.map((o) => html`
+								<${MenuItem} key=${o.id} value=${String(o.id)}>
+									${`#${o.id} ${o.keyword}${o.enabled ? '' : ' (已暂停)'}`}
+								<//>
+							`)}
+						<//>
+						<${TextField}
+							size="small"
+							variant="outlined"
+							placeholder="屏蔽词（仅隐藏，不删除）"
+							value=${filters.blockedTerms}
+							onChange=${(e) => setFilters((c) => ({ ...c, blockedTerms: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '1 1 160px' }}
+						/>
+						${hasCustomFilters
+							? html`
+									<${Button}
+										size="small"
+										variant="outlined"
+										onClick=${() => setFilters({
+											search: '', subId: '', view: 'flat',
+											blockedTerms: '', minPrice: '', maxPrice: '',
+											sortBy: 'last_seen_at', sortOrder: 'desc'
+										})}
+										sx=${{ flexShrink: 0, height: 36 }}
+									>
+										清除
+									<//>
+								`
+							: null}
+					<//>
+
+					${/* 第二行：视图 + 价格范围 + 排序 + 状态摘要 */ ''}
+					<${Box} className="filter-bar-row">
+						<${TextField}
+							size="small"
+							variant="outlined"
+							select=${true}
+							value=${filters.view}
+							onChange=${(e) => setFilters((c) => ({ ...c, view: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '0 0 110px' }}
+						>
+							<${MenuItem} value="flat">聚合去重<//>
+							<${MenuItem} value="by_subscription">按订阅<//>
+						<//>
+						<${FilterDivider} />
+						<${TextField}
+							size="small"
+							variant="outlined"
+							type="number"
+							placeholder="最低价"
+							value=${filters.minPrice}
+							onChange=${(e) => setFilters((c) => ({ ...c, minPrice: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '0 1 90px' }}
+						/>
+						<${Typography} variant="body2" color="text.secondary" sx=${{ flexShrink: 0, lineHeight: '36px' }}>—<//>
+						<${TextField}
+							size="small"
+							variant="outlined"
+							type="number"
+							placeholder="最高价"
+							value=${filters.maxPrice}
+							onChange=${(e) => setFilters((c) => ({ ...c, maxPrice: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '0 1 90px' }}
+						/>
+						<${FilterDivider} />
+						<${TextField}
+							size="small"
+							variant="outlined"
+							select=${true}
+							value=${filters.sortBy}
+							onChange=${(e) => setFilters((c) => ({ ...c, sortBy: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '0 0 110px' }}
+						>
+							<${MenuItem} value="last_seen_at">最近发现<//>
+							<${MenuItem} value="price">价格<//>
+							<${MenuItem} value="publish_time">发布时间<//>
+							<${MenuItem} value="title">标题<//>
+							${filters.view === 'flat'
+								? html`<${MenuItem} value="subscription_count">订阅数<//>`
+								: null}
+						<//>
+						<${TextField}
+							size="small"
+							variant="outlined"
+							select=${true}
+							value=${filters.sortOrder}
+							onChange=${(e) => setFilters((c) => ({ ...c, sortOrder: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '0 0 72px' }}
+						>
+							<${MenuItem} value="desc">降序<//>
+							<${MenuItem} value="asc">升序<//>
+						<//>
+						<${FilterDivider} />
+						<${Typography}
+							variant="caption"
+							color="text.secondary"
+							sx=${{ flexShrink: 0, lineHeight: '36px', whiteSpace: 'nowrap' }}
+						>
+							${visibleTotal} / ${total} 条
+							${hiddenByBlockedTerms ? html`<span> · 屏蔽 ${hiddenByBlockedTerms}</span>` : null}
+						<//>
+					<//>
+				<//>
 			<//>
 
 			${/* ── 按订阅分类视图 ── */ ''}
