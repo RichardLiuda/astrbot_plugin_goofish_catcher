@@ -424,13 +424,13 @@ a {
 
 .items-filter-layout {
   display: grid;
-  gap: var(--space-2);
+  gap: 10px;
 }
 
 .items-filter-section {
   display: grid;
-  gap: 8px;
-  padding: 14px 16px;
+  gap: 6px;
+  padding: 10px 14px;
   border: 1px solid var(--section-border);
   border-radius: 16px;
   background: var(--section-bg);
@@ -448,12 +448,12 @@ a {
 }
 
 .items-filter-section .filter-grid {
-  gap: 12px;
+  gap: 8px;
 }
 
 .items-filter-section .field-block {
-  grid-template-rows: minmax(2.25em, auto) auto minmax(2.7em, auto);
-  gap: 6px;
+  grid-template-rows: minmax(2.1em, auto) auto minmax(1.6em, auto);
+  gap: 4px;
 }
 
 .items-filter-section .field-label {
@@ -464,9 +464,9 @@ a {
 
 .items-filter-section .field-hint {
   font-size: 0.76rem;
-  min-height: calc(1.5em * 2);
+  min-height: 1.5em;
   line-height: 1.5;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
 }
 
 .items-filter-grid {
