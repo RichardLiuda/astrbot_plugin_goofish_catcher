@@ -628,8 +628,16 @@ class PlaywrightSearchProvider:
             )
             if page_error is not None and page_error.code == ProviderErrorCode.AUTH_REQUIRED:
                 if await self._try_quick_login(page, context):
-                    page_error = None
+                    # 快速进入成功：登录前的 payload 全部无效，重新 goto 当前页面重新触发搜索 API
+                    captured_payloads.clear()
                     error_flags.discard("auth")
+                    await page.goto(
+                        search_url, wait_until="domcontentloaded", timeout=timeout_ms
+                    )
+                    await self._maybe_wait_for_network_idle(page, timeout_ms)
+                    page_error = await self._classify_timeout_page_state(
+                        page, error_flags=error_flags
+                    )
             if page_error is not None:
                 raise page_error
 
@@ -681,7 +689,18 @@ class PlaywrightSearchProvider:
                         ProviderErrorCode.AUTH_REQUIRED,
                         "authentication required by goofish",
                     )
+                # 快速进入成功：items 是登录前抓到的空结果，重新 goto 重新抓取
                 error_flags.discard("auth")
+                captured_payloads.clear()
+                await page.goto(
+                    search_url, wait_until="domcontentloaded", timeout=timeout_ms
+                )
+                await self._maybe_wait_for_network_idle(page, timeout_ms)
+                items = await self._wait_for_items_ready(
+                    page=page,
+                    captured_payloads=captured_payloads,
+                    timeout_ms=timeout_ms,
+                )
             if not items:
                 logger.info(
                     "[goofish_catcher] page=%s no items after wait, payloads=%s",
