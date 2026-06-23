@@ -40,6 +40,31 @@ _STRUCTURAL_ROLES = frozenset(
 )
 
 
+async def _get_ax_text(page) -> str:
+    """获取页面的 AX 文本快照，兼容新旧 Playwright API。
+
+    - Playwright ≥ 1.35（含 1.58）：page.accessibility 已移除，
+      改用 page.locator("body").aria_snapshot() 返回 YAML 格式文本。
+    - 旧版本：fallback 到 page.accessibility.snapshot() + ax_tree_to_text()。
+    """
+    # 优先用新 API
+    try:
+        body = page.locator("body")
+        text = await body.aria_snapshot()
+        if text:
+            return text
+    except Exception:
+        pass
+    # 旧版本 fallback
+    try:
+        snapshot: dict | None = await page.accessibility.snapshot()
+        if snapshot:
+            return ax_tree_to_text(snapshot)
+    except Exception:
+        pass
+    return ""
+
+
 def ax_tree_to_text(
     node: dict[str, Any] | None,
     *,
@@ -292,18 +317,13 @@ async def extract_items_via_llm(
     import asyncio
 
     try:
-        snapshot: dict | None = await page.accessibility.snapshot()
+        ax_text = await _get_ax_text(page)
     except Exception as exc:
         logger.warning("[goofish_catcher][agent] ax snapshot failed: %s", exc)
         return []
 
-    if not snapshot:
-        logger.info("[goofish_catcher][agent] ax snapshot empty")
-        return []
-
-    ax_text = ax_tree_to_text(snapshot)
     if not ax_text.strip():
-        logger.info("[goofish_catcher][agent] ax text empty after serialisation")
+        logger.info("[goofish_catcher][agent] ax snapshot empty")
         return []
 
     prompt = _SEARCH_EXTRACT_PROMPT.format(keyword=keyword, ax_text=ax_text)
@@ -346,13 +366,10 @@ async def check_login_via_llm(
     """
     import asyncio
 
-    try:
-        snapshot = await page.accessibility.snapshot()
-    except Exception as exc:
-        logger.warning("[goofish_catcher][agent] login ax snapshot failed: %s", exc)
+    ax_text = await _get_ax_text(page)
+    if not ax_text.strip():
+        logger.warning("[goofish_catcher][agent] login ax snapshot empty")
         return None
-
-    ax_text = ax_tree_to_text(snapshot)
     prompt = _LOGIN_CHECK_PROMPT.format(ax_text=ax_text)
 
     try:
@@ -387,13 +404,10 @@ async def find_favorite_button_via_llm(
     """
     import asyncio
 
-    try:
-        snapshot = await page.accessibility.snapshot()
-    except Exception as exc:
-        logger.warning("[goofish_catcher][agent] favorite ax snapshot failed: %s", exc)
+    ax_text = await _get_ax_text(page)
+    if not ax_text.strip():
+        logger.warning("[goofish_catcher][agent] favorite ax snapshot empty")
         return None
-
-    ax_text = ax_tree_to_text(snapshot)
     prompt = _FAVORITE_BUTTON_PROMPT.format(ax_text=ax_text)
 
     try:
