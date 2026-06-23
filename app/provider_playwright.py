@@ -1486,18 +1486,25 @@ def _normalize_item_page_title(title: str) -> str:
 
 
 def _extract_price(data: dict[str, Any]) -> float | None:
-    candidate_keys = (
-        "price",
-        "current_price",
-        "currentPrice",
-        "displayPrice",
+    # 优先检查带展示文本的字段（如 "1.62万"），这类字段包含单位信息，
+    # 比裸数字字段（price/amount 可能是 1 分钱或其他无单位整数）更可靠。
+    display_keys = (
         "priceText",
-        "amount",
+        "displayPrice",
         "salePrice",
         "finalPrice",
+        "currentPrice",
+        "current_price",
     )
+    for key in display_keys:
+        if key not in data:
+            continue
+        parsed = _parse_price(data.get(key))
+        if parsed is not None:
+            return parsed
 
-    for key in candidate_keys:
+    # 次优先：raw 数字字段；若已被 display_keys 覆盖则不会走到这里
+    for key in ("price", "amount"):
         if key not in data:
             continue
         parsed = _parse_price(data.get(key))
@@ -1532,7 +1539,8 @@ def _parse_price(value: Any) -> float | None:
         if not match:
             return None
         try:
-            return float(match.group(1)) * multiplier
+            # round 消除浮点乘法误差（如 1.62 * 10000 = 16200.000000000002）
+            return round(float(match.group(1)) * multiplier, 2)
         except ValueError:
             return None
     if isinstance(value, dict):
@@ -1543,6 +1551,16 @@ def _parse_price(value: Any) -> float | None:
                     return parsed
         return None
     if isinstance(value, list):
+        # 闲鱼富文本价格格式：list of dicts，每个 dict 有 "type" 和 "text" 字段
+        # 例：[{"type":"sign","text":"¥"},{"type":"integer","text":"1"},
+        #      {"type":"decimal","text":".58"},{"type":"unit","text":"万"}]
+        # 先判断是否是这种格式（所有 item 都是带 "text" 的 dict）
+        if value and all(isinstance(i, dict) and "text" in i for i in value):
+            combined = "".join(str(i.get("text", "")) for i in value)
+            parsed = _parse_price(combined)
+            if parsed is not None:
+                return parsed
+        # 否则退回到逐项尝试（取第一个能解析的）
         for item in value:
             parsed = _parse_price(item)
             if parsed is not None:

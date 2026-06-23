@@ -220,7 +220,8 @@ storage_state.json
 worker_config.json
 node_modules/
 
-
+# Local dev scripts
+run.sh
 
 docs
 thirdparty
