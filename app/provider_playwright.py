@@ -735,28 +735,55 @@ class PlaywrightSearchProvider:
     async def _try_quick_login(self, page, context) -> bool:
         """若页面弹出「快速进入」一键登录对话框（已记住账号），自动点击恢复会话。
 
-        Returns True 表示点击成功并已保存新 storage_state；False 表示未找到按钮。
+        Returns True 表示已恢复登录态；False 表示需要手动登录。
+
+        处理两种情形：
+        1. 页面展示「快速进入」按钮 → 点击，等待弹窗消失。
+        2. 浏览器凭已有 cookie 自动通过 iframe 完成认证，按钮未出现但
+           mini_login iframe 已经自行消失（无需点击）。
         """
         try:
             btn = page.get_by_role("button", name="快速进入").first
-            if not await btn.is_visible(timeout=2_000):
-                return False
-            logger.info("[goofish_catcher] '快速进入' dialog detected — auto-clicking to restore session")
-            await btn.click(timeout=3_000)
-            # 等待弹窗消失
-            try:
-                await page.get_by_role("button", name="快速进入").wait_for(
-                    state="hidden", timeout=8_000
-                )
-            except Exception:
-                pass
-            await page.wait_for_timeout(1_000)
-            await self._persist_context_storage_state(context)
-            logger.info("[goofish_catcher] quick login succeeded, storage_state refreshed")
-            return True
+            if await btn.is_visible(timeout=3_000):
+                logger.info("[goofish_catcher] '快速进入' dialog detected — auto-clicking to restore session")
+                await btn.click(timeout=3_000)
+                # 等待弹窗消失
+                try:
+                    await btn.wait_for(state="hidden", timeout=8_000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1_000)
+                await self._persist_context_storage_state(context)
+                logger.info("[goofish_catcher] quick login succeeded via button click, storage_state refreshed")
+                return True
         except Exception as exc:
-            logger.debug("[goofish_catcher] _try_quick_login: %s", exc)
-            return False
+            logger.debug("[goofish_catcher] _try_quick_login button check: %s", exc)
+
+        # Fallback：按钮未出现，检查 mini_login iframe 是否已经自动消失
+        # （浏览器凭 cookie 自动完成认证时走此分支）
+        try:
+            deadline_ms = 6_000
+            poll_ms = 300
+            elapsed = 0
+            while elapsed < deadline_ms:
+                frames = list(getattr(page, "frames", []) or [])
+                auth_frames = [
+                    f for f in frames
+                    if _is_auth_url(str(getattr(f, "url", "") or ""))
+                ]
+                if not auth_frames:
+                    # mini_login iframe 已消失，认为自动登录完成
+                    await page.wait_for_timeout(500)
+                    await self._persist_context_storage_state(context)
+                    logger.info("[goofish_catcher] quick login succeeded via auto-auth (iframe gone), storage_state refreshed")
+                    return True
+                await page.wait_for_timeout(poll_ms)
+                elapsed += poll_ms
+        except Exception as exc:
+            logger.debug("[goofish_catcher] _try_quick_login iframe poll: %s", exc)
+
+        logger.debug("[goofish_catcher] _try_quick_login: no recovery path found")
+        return False
 
     async def _persist_context_storage_state(self, context) -> None:
         storage_path = self.settings.playwright_storage_state_path
