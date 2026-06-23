@@ -688,6 +688,18 @@ a {
   gap: 6px;
 }
 
+/* 批量操作工具栏：多选状态时吸附在列表上方 */
+.selection-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 2px;
+  min-height: 36px;
+  border-bottom: 1px solid var(--divider);
+  margin-bottom: 4px;
+}
+
 .chip-row {
   display: flex;
   flex-wrap: wrap;

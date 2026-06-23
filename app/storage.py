@@ -921,6 +921,29 @@ class SubscriptionStorage:
             )
             await conn.commit()
 
+    async def delete_items_bulk(self, sub_id: int, item_ids: list[str]) -> int:
+        """删除指定订阅下的商品记录（及关联的价格历史、通知等由 CASCADE 处理）。
+
+        返回实际删除行数。sub_id=0 时跨订阅按 item_id 全局删除（items 表按 item_id 聚合）。
+        """
+        if not item_ids:
+            return 0
+        conn = self._conn_or_raise()
+        placeholders = ",".join("?" * len(item_ids))
+        async with self._write_lock:
+            if sub_id:
+                cursor = await conn.execute(
+                    f"DELETE FROM items WHERE sub_id = ? AND item_id IN ({placeholders})",
+                    [sub_id, *item_ids],
+                )
+            else:
+                cursor = await conn.execute(
+                    f"DELETE FROM items WHERE item_id IN ({placeholders})",
+                    item_ids,
+                )
+            await conn.commit()
+            return cursor.rowcount or 0
+
     async def insert_price_history(
         self,
         sub_id: int,

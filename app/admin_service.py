@@ -269,6 +269,10 @@ class AdminService:
             "total": total,
         }
 
+    async def delete_items(self, item_ids: list[str], sub_id: int = 0) -> dict[str, Any]:
+        deleted = await self.storage.delete_items_bulk(sub_id, item_ids)
+        return {"deleted": deleted}
+
     async def get_item_detail(self, item_id: str) -> dict[str, Any]:
         summary = await self.storage.get_item_summary(item_id)
         if summary is None:

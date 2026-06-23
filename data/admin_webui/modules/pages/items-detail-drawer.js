@@ -26,7 +26,8 @@ import { EmptyState, InfoList, SurfaceCard } from '../components.js'
 export function ItemDetailContent({
 	detail,
 	onFocusSubscription,
-	onRunSubscriptionAction
+	onRunSubscriptionAction,
+	onDelete
 }) {
 	const detailItem = detail?.item
 
@@ -63,6 +64,17 @@ export function ItemDetailContent({
 							>
 								打开商品页
 							<//>
+							${onDelete && detailItem?.item_id
+								? html`
+										<${Button}
+											variant="outlined"
+											color="error"
+											onClick=${() => onDelete(detailItem.item_id)}
+										>
+											删除此记录
+										<//>
+									`
+								: null}
 						</div>
 
 						<${SurfaceCard} title="基本信息">
@@ -427,7 +439,8 @@ export function ItemDetailDrawer({
 	detail,
 	onClose,
 	onFocusSubscription,
-	onRunSubscriptionAction
+	onRunSubscriptionAction,
+	onDelete
 }) {
 	return html`
 		<${Drawer}
@@ -441,6 +454,7 @@ export function ItemDetailDrawer({
 					detail=${detail}
 					onFocusSubscription=${onFocusSubscription}
 					onRunSubscriptionAction=${onRunSubscriptionAction}
+					onDelete=${onDelete}
 				/>
 			<//>
 		<//>

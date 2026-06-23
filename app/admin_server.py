@@ -52,6 +52,12 @@ class ConfigUpdateRequest(BaseModel):
     values: dict[str, Any]
 
 
+class ItemDeleteRequest(BaseModel):
+    item_ids: list[str] = Field(min_length=1)
+    sub_id: int = Field(default=0, ge=0)
+
+
+
 class _SessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, int] = {}
@@ -264,6 +270,10 @@ def create_admin_app(plugin: Any) -> FastAPI:
     @app.get("/api/items/{item_id}")
     async def get_item_detail(item_id: str, _: None = Depends(require_admin)):
         return {"ok": True, "item": await service.get_item_detail(item_id)}
+
+    @app.delete("/api/items")
+    async def delete_items(payload: ItemDeleteRequest, _: None = Depends(require_admin)):
+        return {"ok": True, **await service.delete_items(payload.item_ids, payload.sub_id)}
 
     @app.get("/api/fetch-runs")
     async def get_fetch_runs(
