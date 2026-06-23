@@ -4,11 +4,31 @@
 
 ## 远程 Worker 兼容性
 
-当前插件版本（v3.0.3）需要 Worker **≥ v3.0.0**。
+当前插件版本（v3.1.0）需要 Worker **≥ v3.1.0**。
 
 > Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
 
 ---
+
+## [3.1.0] - 2026-06-23
+
+> **⚠️ 使用 `remote_rest` 模式的用户：本版本包含价格解析修复，修复位于 `app/provider_playwright.py`（Worker 侧代码）。更新插件后请同步在 Worker 服务器上执行 `git pull` 并重启 Worker 进程，否则价格显示仍不正确。**
+
+### Added
+
+- WebUI 商品记录页支持多选批量删除和单条行内删除，删除前有确认对话框。
+- 后端新增 `DELETE /api/items` 接口，支持按 item_id 列表批量删除商品记录（含关联价格历史）。
+
+### Changed
+
+- 商品记录页搜索过滤区重新设计为两行紧凑工具栏，去掉外置标签和多行提示文字，改用 placeholder，高度缩减约 75%。
+- 过滤字段间距、内边距整体收紧，界面更紧凑。
+
+### Fixed
+
+- **[Worker 侧]** 修复价格解析错误导致商品价格显示为 1 元的问题。根本原因是闲鱼搜索 API 的 `price` 字段为富文本 list 格式，旧逻辑取第一个 token `"1"` 就返回，修复后先拼接所有 token 再解析。**`remote_rest` 模式需同步更新 Worker。**
+- **[Worker 侧]** 修复 `_extract_price` 字段优先级：`priceText`/`displayPrice` 等展示字段现在优先于裸整数 `price` 字段。
+- **[Worker 侧]** 修复 `_parse_price` 使用万/千倍数时的浮点精度问题，避免价格范围过滤误判。
 
 ## [3.0.3] - 2026-06-23
 
