@@ -627,18 +627,37 @@ class PlaywrightSearchProvider:
                 error_flags=error_flags,
             )
             if page_error is not None and page_error.code == ProviderErrorCode.AUTH_REQUIRED:
+                logger.info(
+                    "[goofish_catcher] page=%s AUTH_REQUIRED detected, error_flags=%s, attempting quick login",
+                    page_index, error_flags,
+                )
                 if await self._try_quick_login(page, context):
                     # 快速进入成功：清除所有登录前积累的 error_flags（包括登录页
                     # 自身触发的 captcha 初始化脚本误报），重新 goto 重新触发搜索 API
                     captured_payloads.clear()
                     error_flags.discard("auth")
                     error_flags.discard("captcha")
+                    logger.info(
+                        "[goofish_catcher] page=%s quick login OK, reloading search url, error_flags now=%s",
+                        page_index, error_flags,
+                    )
                     await page.goto(
                         search_url, wait_until="domcontentloaded", timeout=timeout_ms
                     )
                     await self._maybe_wait_for_network_idle(page, timeout_ms)
                     page_error = await self._classify_timeout_page_state(
                         page, error_flags=error_flags
+                    )
+                    logger.info(
+                        "[goofish_catcher] page=%s after reload: page_error=%s error_flags=%s",
+                        page_index,
+                        page_error.code.value if page_error else None,
+                        error_flags,
+                    )
+                else:
+                    logger.warning(
+                        "[goofish_catcher] page=%s quick login FAILED, error_flags=%s",
+                        page_index, error_flags,
                     )
             if page_error is not None:
                 raise page_error
@@ -686,7 +705,15 @@ class PlaywrightSearchProvider:
                     "captcha response detected",
                 )
             if "auth" in error_flags:
+                logger.info(
+                    "[goofish_catcher] page=%s auth flag set after item wait, error_flags=%s, attempting quick login",
+                    page_index, error_flags,
+                )
                 if not await self._try_quick_login(page, context):
+                    logger.warning(
+                        "[goofish_catcher] page=%s quick login FAILED (post-wait), error_flags=%s",
+                        page_index, error_flags,
+                    )
                     raise ProviderError(
                         ProviderErrorCode.AUTH_REQUIRED,
                         "authentication required by goofish",
@@ -695,6 +722,10 @@ class PlaywrightSearchProvider:
                 error_flags.discard("auth")
                 error_flags.discard("captcha")
                 captured_payloads.clear()
+                logger.info(
+                    "[goofish_catcher] page=%s quick login OK (post-wait), reloading, error_flags now=%s",
+                    page_index, error_flags,
+                )
                 await page.goto(
                     search_url, wait_until="domcontentloaded", timeout=timeout_ms
                 )
@@ -703,6 +734,10 @@ class PlaywrightSearchProvider:
                     page=page,
                     captured_payloads=captured_payloads,
                     timeout_ms=timeout_ms,
+                )
+                logger.info(
+                    "[goofish_catcher] page=%s after quick-login reload: items=%s",
+                    page_index, len(items),
                 )
             if not items:
                 logger.info(
@@ -742,47 +777,59 @@ class PlaywrightSearchProvider:
         2. 浏览器凭已有 cookie 自动通过 iframe 完成认证，按钮未出现但
            mini_login iframe 已经自行消失（无需点击）。
         """
+        # 分支 1：等待「快速进入」按钮出现并点击
         try:
             btn = page.get_by_role("button", name="快速进入").first
-            if await btn.is_visible(timeout=3_000):
-                logger.info("[goofish_catcher] '快速进入' dialog detected — auto-clicking to restore session")
+            btn_visible = await btn.is_visible(timeout=3_000)
+            logger.info("[goofish_catcher] _try_quick_login: 快速进入 button visible=%s", btn_visible)
+            if btn_visible:
                 await btn.click(timeout=3_000)
-                # 等待弹窗消失
+                logger.info("[goofish_catcher] _try_quick_login: button clicked, waiting for dismiss")
                 try:
                     await btn.wait_for(state="hidden", timeout=8_000)
-                except Exception:
-                    pass
+                    logger.info("[goofish_catcher] _try_quick_login: button dismissed")
+                except Exception as e:
+                    logger.info("[goofish_catcher] _try_quick_login: button dismiss wait: %s", e)
                 await page.wait_for_timeout(1_000)
                 await self._persist_context_storage_state(context)
                 logger.info("[goofish_catcher] quick login succeeded via button click, storage_state refreshed")
                 return True
         except Exception as exc:
-            logger.debug("[goofish_catcher] _try_quick_login button check: %s", exc)
+            logger.info("[goofish_catcher] _try_quick_login button check: %s", exc)
 
-        # Fallback：按钮未出现，检查 mini_login iframe 是否已经自动消失
-        # （浏览器凭 cookie 自动完成认证时走此分支）
+        # 分支 2：按钮未出现，轮询 mini_login iframe 是否已自动消失
         try:
             deadline_ms = 6_000
             poll_ms = 300
             elapsed = 0
+            frames_snapshot = [str(getattr(f, "url", "") or "") for f in (getattr(page, "frames", []) or [])]
+            logger.info("[goofish_catcher] _try_quick_login: entering iframe poll, frames=%s", frames_snapshot)
             while elapsed < deadline_ms:
                 frames = list(getattr(page, "frames", []) or [])
                 auth_frames = [
-                    f for f in frames
+                    str(getattr(f, "url", "") or "")
+                    for f in frames
                     if _is_auth_url(str(getattr(f, "url", "") or ""))
                 ]
+                logger.debug(
+                    "[goofish_catcher] _try_quick_login: poll %dms/%dms, auth_frames=%s",
+                    elapsed, deadline_ms, auth_frames,
+                )
                 if not auth_frames:
-                    # mini_login iframe 已消失，认为自动登录完成
                     await page.wait_for_timeout(500)
                     await self._persist_context_storage_state(context)
-                    logger.info("[goofish_catcher] quick login succeeded via auto-auth (iframe gone), storage_state refreshed")
+                    logger.info(
+                        "[goofish_catcher] quick login succeeded via auto-auth (iframe gone at %dms), storage_state refreshed",
+                        elapsed,
+                    )
                     return True
                 await page.wait_for_timeout(poll_ms)
                 elapsed += poll_ms
+            logger.info("[goofish_catcher] _try_quick_login: iframe still present after %dms poll, giving up", deadline_ms)
         except Exception as exc:
-            logger.debug("[goofish_catcher] _try_quick_login iframe poll: %s", exc)
+            logger.info("[goofish_catcher] _try_quick_login iframe poll: %s", exc)
 
-        logger.debug("[goofish_catcher] _try_quick_login: no recovery path found")
+        logger.warning("[goofish_catcher] _try_quick_login: no recovery path found")
         return False
 
     async def _persist_context_storage_state(self, context) -> None:
