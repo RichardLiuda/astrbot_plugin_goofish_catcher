@@ -628,9 +628,11 @@ class PlaywrightSearchProvider:
             )
             if page_error is not None and page_error.code == ProviderErrorCode.AUTH_REQUIRED:
                 if await self._try_quick_login(page, context):
-                    # 快速进入成功：登录前的 payload 全部无效，重新 goto 当前页面重新触发搜索 API
+                    # 快速进入成功：清除所有登录前积累的 error_flags（包括登录页
+                    # 自身触发的 captcha 初始化脚本误报），重新 goto 重新触发搜索 API
                     captured_payloads.clear()
                     error_flags.discard("auth")
+                    error_flags.discard("captcha")
                     await page.goto(
                         search_url, wait_until="domcontentloaded", timeout=timeout_ms
                     )
@@ -689,8 +691,9 @@ class PlaywrightSearchProvider:
                         ProviderErrorCode.AUTH_REQUIRED,
                         "authentication required by goofish",
                     )
-                # 快速进入成功：items 是登录前抓到的空结果，重新 goto 重新抓取
+                # 快速进入成功：清除登录前积累的所有 error_flags，重新 goto 重新抓取
                 error_flags.discard("auth")
+                error_flags.discard("captcha")
                 captured_payloads.clear()
                 await page.goto(
                     search_url, wait_until="domcontentloaded", timeout=timeout_ms
