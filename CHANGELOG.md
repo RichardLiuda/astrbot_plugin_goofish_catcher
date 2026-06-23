@@ -4,13 +4,23 @@
 
 ## 远程 Worker 兼容性
 
-当前插件版本（v3.1.1）需要 Worker **≥ v3.1.1**。
+当前插件版本（v3.1.2）需要 Worker **≥ v3.1.2**。
 
 > Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
 
 ---
 
-## [3.1.1] - 2026-06-23
+## [3.1.2] - 2026-06-23
+
+> **⚠️ 全部为 Worker 侧修复，`remote_rest` 模式需在 Worker 服务器上 `git pull` 并重启。**
+
+### Fixed
+
+- **[Worker 侧]** 修复 Session 过期后点击「快速进入」弹窗仍中断任务的问题。之前登录成功后未重新加载搜索页，直接使用登录前的空 payload 导致 0 结果；同时清除了登录页触发的 captcha 误报 flag。
+- **[Worker 侧]** 新增对浏览器凭 cookie 自动静默登录场景的支持：mini_login iframe 自动消失（无需点击按钮）时也视为登录成功，不再误抛 AUTH_REQUIRED。
+- **[Worker 侧]** 修复 `page.accessibility.snapshot()` 在 Playwright ≥ 1.35 中已被移除导致的警告，改用 `page.locator("body").aria_snapshot()`，旧版本自动 fallback。
+
+
 
 > **⚠️ Worker 侧修复，`remote_rest` 模式需在 Worker 服务器上 `git pull` 并重启。**
 
