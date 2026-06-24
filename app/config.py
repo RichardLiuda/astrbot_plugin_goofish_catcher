@@ -314,7 +314,7 @@ def load_plugin_settings(
 
     default_interval_sec = max(30, _as_int(raw.get("default_interval_sec"), 600))
     default_pages = max(1, _as_int(raw.get("default_pages"), 1))
-    max_pages = max(1, _as_int(raw.get("max_pages"), 2))
+    max_pages = max(1, _as_int(raw.get("max_pages"), 8))
     if default_pages > max_pages:
         default_pages = max_pages
 
