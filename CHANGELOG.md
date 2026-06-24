@@ -4,11 +4,20 @@
 
 ## 远程 Worker 兼容性
 
-当前插件版本（v3.1.2）需要 Worker **≥ v3.1.2**。
+当前插件版本（v3.1.3）需要 Worker **≥ v3.1.3**。
 
 > Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
 
 ---
+
+## [3.1.3] - 2026-06-24
+
+> **⚠️ Worker 端行为变更，`remote_rest` 模式需在 Worker 服务器上 `git pull` 并重启。**
+
+### Fixed
+
+- 订阅页数上限默认值从 2 提升至 8，本地端与 Worker 端同步更新，避免用户未配置 `max_pages` 时被意外限制为 2 页
+- **[Worker 侧]** `max_retries` 从硬编码 0 改为可配置（默认 3，与本地端对齐），同时 `retry_base_sec` / `retry_max_sec` 也支持通过配置文件或环境变量覆盖（`GOOFISH_WORKER_MAX_RETRIES` 等）
 
 ## [3.1.2] - 2026-06-23
 
