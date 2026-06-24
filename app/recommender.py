@@ -405,6 +405,11 @@ class GoofishRecommender:
                 "last_price": c.last_price,
                 "drop_abs": c.drop_abs,
                 "drop_pct": c.drop_pct,
+                # 历史价格上下文：hist_min=None 表示尚无足够历史数据
+                "hist_min": round(c.hist_min, 2) if c.hist_min is not None else None,
+                "hist_avg": round(c.hist_avg, 2) if c.hist_avg is not None else None,
+                # 市场 EMA 均价：跨商品、跨时间的关键词级别参考价，None 表示数据积累不足
+                "market_price": round(c.market_price, 2) if c.market_price is not None else None,
             }
             for c in candidates
         ]
@@ -596,9 +601,40 @@ def _heuristic_score(
         if drop_pct is None and candidate.last_price and candidate.last_price > 0:
             drop_pct = drop_abs / candidate.last_price
         drop_pct = max(0.0, float(drop_pct or 0.0))
-        score += min(25.0, drop_abs / 10.0)
-        score += min(25.0, drop_pct * 100.0)
+
+        # 用百分比作主信号（最多 40 分），绝对金额作辅助信号（最多 10 分）
+        # 避免 drop_abs 和 drop_pct 双重计入同一降价事件
+        score += min(40.0, drop_pct * 200.0)
+        score += min(10.0, drop_abs / 20.0)
         reason_parts.append(f"降价 {drop_abs:.2f} 元 ({drop_pct:.1%})")
+
+        # 突破历史最低价额外加分（最多 10 分）
+        if candidate.hist_min is not None and candidate.hist_min > 0:
+            if candidate.price < candidate.hist_min:
+                hist_break_pct = (candidate.hist_min - candidate.price) / candidate.hist_min
+                bonus = min(10.0, hist_break_pct * 100.0)
+                score += bonus
+                reason_parts.append(
+                    f"低于历史最低价 {candidate.hist_min:.2f} 元"
+                    f"（再低 {hist_break_pct:.1%}）"
+                )
+
+        # 与市场 EMA 均价对比（最多 +12 / -10 分）
+        if candidate.market_price is not None and candidate.market_price > 0:
+            if candidate.price < candidate.market_price:
+                market_discount = (candidate.market_price - candidate.price) / candidate.market_price
+                bonus = min(12.0, market_discount * 120.0)
+                score += bonus
+                reason_parts.append(
+                    f"低于市场均价 {candidate.market_price:.2f} 元（低 {market_discount:.1%}）"
+                )
+            elif candidate.price > candidate.market_price * 1.2:
+                over_pct = (candidate.price - candidate.market_price) / candidate.market_price
+                penalty = min(10.0, over_pct * 50.0)
+                score -= penalty
+                reason_parts.append(
+                    f"高于市场均价 {candidate.market_price:.2f} 元（高 {over_pct:.1%}）"
+                )
     else:
         if candidate.publish_time is not None and candidate.publish_time > 0:
             age_hours = max(0.0, (now_ts - candidate.publish_time) / 3600.0)
@@ -608,6 +644,33 @@ def _heuristic_score(
         else:
             score += 6.0
             reason_parts.append("上新时间未知，默认中等新鲜度")
+
+        # 新品价格与市场 EMA 均价比较（低于均价说明性价比高）
+        if candidate.hist_avg is not None and candidate.hist_avg > 0 and candidate.price < candidate.hist_avg:
+            avg_discount = (candidate.hist_avg - candidate.price) / candidate.hist_avg
+            bonus = min(8.0, avg_discount * 80.0)
+            score += bonus
+            reason_parts.append(
+                f"低于历史均价 {candidate.hist_avg:.2f} 元（低 {avg_discount:.1%}）"
+            )
+
+        # 与关键词级市场 EMA 均价对比（跨商品、跨时间的参考价）
+        if candidate.market_price is not None and candidate.market_price > 0:
+            if candidate.price < candidate.market_price:
+                market_discount = (candidate.market_price - candidate.price) / candidate.market_price
+                bonus = min(12.0, market_discount * 120.0)
+                score += bonus
+                reason_parts.append(
+                    f"低于市场均价 {candidate.market_price:.2f} 元（低 {market_discount:.1%}）"
+                )
+            elif candidate.price > candidate.market_price * 1.2:
+                # 明显高于市场均价，扣分
+                over_pct = (candidate.price - candidate.market_price) / candidate.market_price
+                penalty = min(10.0, over_pct * 50.0)
+                score -= penalty
+                reason_parts.append(
+                    f"高于市场均价 {candidate.market_price:.2f} 元（高 {over_pct:.1%}）"
+                )
 
     if risk_hits:
         score -= min(28.0, len(risk_hits) * 8.0)

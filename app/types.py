@@ -49,6 +49,27 @@ class NormalizedItem:
 
 
 @dataclass(slots=True)
+class MarketPrice:
+    """某关键词的市场均价快照，通过 EMA 滚动维护。"""
+
+    keyword: str
+    ema_price: float       # 指数移动均价（平滑后的市场参考价）
+    sample_count: int      # 累计参与计算的样本数（价格点数）
+    updated_at: int        # 最后一次更新的 Unix 时间戳
+
+
+@dataclass(slots=True)
+class PriceStats:
+    """从 price_history 聚合出的历史价格统计。"""
+
+    item_id: str
+    hist_min: float
+    hist_max: float
+    hist_avg: float
+    hist_count: int  # 历史记录点数
+
+
+@dataclass(slots=True)
 class RecommendationCandidate:
     event_type: str
     keyword: str
@@ -63,6 +84,11 @@ class RecommendationCandidate:
     drop_pct: float | None = None
     payload_hash: str | None = None
     notification_meta: dict[str, Any] | None = None
+    # 历史价格统计（可选，有则在推荐评分中使用）
+    hist_min: float | None = None
+    hist_avg: float | None = None
+    # 市场均价（EMA，跨商品、跨时间的关键词级别均价）
+    market_price: float | None = None
 
 
 @dataclass(slots=True)

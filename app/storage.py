@@ -18,7 +18,7 @@ from .admin_types import (
     SubscriptionOption,
     TrendBucket,
 )
-from .types import ExistingItem, NormalizedItem, Subscription
+from .types import ExistingItem, MarketPrice, NormalizedItem, PriceStats, Subscription
 
 
 class SubscriptionStorage:
@@ -231,6 +231,20 @@ class SubscriptionStorage:
                     "ALTER TABLE subscriptions ADD COLUMN price_max REAL DEFAULT NULL"
                 )
             await conn.execute("PRAGMA user_version = 4;")
+            await conn.commit()
+
+        if version < 5:
+            await conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS market_price (
+                    keyword       TEXT PRIMARY KEY,
+                    ema_price     REAL NOT NULL,
+                    sample_count  INTEGER NOT NULL DEFAULT 0,
+                    updated_at    INTEGER NOT NULL
+                );
+                """
+            )
+            await conn.execute("PRAGMA user_version = 5;")
             await conn.commit()
 
     @staticmethod
@@ -1593,6 +1607,135 @@ class SubscriptionStorage:
             )
             for row in rows
         ]
+
+    async def get_market_price(self, keyword: str) -> MarketPrice | None:
+        """读取单个关键词的市场均价快照，不存在时返回 None。"""
+        conn = self._conn_or_raise()
+        row = await (
+            await conn.execute(
+                "SELECT keyword, ema_price, sample_count, updated_at FROM market_price WHERE keyword = ?",
+                (keyword,),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return MarketPrice(
+            keyword=str(row["keyword"]),
+            ema_price=float(row["ema_price"]),
+            sample_count=int(row["sample_count"]),
+            updated_at=int(row["updated_at"]),
+        )
+
+    async def upsert_market_price(
+        self,
+        keyword: str,
+        new_prices: list[float],
+        now_ts: int,
+        *,
+        alpha: float = 0.15,
+    ) -> MarketPrice:
+        """用本批价格样本通过 EMA 更新关键词的市场均价。
+
+        EMA 公式：ema = alpha * batch_median + (1 - alpha) * old_ema
+        - alpha：平滑系数，越小越平稳（默认 0.15，约等于最近 12 批数据的加权窗口）
+        - 用批次中位数而非均值，避免极端高/低价单件商品拉偏结果
+        - 首次写入时直接用中位数初始化
+        """
+        if not new_prices:
+            existing = await self.get_market_price(keyword)
+            if existing is not None:
+                return existing
+            raise ValueError("new_prices is empty and no existing market_price for keyword")
+
+        valid = sorted(p for p in new_prices if p > 0)
+        if not valid:
+            existing = await self.get_market_price(keyword)
+            if existing is not None:
+                return existing
+            raise ValueError("no valid (>0) prices in new_prices")
+
+        # 批次中位数
+        mid = len(valid) // 2
+        batch_median = (valid[mid] + valid[~mid]) / 2.0
+
+        conn = self._conn_or_raise()
+        async with self._write_lock:
+            row = await (
+                await conn.execute(
+                    "SELECT ema_price, sample_count FROM market_price WHERE keyword = ?",
+                    (keyword,),
+                )
+            ).fetchone()
+
+            if row is None:
+                ema = batch_median
+                count = len(valid)
+            else:
+                old_ema = float(row["ema_price"])
+                ema = alpha * batch_median + (1.0 - alpha) * old_ema
+                count = int(row["sample_count"]) + len(valid)
+
+            ema = round(ema, 2)
+            await conn.execute(
+                """
+                INSERT INTO market_price (keyword, ema_price, sample_count, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(keyword) DO UPDATE SET
+                    ema_price    = excluded.ema_price,
+                    sample_count = excluded.sample_count,
+                    updated_at   = excluded.updated_at
+                """,
+                (keyword, ema, count, now_ts),
+            )
+            await conn.commit()
+
+        return MarketPrice(
+            keyword=keyword,
+            ema_price=ema,
+            sample_count=count,
+            updated_at=now_ts,
+        )
+
+    async def get_price_stats_bulk(
+        self,
+        item_ids: list[str],
+    ) -> dict[str, PriceStats]:
+        """批量查询多个商品的历史价格统计（MIN / MAX / AVG / COUNT）。
+
+        返回 item_id → PriceStats 的映射，查不到历史的商品不会出现在结果中。
+        跨所有订阅聚合（同一商品被多个订阅监控时合并统计）。
+        """
+        if not item_ids:
+            return {}
+        conn = self._conn_or_raise()
+        deduped_ids = list(dict.fromkeys(item_ids))
+        placeholders = ",".join("?" for _ in deduped_ids)
+        rows = await (
+            await conn.execute(
+                f"""
+                SELECT
+                    item_id,
+                    MIN(price)   AS hist_min,
+                    MAX(price)   AS hist_max,
+                    AVG(price)   AS hist_avg,
+                    COUNT(*)     AS hist_count
+                FROM price_history
+                WHERE item_id IN ({placeholders})
+                GROUP BY item_id
+                """,
+                deduped_ids,
+            )
+        ).fetchall()
+        return {
+            str(row["item_id"]): PriceStats(
+                item_id=str(row["item_id"]),
+                hist_min=float(row["hist_min"]),
+                hist_max=float(row["hist_max"]),
+                hist_avg=float(row["hist_avg"]),
+                hist_count=int(row["hist_count"]),
+            )
+            for row in rows
+        }
 
     async def list_price_history_for_item(
         self,

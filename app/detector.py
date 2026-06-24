@@ -11,6 +11,8 @@ class PriceDropDecision:
     triggered: bool
     drop_abs: float
     drop_pct: float
+    # 当前价格是否低于历史最低价（含本次降价前的所有记录）
+    below_hist_min: bool = False
 
 
 @dataclass(slots=True)
@@ -64,6 +66,7 @@ def evaluate_price_drop(
     current_price: float,
     abs_threshold: float,
     pct_threshold: float,
+    hist_min: float | None = None,
 ) -> PriceDropDecision:
     if last_price is None or last_price <= 0:
         return PriceDropDecision(False, 0.0, 0.0)
@@ -74,7 +77,14 @@ def evaluate_price_drop(
     drop_abs = float(last_price - current_price)
     drop_pct = drop_abs / float(last_price)
     triggered = (drop_abs >= abs_threshold) or (drop_pct >= pct_threshold)
-    return PriceDropDecision(triggered=triggered, drop_abs=drop_abs, drop_pct=drop_pct)
+    # 判断当前价格是否突破历史最低价（排除 last_price 本身，看更早的记录）
+    below_hist_min = hist_min is not None and hist_min > 0 and current_price < hist_min
+    return PriceDropDecision(
+        triggered=triggered,
+        drop_abs=drop_abs,
+        drop_pct=drop_pct,
+        below_hist_min=below_hist_min,
+    )
 
 
 def in_cooldown(last_sent_at: int | None, now_ts: int, cooldown_sec: int) -> bool:

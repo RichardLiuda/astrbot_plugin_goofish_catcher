@@ -34,6 +34,9 @@ from .types import (
     Subscription,
 )
 
+# 价格异常检测：当前价格超过上次价格的此倍数时，记录警告但不触发降价事件
+_PRICE_SPIKE_FACTOR = 10.0
+
 EVENT_NEW = "NEW"
 EVENT_PRICE_DROP = "PRICE_DROP"
 
@@ -325,7 +328,31 @@ class MonitoringScheduler:
                 raw_items=raw_items,
                 now_ts=now_ts,
             )
-            candidates = await self._process_items(sub, items, now_ts)
+
+            # 用本批原始价格（未过滤）更新市场 EMA，并读取最新均价供评分使用
+            market_snapshot: float | None = None
+            if raw_items:
+                raw_prices = [item.price for item in raw_items if item.price > 0]
+                try:
+                    mp = await self.storage.upsert_market_price(
+                        sub.keyword, raw_prices, now_ts
+                    )
+                    market_snapshot = mp.ema_price
+                    logger.debug(
+                        "[goofish_catcher] sub=%s keyword=%r market_ema=%.2f samples=%d",
+                        sub.id,
+                        sub.keyword,
+                        mp.ema_price,
+                        mp.sample_count,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[goofish_catcher] sub=%s failed to update market_price: %s",
+                        sub.id,
+                        exc,
+                    )
+
+            candidates = await self._process_items(sub, items, now_ts, market_price=market_snapshot)
             await self.storage.finish_fetch_run(
                 run_id,
                 finished_at=now_ts,
@@ -571,6 +598,8 @@ class MonitoringScheduler:
         sub: Subscription,
         items: list,
         now_ts: int,
+        *,
+        market_price: float | None = None,
     ) -> list[RecommendationCandidate]:
         normalized_items = [
             item
@@ -587,6 +616,11 @@ class MonitoringScheduler:
             item_ids,
             EVENT_PRICE_DROP,
         )
+        # 批量拉取已有历史价格统计，用于：
+        #   1. 判断是否突破历史最低价
+        #   2. 异常价格检测（价格突涨超过 _PRICE_SPIKE_FACTOR 倍）
+        #   3. 推荐评分时提供历史上下文
+        price_stats_map = await self.storage.get_price_stats_bulk(item_ids)
 
         await self.storage.upsert_items_bulk(sub.id, normalized_items, now_ts)
 
@@ -594,6 +628,8 @@ class MonitoringScheduler:
         candidates: list[RecommendationCandidate] = []
         for item in normalized_items:
             existing = existing_map.get(item.item_id)
+            stats = price_stats_map.get(item.item_id)
+
             if existing is None:
                 price_history_rows.append(
                     (
@@ -638,12 +674,35 @@ class MonitoringScheduler:
                         publish_time=item.publish_time,
                         observed_at=now_ts,
                         payload_hash=payload_hash,
+                        hist_min=stats.hist_min if stats else None,
+                        hist_avg=stats.hist_avg if stats else None,
+                        market_price=market_price,
                     )
                 )
                 continue
 
             old_price = existing.last_price
             if old_price is None or float(old_price) == float(item.price):
+                continue
+
+            # 价格异常检测：价格暴涨（如卖家改错价再纠正）不触发降价，只记录警告
+            if (
+                old_price is not None
+                and old_price > 0
+                and item.price > float(old_price) * _PRICE_SPIKE_FACTOR
+            ):
+                logger.warning(
+                    "[goofish_catcher] price spike detected for item %s "
+                    "(keyword=%r): %.2f → %.2f (%.1fx), skipping drop check",
+                    item.item_id,
+                    sub.keyword,
+                    old_price,
+                    item.price,
+                    item.price / float(old_price),
+                )
+                price_history_rows.append(
+                    (sub.id, item.item_id, item.price, now_ts, self.settings.provider_mode)
+                )
                 continue
 
             price_history_rows.append(
@@ -656,11 +715,14 @@ class MonitoringScheduler:
                 )
             )
 
+            # 传入历史最低价，让 evaluate_price_drop 标记是否突破历史底部
+            hist_min = stats.hist_min if stats and stats.hist_count >= 2 else None
             decision = evaluate_price_drop(
                 old_price,
                 item.price,
                 sub.drop_abs,
                 sub.drop_pct,
+                hist_min=hist_min,
             )
             if not decision.triggered:
                 continue
@@ -711,7 +773,14 @@ class MonitoringScheduler:
                         "drop_pct": decision.drop_pct,
                         "last_price": old_price,
                         "new_price": item.price,
+                        "hist_min": stats.hist_min if stats else None,
+                        "hist_avg": stats.hist_avg if stats else None,
+                        "below_hist_min": decision.below_hist_min,
+                        "market_price": market_price,
                     },
+                    hist_min=stats.hist_min if stats else None,
+                    hist_avg=stats.hist_avg if stats else None,
+                    market_price=market_price,
                 )
             )
         await self.storage.insert_price_history_bulk(price_history_rows)
