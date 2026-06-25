@@ -30,6 +30,7 @@ from .types import (
     ProviderError,
     RecommendationCandidate,
     RecommendationResult,
+    SearchFilters,
     Subscription,
 )
 
@@ -205,7 +206,19 @@ class AdminService:
             raise ValueError("keyword is required")
         page_count = int(payload.get("pages", self.settings.default_pages) or self.settings.default_pages)
         page_count = max(1, min(page_count, self.settings.max_pages))
-        preview = await self._run_query(keyword=keyword, page_count=page_count)
+        filters = SearchFilters(
+            price_lower=self._normalize_price_bound(payload, key="price_min", current=None),
+            price_upper=self._normalize_price_bound(payload, key="price_max", current=None),
+            personal_only=bool(payload.get("personal_only")),
+            free_shipping=bool(payload.get("free_shipping")),
+            new_publish_option=self._normalize_optional_text(payload.get("new_publish_option")),
+            region=self._normalize_optional_text(payload.get("region")),
+        ).normalized()
+        preview = await self._run_query(
+            keyword=keyword,
+            page_count=page_count,
+            filters=filters,
+        )
         return {"preview": preview}
 
     async def list_subscription_options(self) -> dict[str, Any]:
@@ -277,14 +290,19 @@ class AdminService:
         summary = await self.storage.get_item_summary(item_id)
         if summary is None:
             raise KeyError("item not found")
+        analysis = await self.storage.get_deep_analysis(item_id)
         detail = ItemDetail(
             item=summary,
             subscriptions=await self.storage.list_related_subscriptions_for_item(item_id),
             price_history=await self.storage.list_price_history_for_item(item_id, limit=120),
             notifications=await self.storage.list_notifications_for_item(item_id, limit=50),
             fetch_runs=await self.storage.list_fetch_runs_for_item(item_id, limit=30),
+            deep_analysis=analysis.to_dict() if analysis is not None else None,
         )
         return asdict(detail)
+
+    async def get_subscription_analytics(self, sub_id: int) -> dict[str, Any]:
+        return await self.storage.get_subscription_analytics(sub_id)
 
     async def list_fetch_runs(
         self,
@@ -511,6 +529,27 @@ class AdminService:
         )
         if price_min is not None and price_max is not None and price_min > price_max:
             raise ValueError("price_min cannot be greater than price_max")
+        personal_only = bool(
+            payload.get(
+                "personal_only",
+                current.personal_only if current else False,
+            )
+        )
+        free_shipping = bool(
+            payload.get(
+                "free_shipping",
+                current.free_shipping if current else False,
+            )
+        )
+        new_publish_option = self._normalize_optional_text(
+            payload.get(
+                "new_publish_option",
+                current.new_publish_option if current else None,
+            )
+        )
+        region = self._normalize_optional_text(
+            payload.get("region", current.region if current else None)
+        )
         return {
             "umo": umo,
             "keyword": keyword,
@@ -527,6 +566,10 @@ class AdminService:
             "cooldown_sec": max(60, cooldown_sec),
             "price_min": price_min,
             "price_max": price_max,
+            "personal_only": personal_only,
+            "free_shipping": free_shipping,
+            "new_publish_option": new_publish_option,
+            "region": region,
         }
 
     @staticmethod
@@ -546,6 +589,13 @@ class AdminService:
         except (TypeError, ValueError):
             return current
         return value if value > 0 else None
+
+    @staticmethod
+    def _normalize_optional_text(value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text or text in {"__none__", "null", "undefined"}:
+            return None
+        return text
 
     async def _run_manual_subscription_check(self, sub: Subscription) -> dict[str, Any]:
         if self.plugin._provider_error:
@@ -568,6 +618,7 @@ class AdminService:
                 keyword=sub.keyword,
                 pages=max(1, min(sub.pages, self.settings.max_pages)),
                 timeout_sec=self.settings.fetch_timeout_sec,
+                filters=sub.search_filters(),
             )
             now_ts = int(time.time())
             await self.activity_monitor.update_task(
@@ -616,7 +667,13 @@ class AdminService:
             await self.activity_monitor.finish_task(activity_id)
             await self.scheduler.release_subscription(sub.id)
 
-    async def _run_query(self, *, keyword: str, page_count: int) -> dict[str, Any]:
+    async def _run_query(
+        self,
+        *,
+        keyword: str,
+        page_count: int,
+        filters: SearchFilters | None = None,
+    ) -> dict[str, Any]:
         if self.plugin._provider_error:
             raise RuntimeError(self.plugin._provider_error)
         activity_id = await self.activity_monitor.start_task(
@@ -632,6 +689,7 @@ class AdminService:
                 keyword=keyword,
                 pages=page_count,
                 timeout_sec=self.settings.fetch_timeout_sec,
+                filters=filters,
             )
             await self.activity_monitor.update_task(
                 activity_id,
@@ -657,6 +715,7 @@ class AdminService:
                 )
                 for item in filtered_items
             ]
+            candidates = await self.scheduler.deep_analyze_candidates(candidates)
             await self.activity_monitor.update_task(
                 activity_id,
                 phase="analyzing",
@@ -711,6 +770,11 @@ class AdminService:
                     score=item.score,
                     reason=item.reason,
                     risk=item.risk,
+                    deep_analysis=(
+                        item.deep_analysis.to_dict()
+                        if item.deep_analysis is not None
+                        else None
+                    ),
                 )
                 for item in recommendation.top
             ],
@@ -736,6 +800,10 @@ class AdminService:
             consecutive_failures=sub.consecutive_failures,
             price_min=sub.price_min,
             price_max=sub.price_max,
+            personal_only=sub.personal_only,
+            free_shipping=sub.free_shipping,
+            new_publish_option=sub.new_publish_option,
+            region=sub.region,
         )
 
     def _settings_to_editable_values(self) -> dict[str, Any]:

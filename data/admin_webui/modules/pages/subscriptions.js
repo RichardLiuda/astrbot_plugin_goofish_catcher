@@ -1,6 +1,11 @@
 import {
+	Box,
 	Button,
 	Chip,
+	CircularProgress,
+	Dialog,
+	DialogContent,
+	DialogTitle,
 	LinearProgress,
 	MenuItem,
 	Stack,
@@ -47,6 +52,7 @@ export function SubscriptionsPage({ notify }) {
 	const [dialogOpen, setDialogOpen] = useState(false)
 	const [editing, setEditing] = useState(null)
 	const [preview, setPreview] = useState(null)
+	const [analyticsTarget, setAnalyticsTarget] = useState(null)
 
 	const deferredKeyword = useDeferredValue(filters.keyword)
 
@@ -84,7 +90,11 @@ export function SubscriptionsPage({ notify }) {
 			new_window_sec: toNumberOrNull(form.new_window_sec),
 			cooldown_sec: toNumberOrNull(form.cooldown_sec),
 			price_min: toNumberOrNull(form.price_min),
-			price_max: toNumberOrNull(form.price_max)
+			price_max: toNumberOrNull(form.price_max),
+			personal_only: Boolean(form.personal_only),
+			free_shipping: Boolean(form.free_shipping),
+			new_publish_option: String(form.new_publish_option || '').trim(),
+			region: String(form.region || '').trim()
 		}
 		try {
 			if (editing?.id) {
@@ -148,7 +158,11 @@ export function SubscriptionsPage({ notify }) {
 								drop_abs: 50,
 								drop_pct: 0.05,
 								new_window_sec: 1800,
-								cooldown_sec: 21600
+								cooldown_sec: 21600,
+								personal_only: false,
+								free_shipping: false,
+								new_publish_option: '',
+								region: ''
 							})
 							setDialogOpen(true)
 						}}
@@ -224,6 +238,7 @@ export function SubscriptionsPage({ notify }) {
 												item.enabled,
 												item.paused_reason
 											)
+											const ruleSummary = buildRuleSummary(item)
 											return html`
 												<${TableRow}
 													key=${item.id}
@@ -305,6 +320,25 @@ export function SubscriptionsPage({ notify }) {
 																item.cooldown_sec
 															)}
 														<//>
+														${ruleSummary.length
+															? html`<div className="chip-row tiny-chip-row">
+																	${ruleSummary.map(
+																		(label) => html`
+																			<${Chip}
+																				key=${label}
+																				size="small"
+																				label=${label}
+																				variant="outlined"
+																			/>
+																		`
+																	)}
+																</div>`
+															: html`<${Typography}
+																	variant="caption"
+																	color="text.secondary"
+																>
+																	高级筛选未开启
+																<//>`}
 													<//>
 													<${TableCell}>
 														<${Typography}
@@ -345,6 +379,15 @@ export function SubscriptionsPage({ notify }) {
 																}}
 															>
 																编辑
+															<//>
+															<${Button}
+																size="small"
+																onClick=${() =>
+																	setAnalyticsTarget(
+																		item
+																	)}
+															>
+																统计
 															<//>
 															<${Button}
 																size="small"
@@ -411,6 +454,218 @@ export function SubscriptionsPage({ notify }) {
 				}}
 				onSubmit=${save}
 			/>
+			<${SubscriptionAnalyticsDialog}
+				open=${Boolean(analyticsTarget)}
+				subscription=${analyticsTarget}
+				onClose=${() => setAnalyticsTarget(null)}
+				notify=${notify}
+			/>
 		<//>
+	`
+}
+
+function buildRuleSummary(item) {
+	const parts = []
+	if (item.price_min != null || item.price_max != null) {
+		const price = []
+		if (item.price_min != null) price.push(`≥${formatMoney(item.price_min)}`)
+		if (item.price_max != null) price.push(`≤${formatMoney(item.price_max)}`)
+		parts.push(`价格 ${price.join(' ')}`)
+	}
+	if (item.personal_only) parts.push('个人闲置')
+	if (item.free_shipping) parts.push('包邮')
+	if (item.new_publish_option) parts.push(`新发布 ${item.new_publish_option}`)
+	if (item.region) parts.push(`地区 ${item.region}`)
+	return parts
+}
+
+function SubscriptionAnalyticsDialog({ open, subscription, onClose, notify }) {
+	const [data, setData] = useState(null)
+	const [loading, setLoading] = useState(false)
+
+	useEffect(() => {
+		if (!open || !subscription?.id) {
+			setData(null)
+			return
+		}
+		let cancelled = false
+		async function load() {
+			setLoading(true)
+			try {
+				const payload = await api(
+					`/api/subscriptions/${subscription.id}/analytics`
+				)
+				if (!cancelled) setData(payload)
+			} catch (error) {
+				if (!cancelled) notify(error.message, 'error')
+			} finally {
+				if (!cancelled) setLoading(false)
+			}
+		}
+		load()
+		return () => {
+			cancelled = true
+		}
+	}, [open, subscription?.id])
+
+	const stats = data?.stats || {}
+	const trends = data?.notification_trends || []
+	const recent = data?.recent_recommendations || []
+
+	return html`
+		<${Dialog} open=${open} onClose=${onClose} fullWidth=${true} maxWidth="lg">
+			<${DialogTitle}>
+				${subscription
+					? `订阅统计：${subscription.keyword}`
+					: '订阅统计'}
+			<//>
+			<${DialogContent} dividers=${true}>
+				${loading && !data
+					? html`<${Box} sx=${{ display: 'grid', placeItems: 'center', py: 8 }}>
+							<${CircularProgress} />
+						<//>`
+					: html`
+							<${Stack} spacing=${3}>
+								<div className="stats-grid compact-stats-grid">
+									<${StatMini} label="样本数" value=${stats.sample_count ?? 0} />
+									<${StatMini} label="均价" value=${formatMoney(stats.avg_price)} />
+									<${StatMini} label="中位数" value=${formatMoney(stats.median_price)} />
+									<${StatMini} label="最低价" value=${formatMoney(stats.min_price)} />
+									<${StatMini} label="最高价" value=${formatMoney(stats.max_price)} />
+								</div>
+								<${SurfaceCard}
+									title="历史价格走势"
+									description="基于 price_history 的轻量 SVG 折线图。"
+								>
+									<${MiniLineChart}
+										points=${data?.price_series || []}
+										valueKey="price"
+									/>
+								<//>
+								<${SurfaceCard}
+									title="近 30 天通知趋势"
+									description="上新与降价通知按天聚合。"
+								>
+									<${MiniTrendBars} trends=${trends} />
+								<//>
+								<${SurfaceCard} title="最近推荐商品">
+									${recent.length
+										? html`<${TableContainer} className="table-wrap compact-table">
+												<${Table} size="small">
+													<${TableHead}>
+														<${TableRow}>
+															<${TableCell}>时间<//>
+															<${TableCell}>事件<//>
+															<${TableCell}>商品<//>
+															<${TableCell}>价格<//>
+														<//>
+													<//>
+													<${TableBody}>
+														${recent.map((item) => html`
+															<${TableRow} key=${`${item.item_id}-${item.sent_at}`}>
+																<${TableCell}>${formatTs(item.sent_at)}<//>
+																<${TableCell}>${item.event_type}<//>
+																<${TableCell}>
+																	<${Button}
+																		href=${item.url}
+																		target="_blank"
+																		size="small"
+																	>
+																		${item.title || item.item_id}
+																	<//>
+																<//>
+																<${TableCell}>${formatMoney(item.price)}<//>
+															<//>
+														`)}
+													<//>
+												<//>
+											<//>`
+										: html`<${EmptyState}
+												title="暂无推荐记录"
+												description="发送推荐后这里会展示最近商品。"
+											/>`}
+								<//>
+							<//>
+						`}
+			<//>
+		<//>
+	`
+}
+
+function StatMini({ label, value }) {
+	return html`
+		<div className="stat-mini">
+			<div className="stat-mini-label">${label}</div>
+			<div className="stat-mini-value">${value}</div>
+		</div>
+	`
+}
+
+function MiniLineChart({ points, valueKey }) {
+	const values = (points || [])
+		.map((point) => Number(point[valueKey]))
+		.filter((value) => Number.isFinite(value))
+	if (!values.length) {
+		return html`<${EmptyState}
+			title="暂无价格样本"
+			description="订阅产生价格历史后会显示走势。"
+		/>`
+	}
+	const width = 720
+	const height = 220
+	const min = Math.min(...values)
+	const max = Math.max(...values)
+	const span = max - min || 1
+	const d = values
+		.map((value, index) => {
+			const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width
+			const y = height - ((value - min) / span) * (height - 24) - 12
+			return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+		})
+		.join(' ')
+	return html`
+		<div className="chart-shell">
+			<svg viewBox=${`0 0 ${width} ${height}`} className="analytics-svg">
+				<path d=${d} fill="none" stroke="currentColor" strokeWidth="3" />
+			</svg>
+			<div className="chart-meta">
+				最低 ${formatMoney(min)} · 最高 ${formatMoney(max)}
+			</div>
+		</div>
+	`
+}
+
+function MiniTrendBars({ trends }) {
+	const rows = trends || []
+	if (!rows.length) {
+		return html`<${EmptyState}
+			title="暂无通知趋势"
+			description="最近 30 天没有通知记录。"
+		/>`
+	}
+	const max = Math.max(
+		1,
+		...rows.map((item) => Number(item.new_count || 0) + Number(item.price_drop_count || 0))
+	)
+	return html`
+		<div className="trend-bars">
+			${rows.map((item) => {
+				const total = Number(item.new_count || 0) + Number(item.price_drop_count || 0)
+				return html`
+					<div className="trend-bar-row" key=${item.day}>
+						<div className="trend-bar-day">${item.day}</div>
+						<div className="trend-bar-track">
+							<div
+								className="trend-bar-fill"
+								style=${{ width: `${Math.max(4, (total / max) * 100)}%` }}
+							></div>
+						</div>
+						<div className="trend-bar-value">
+							上新 ${item.new_count || 0} / 降价 ${item.price_drop_count || 0}
+						</div>
+					</div>
+				`
+			})}
+		</div>
 	`
 }

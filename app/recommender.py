@@ -328,6 +328,7 @@ class GoofishRecommender:
                     title=cand.title,
                     price=cand.price,
                     url=cand.url,
+                    deep_analysis=cand.deep_analysis,
                 )
             )
             if len(top) >= top_k:
@@ -374,6 +375,7 @@ class GoofishRecommender:
                     title=cand.title,
                     price=cand.price,
                     url=cand.url,
+                    deep_analysis=cand.deep_analysis,
                 )
             )
 
@@ -410,6 +412,19 @@ class GoofishRecommender:
                 "hist_avg": round(c.hist_avg, 2) if c.hist_avg is not None else None,
                 # 市场 EMA 均价：跨商品、跨时间的关键词级别参考价，None 表示数据积累不足
                 "market_price": round(c.market_price, 2) if c.market_price is not None else None,
+                "deep_analysis": (
+                    {
+                        "credit_status": c.deep_analysis.credit_status,
+                        "credit_reason": c.deep_analysis.credit_reason,
+                        "summary": c.deep_analysis.summary,
+                        "risk": c.deep_analysis.risk,
+                        "seller_credit": c.deep_analysis.seller_credit,
+                        "want_count": c.deep_analysis.want_count,
+                        "browse_count": c.deep_analysis.browse_count,
+                    }
+                    if c.deep_analysis is not None
+                    else None
+                ),
             }
             for c in candidates
         ]
@@ -677,6 +692,14 @@ def _heuristic_score(
         risk = "命中风险词: " + "、".join(risk_hits)
     else:
         risk = "暂无明显风险关键词"
+
+    if candidate.deep_analysis is not None:
+        if candidate.deep_analysis.credit_status == "good":
+            score += 5.0
+        elif candidate.deep_analysis.credit_status == "unknown":
+            score -= 1.0
+        if candidate.deep_analysis.risk and candidate.deep_analysis.risk != "未发现明确低信用风险":
+            risk = f"{risk}；深度分析：{candidate.deep_analysis.risk}"
 
     score = max(0.0, min(100.0, round(score, 1)))
     reason = "；".join(reason_parts) if reason_parts else "综合价格与新鲜度评分"

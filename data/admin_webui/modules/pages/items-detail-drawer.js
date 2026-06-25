@@ -30,6 +30,8 @@ export function ItemDetailContent({
 	onDelete
 }) {
 	const detailItem = detail?.item
+	const deepAnalysis = detail?.deep_analysis || null
+	const mainImage = deepAnalysis?.image_urls?.[0] || ''
 
 	return html`
 		${detail
@@ -104,6 +106,87 @@ export function ItemDetailContent({
 									}
 								]}
 							/>
+						<//>
+
+						<${SurfaceCard}
+							title="深度分析"
+							description="候选推荐前抓取的商品详情、卖家信用和风险结论。"
+						>
+							${deepAnalysis
+								? html`
+										<${Stack} spacing=${2}>
+											${mainImage
+												? html`<img
+														src=${mainImage}
+														alt=${detailItem?.title || '商品主图'}
+														className="detail-main-image"
+													/>`
+												: null}
+											<div className="chip-row">
+												<${Chip}
+													label=${`信用 ${deepAnalysis.credit_status || 'unknown'}`}
+													color=${deepAnalysis.credit_status === 'good'
+														? 'success'
+														: deepAnalysis.credit_status === 'bad'
+															? 'error'
+															: 'default'}
+													variant="outlined"
+												/>
+												<${Chip}
+													label=${deepAnalysis.status || 'passed'}
+													color=${deepAnalysis.status === 'rejected'
+														? 'error'
+														: 'success'}
+													variant="outlined"
+												/>
+											</div>
+											<${InfoList}
+												items=${[
+													{
+														label: '卖家信用',
+														value:
+															deepAnalysis.credit_reason ||
+															deepAnalysis.credit_status ||
+															'-'
+													},
+													{
+														label: '推荐/过滤理由',
+														value: deepAnalysis.summary || '-'
+													},
+													{
+														label: '风险说明',
+														value: deepAnalysis.risk || '-'
+													},
+													{
+														label: '想要人数',
+														value:
+															deepAnalysis.want_count == null
+																? '-'
+																: String(deepAnalysis.want_count)
+													},
+													{
+														label: '浏览量',
+														value:
+															deepAnalysis.browse_count == null
+																? '-'
+																: String(deepAnalysis.browse_count)
+													},
+													{
+														label: '分析时间',
+														value: formatTs(deepAnalysis.analyzed_at)
+													},
+													{
+														label: '图片链接',
+														value: deepAnalysis.image_urls?.join('，') || '-'
+													}
+												]}
+											/>
+										<//>
+									`
+								: html`<${EmptyState}
+										title="暂无深度分析"
+										description="商品进入推荐候选后会缓存详情分析结果。"
+									/>`}
 						<//>
 
 						<${SurfaceCard}

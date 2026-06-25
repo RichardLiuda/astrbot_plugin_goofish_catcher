@@ -7,7 +7,7 @@ from .config import (
     PROVIDER_MODE_REMOTE_REST,
     PluginSettings,
 )
-from .types import FavoriteItemResult, NormalizedItem
+from .types import DeepAnalysisResult, FavoriteItemResult, NormalizedItem, SearchFilters
 
 
 class SearchProvider(Protocol):
@@ -17,9 +17,17 @@ class SearchProvider(Protocol):
         keyword: str,
         pages: int,
         timeout_sec: int,
+        filters: SearchFilters | None = None,
         price_lower: float | None = None,
         price_upper: float | None = None,
     ) -> list[NormalizedItem]: ...
+
+    async def analyze_item_detail(
+        self,
+        *,
+        item: NormalizedItem,
+        timeout_sec: int,
+    ) -> DeepAnalysisResult: ...
 
     async def favorite_item(
         self,

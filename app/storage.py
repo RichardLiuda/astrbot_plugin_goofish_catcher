@@ -18,7 +18,14 @@ from .admin_types import (
     SubscriptionOption,
     TrendBucket,
 )
-from .types import ExistingItem, MarketPrice, NormalizedItem, PriceStats, Subscription
+from .types import (
+    DeepAnalysisResult,
+    ExistingItem,
+    MarketPrice,
+    NormalizedItem,
+    PriceStats,
+    Subscription,
+)
 
 
 class SubscriptionStorage:
@@ -246,12 +253,59 @@ class SubscriptionStorage:
             )
             await conn.execute("PRAGMA user_version = 5;")
             await conn.commit()
+            version = 5
+
+        if version < 6:
+            col_rows = await (
+                await conn.execute("PRAGMA table_info(subscriptions)")
+            ).fetchall()
+            existing_cols = {row[1] for row in col_rows}
+            subscription_columns = {
+                "personal_only": "INTEGER NOT NULL DEFAULT 0",
+                "free_shipping": "INTEGER NOT NULL DEFAULT 0",
+                "new_publish_option": "TEXT DEFAULT NULL",
+                "region": "TEXT DEFAULT NULL",
+            }
+            for col_name, col_def in subscription_columns.items():
+                if col_name not in existing_cols:
+                    await conn.execute(
+                        f"ALTER TABLE subscriptions ADD COLUMN {col_name} {col_def}"
+                    )
+            await conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS item_deep_analysis (
+                    item_id TEXT PRIMARY KEY,
+                    analyzed_at INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    credit_status TEXT NOT NULL,
+                    credit_reason TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    risk TEXT NOT NULL,
+                    image_urls_json TEXT NOT NULL,
+                    seller_name TEXT DEFAULT NULL,
+                    seller_id TEXT DEFAULT NULL,
+                    seller_credit TEXT DEFAULT NULL,
+                    want_count INTEGER DEFAULT NULL,
+                    browse_count INTEGER DEFAULT NULL,
+                    raw_json TEXT DEFAULT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_item_deep_analysis_analyzed
+                    ON item_deep_analysis (analyzed_at DESC);
+                """
+            )
+            await conn.execute("PRAGMA user_version = 6;")
+            await conn.commit()
 
     @staticmethod
     def _row_to_subscription(row: aiosqlite.Row) -> Subscription:
         keys = row.keys() if hasattr(row, "keys") else []
         price_min = row["price_min"] if "price_min" in keys else None
         price_max = row["price_max"] if "price_max" in keys else None
+        personal_only = row["personal_only"] if "personal_only" in keys else 0
+        free_shipping = row["free_shipping"] if "free_shipping" in keys else 0
+        new_publish_option = row["new_publish_option"] if "new_publish_option" in keys else None
+        region = row["region"] if "region" in keys else None
         return Subscription(
             id=int(row["id"]),
             umo=str(row["umo"]),
@@ -274,6 +328,10 @@ class SubscriptionStorage:
             consecutive_failures=int(row["consecutive_failures"]),
             price_min=float(price_min) if price_min is not None else None,
             price_max=float(price_max) if price_max is not None else None,
+            personal_only=bool(personal_only),
+            free_shipping=bool(free_shipping),
+            new_publish_option=str(new_publish_option).strip() if new_publish_option else None,
+            region=str(region).strip() if region else None,
         )
 
     @staticmethod
@@ -326,6 +384,10 @@ class SubscriptionStorage:
         cooldown_sec: int,
         price_min: float | None = None,
         price_max: float | None = None,
+        personal_only: bool = False,
+        free_shipping: bool = False,
+        new_publish_option: str | None = None,
+        region: str | None = None,
     ) -> tuple[Subscription, bool]:
         conn = self._conn_or_raise()
         now_ts = int(time.time())
@@ -348,10 +410,11 @@ class SubscriptionStorage:
                     drop_abs, drop_pct,
                     new_window_sec, cooldown_sec, enabled, paused_reason,
                     last_run_at, next_run_at, consecutive_failures,
-                    price_min, price_max,
+                    price_min, price_max, personal_only, free_shipping,
+                    new_publish_option, region,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(umo, keyword) DO UPDATE SET
                     interval_sec = excluded.interval_sec,
                     pages = excluded.pages,
@@ -362,6 +425,10 @@ class SubscriptionStorage:
                     cooldown_sec = excluded.cooldown_sec,
                     price_min = excluded.price_min,
                     price_max = excluded.price_max,
+                    personal_only = excluded.personal_only,
+                    free_shipping = excluded.free_shipping,
+                    new_publish_option = excluded.new_publish_option,
+                    region = excluded.region,
                     enabled = 1,
                     paused_reason = NULL,
                     next_run_at = excluded.next_run_at,
@@ -380,6 +447,10 @@ class SubscriptionStorage:
                     now_ts,
                     price_min,
                     price_max,
+                    1 if personal_only else 0,
+                    1 if free_shipping else 0,
+                    (new_publish_option or None),
+                    (region or None),
                     now_ts,
                     now_ts,
                 ),
@@ -602,6 +673,10 @@ class SubscriptionStorage:
                     consecutive_failures=0,
                     price_min=sub.price_min,
                     price_max=sub.price_max,
+                    personal_only=sub.personal_only,
+                    free_shipping=sub.free_shipping,
+                    new_publish_option=sub.new_publish_option,
+                    region=sub.region,
                 )
             )
         return resumed
@@ -1116,6 +1191,123 @@ class SubscriptionStorage:
             )
             await conn.commit()
 
+    async def upsert_deep_analysis(self, analysis: DeepAnalysisResult) -> None:
+        conn = self._conn_or_raise()
+        async with self._write_lock:
+            await conn.execute(
+                """
+                INSERT INTO item_deep_analysis (
+                    item_id, analyzed_at, status, credit_status, credit_reason,
+                    summary, risk, image_urls_json, seller_name, seller_id,
+                    seller_credit, want_count, browse_count, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    analyzed_at = excluded.analyzed_at,
+                    status = excluded.status,
+                    credit_status = excluded.credit_status,
+                    credit_reason = excluded.credit_reason,
+                    summary = excluded.summary,
+                    risk = excluded.risk,
+                    image_urls_json = excluded.image_urls_json,
+                    seller_name = excluded.seller_name,
+                    seller_id = excluded.seller_id,
+                    seller_credit = excluded.seller_credit,
+                    want_count = excluded.want_count,
+                    browse_count = excluded.browse_count,
+                    raw_json = excluded.raw_json
+                """,
+                (
+                    analysis.item_id,
+                    analysis.analyzed_at,
+                    analysis.status,
+                    analysis.credit_status,
+                    analysis.credit_reason,
+                    analysis.summary,
+                    analysis.risk,
+                    json.dumps(analysis.image_urls, ensure_ascii=False),
+                    analysis.seller_name,
+                    analysis.seller_id,
+                    analysis.seller_credit,
+                    analysis.want_count,
+                    analysis.browse_count,
+                    json.dumps(analysis.raw, ensure_ascii=False) if analysis.raw is not None else None,
+                ),
+            )
+            await conn.commit()
+
+    async def get_deep_analysis(self, item_id: str) -> DeepAnalysisResult | None:
+        conn = self._conn_or_raise()
+        row = await (
+            await conn.execute(
+                """
+                SELECT * FROM item_deep_analysis
+                WHERE item_id = ?
+                """,
+                (item_id,),
+            )
+        ).fetchone()
+        return self._row_to_deep_analysis(row) if row else None
+
+    async def get_deep_analysis_bulk(
+        self,
+        item_ids: list[str],
+    ) -> dict[str, DeepAnalysisResult]:
+        if not item_ids:
+            return {}
+        conn = self._conn_or_raise()
+        deduped_ids = list(dict.fromkeys(item_ids))
+        placeholders = ",".join("?" for _ in deduped_ids)
+        rows = await (
+            await conn.execute(
+                f"""
+                SELECT * FROM item_deep_analysis
+                WHERE item_id IN ({placeholders})
+                """,
+                deduped_ids,
+            )
+        ).fetchall()
+        return {
+            analysis.item_id: analysis
+            for row in rows
+            if (analysis := self._row_to_deep_analysis(row)) is not None
+        }
+
+    @staticmethod
+    def _row_to_deep_analysis(row: aiosqlite.Row | None) -> DeepAnalysisResult | None:
+        if row is None:
+            return None
+        image_urls: list[str] = []
+        raw = None
+        try:
+            loaded = json.loads(row["image_urls_json"] or "[]")
+            if isinstance(loaded, list):
+                image_urls = [str(item) for item in loaded if str(item).strip()]
+        except Exception:
+            image_urls = []
+        try:
+            if row["raw_json"]:
+                loaded_raw = json.loads(row["raw_json"])
+                if isinstance(loaded_raw, dict):
+                    raw = loaded_raw
+        except Exception:
+            raw = {"raw": row["raw_json"]}
+        return DeepAnalysisResult(
+            item_id=str(row["item_id"]),
+            analyzed_at=int(row["analyzed_at"]),
+            status=str(row["status"]),
+            credit_status=str(row["credit_status"]),
+            credit_reason=str(row["credit_reason"]),
+            summary=str(row["summary"]),
+            risk=str(row["risk"]),
+            image_urls=image_urls,
+            seller_name=row["seller_name"],
+            seller_id=row["seller_id"],
+            seller_credit=row["seller_credit"],
+            want_count=int(row["want_count"]) if row["want_count"] is not None else None,
+            browse_count=int(row["browse_count"]) if row["browse_count"] is not None else None,
+            raw=raw,
+        )
+
     async def count_enabled_subscriptions(self) -> int:
         conn = self._conn_or_raise()
         row = await (
@@ -1195,6 +1387,10 @@ class SubscriptionStorage:
         cooldown_sec: int,
         price_min: float | None = None,
         price_max: float | None = None,
+        personal_only: bool = False,
+        free_shipping: bool = False,
+        new_publish_option: str | None = None,
+        region: str | None = None,
     ) -> Subscription | None:
         conn = self._conn_or_raise()
         now_ts = int(time.time())
@@ -1213,6 +1409,10 @@ class SubscriptionStorage:
                     cooldown_sec = ?,
                     price_min = ?,
                     price_max = ?,
+                    personal_only = ?,
+                    free_shipping = ?,
+                    new_publish_option = ?,
+                    region = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -1228,6 +1428,10 @@ class SubscriptionStorage:
                     cooldown_sec,
                     price_min,
                     price_max,
+                    1 if personal_only else 0,
+                    1 if free_shipping else 0,
+                    (new_publish_option or None),
+                    (region or None),
                     now_ts,
                     sub_id,
                 ),
@@ -1994,6 +2198,118 @@ class SubscriptionStorage:
             for row in reversed(rows)
         ]
 
+    async def get_subscription_analytics(self, sub_id: int) -> dict[str, Any]:
+        conn = self._conn_or_raise()
+        sub = await self.get_subscription_by_id(sub_id)
+        if sub is None:
+            raise KeyError("subscription not found")
+
+        price_rows = await (
+            await conn.execute(
+                """
+                SELECT item_id, price, observed_at, source
+                FROM price_history
+                WHERE sub_id = ?
+                ORDER BY observed_at ASC, id ASC
+                """,
+                (sub_id,),
+            )
+        ).fetchall()
+        prices = [float(row["price"]) for row in price_rows if row["price"] is not None]
+        sorted_prices = sorted(prices)
+        if sorted_prices:
+            mid = len(sorted_prices) // 2
+            median = (sorted_prices[mid] + sorted_prices[~mid]) / 2.0
+            stats = {
+                "sample_count": len(sorted_prices),
+                "avg_price": round(sum(sorted_prices) / len(sorted_prices), 2),
+                "median_price": round(median, 2),
+                "min_price": round(min(sorted_prices), 2),
+                "max_price": round(max(sorted_prices), 2),
+            }
+        else:
+            stats = {
+                "sample_count": 0,
+                "avg_price": None,
+                "median_price": None,
+                "min_price": None,
+                "max_price": None,
+            }
+
+        trend_rows = await (
+            await conn.execute(
+                """
+                SELECT
+                    date(sent_at, 'unixepoch', 'localtime') AS bucket_day,
+                    SUM(CASE WHEN event_type = 'NEW' THEN 1 ELSE 0 END) AS new_count,
+                    SUM(CASE WHEN event_type = 'PRICE_DROP' THEN 1 ELSE 0 END) AS price_drop_count
+                FROM notifications
+                WHERE sub_id = ? AND sent_at >= ?
+                GROUP BY bucket_day
+                ORDER BY bucket_day ASC
+                """,
+                (sub_id, int(time.time()) - 30 * 86400),
+            )
+        ).fetchall()
+        recent_rows = await (
+            await conn.execute(
+                """
+                SELECT
+                    n.item_id AS item_id,
+                    i.title AS title,
+                    i.url AS url,
+                    i.last_price AS price,
+                    n.event_type AS event_type,
+                    n.sent_at AS sent_at,
+                    n.meta_json AS meta_json
+                FROM notifications n
+                LEFT JOIN items i ON i.sub_id = n.sub_id AND i.item_id = n.item_id
+                WHERE n.sub_id = ?
+                ORDER BY n.sent_at DESC, n.id DESC
+                LIMIT 10
+                """,
+                (sub_id,),
+            )
+        ).fetchall()
+
+        return {
+            "subscription": {
+                "id": sub.id,
+                "keyword": sub.keyword,
+                "umo": sub.umo,
+            },
+            "stats": stats,
+            "price_series": [
+                {
+                    "item_id": str(row["item_id"]),
+                    "price": float(row["price"]),
+                    "observed_at": int(row["observed_at"]),
+                    "source": str(row["source"] or ""),
+                }
+                for row in price_rows[-240:]
+            ],
+            "notification_trends": [
+                {
+                    "day": str(row["bucket_day"]),
+                    "new_count": int(row["new_count"] or 0),
+                    "price_drop_count": int(row["price_drop_count"] or 0),
+                }
+                for row in trend_rows
+            ],
+            "recent_recommendations": [
+                {
+                    "item_id": str(row["item_id"]),
+                    "title": str(row["title"] or row["item_id"]),
+                    "url": str(row["url"] or ""),
+                    "price": float(row["price"]) if row["price"] is not None else None,
+                    "event_type": str(row["event_type"]),
+                    "sent_at": int(row["sent_at"]),
+                    "meta": _json_loads_object(row["meta_json"]),
+                }
+                for row in recent_rows
+            ],
+        }
+
     async def list_recent_alerts(self, *, limit: int = 8) -> list[OverviewAlert]:
         conn = self._conn_or_raise()
         rows = await (
@@ -2036,3 +2352,13 @@ class SubscriptionStorage:
                 )
             )
         return alerts
+
+
+def _json_loads_object(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    try:
+        loaded = json.loads(raw)
+    except Exception:
+        return {"raw": raw}
+    return loaded if isinstance(loaded, dict) else {"value": loaded}

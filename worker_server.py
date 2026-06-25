@@ -22,14 +22,26 @@ try:
     from .app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
     from .app.login_session import GoofishLoginSession
     from .app.provider_playwright import PlaywrightSearchProvider
-    from .app.types import FavoriteItemResult, ProviderError, ProviderErrorCode
+    from .app.types import (
+        FavoriteItemResult,
+        NormalizedItem,
+        ProviderError,
+        ProviderErrorCode,
+        SearchFilters,
+    )
 except ImportError:
     from app.auth_session import AUTH_SESSION_TIMEOUT_SEC
     from app.browser_agent import GofishBrowserAgent
     from app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
     from app.login_session import GoofishLoginSession
     from app.provider_playwright import PlaywrightSearchProvider
-    from app.types import FavoriteItemResult, ProviderError, ProviderErrorCode
+    from app.types import (
+        FavoriteItemResult,
+        NormalizedItem,
+        ProviderError,
+        ProviderErrorCode,
+        SearchFilters,
+    )
 
 try:
     from astrbot.api import logger
@@ -43,6 +55,26 @@ class SearchRequest(BaseModel):
     timeout_ms: int = Field(default=20_000, ge=1_000)
     sort: str = "time_desc"
     use_login: bool = True
+    price_lower: float | None = Field(default=None, ge=0)
+    price_upper: float | None = Field(default=None, ge=0)
+    personal_only: bool = False
+    free_shipping: bool = False
+    new_publish_option: str | None = None
+    region: str | None = None
+
+
+class WorkerItemRequest(BaseModel):
+    item_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    price: float = Field(ge=0)
+    url: str = Field(min_length=1)
+    publish_time: int | None = None
+    raw: dict[str, Any] | None = None
+
+
+class DeepAnalysisRequest(BaseModel):
+    item: WorkerItemRequest
+    timeout_ms: int = Field(default=20_000, ge=1_000)
 
 
 class AuthStartRequest(BaseModel):
@@ -630,10 +662,19 @@ def create_app(runtime: WorkerRuntime | None = None) -> FastAPI:
             )
 
         try:
+            filters = SearchFilters(
+                price_lower=req.price_lower,
+                price_upper=req.price_upper,
+                personal_only=req.personal_only,
+                free_shipping=req.free_shipping,
+                new_publish_option=req.new_publish_option,
+                region=req.region,
+            ).normalized()
             items = await current_runtime.provider.search(
                 keyword=req.keyword,
                 pages=req.pages,
                 timeout_sec=max(5, req.timeout_ms // 1000),
+                filters=filters,
             )
         except ProviderError as exc:
             return _error_response(
@@ -652,6 +693,64 @@ def create_app(runtime: WorkerRuntime | None = None) -> FastAPI:
         return {
             "ok": True,
             "items": [asdict(item) for item in items],
+        }
+
+    @app.post("/v1/deep-analysis")
+    async def deep_analysis(
+        req: DeepAnalysisRequest,
+        authorization: str | None = Header(None),
+        x_api_key: str | None = Header(None),
+        cf_access_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+        cf_access_client_secret: str | None = Header(
+            None,
+            alias="CF-Access-Client-Secret",
+        ),
+    ):
+        current_runtime = _get_runtime(app)
+        _verify_request_auth(
+            current_runtime.auth,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            cf_access_client_id=cf_access_client_id,
+            cf_access_client_secret=cf_access_client_secret,
+        )
+        if current_runtime.provider_error or current_runtime.provider is None:
+            return _error_response(
+                status_code=503,
+                code=current_runtime.provider_error_code,
+                message=current_runtime.provider_error or "worker provider is unavailable",
+            )
+
+        try:
+            item = NormalizedItem(
+                item_id=req.item.item_id,
+                title=req.item.title,
+                price=req.item.price,
+                url=req.item.url,
+                publish_time=req.item.publish_time,
+                raw=req.item.raw,
+            )
+            analysis = await current_runtime.provider.analyze_item_detail(
+                item=item,
+                timeout_sec=max(5, req.timeout_ms // 1000),
+            )
+        except ProviderError as exc:
+            return _error_response(
+                status_code=400,
+                code=exc.code,
+                message=exc.message,
+                retry_after_sec=exc.retry_after_sec,
+            )
+        except Exception as exc:
+            return _error_response(
+                status_code=500,
+                code=ProviderErrorCode.UNKNOWN,
+                message=str(exc),
+            )
+
+        return {
+            "ok": True,
+            "analysis": analysis.to_dict(),
         }
 
     @app.post("/v1/auth/start")

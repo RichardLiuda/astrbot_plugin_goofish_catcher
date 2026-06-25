@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 from .types import ProviderError, ProviderErrorCode
+from .types import SearchFilters
 
 DEFAULT_CAPTCHA_RETRIES = 2
 DEFAULT_CAPTCHA_RETRY_DELAY_SEC = 1.0
@@ -32,6 +33,7 @@ async def search_with_captcha_retry(
     timeout_sec: int,
     captcha_retries: int = DEFAULT_CAPTCHA_RETRIES,
     retry_delay_sec: float = DEFAULT_CAPTCHA_RETRY_DELAY_SEC,
+    filters: SearchFilters | None = None,
     price_lower: float | None = None,
     price_upper: float | None = None,
 ) -> list:
@@ -44,6 +46,7 @@ async def search_with_captcha_retry(
                 keyword=keyword,
                 pages=pages,
                 timeout_sec=timeout_sec,
+                filters=filters,
                 price_lower=price_lower,
                 price_upper=price_upper,
             )

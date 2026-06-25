@@ -41,11 +41,21 @@ class SubscriptionRequest(BaseModel):
     cooldown_sec: int | None = Field(default=None, ge=1)
     price_min: float | None = Field(default=None, ge=0)
     price_max: float | None = Field(default=None, ge=0)
+    personal_only: bool | None = None
+    free_shipping: bool | None = None
+    new_publish_option: str | None = None
+    region: str | None = None
 
 
 class QueryRequest(BaseModel):
     keyword: str = Field(min_length=1)
     pages: int = Field(default=1, ge=1)
+    price_min: float | None = Field(default=None, ge=0)
+    price_max: float | None = Field(default=None, ge=0)
+    personal_only: bool = False
+    free_shipping: bool = False
+    new_publish_option: str | None = None
+    region: str | None = None
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -210,6 +220,10 @@ def create_admin_app(plugin: Any) -> FastAPI:
     @app.post("/api/subscriptions/{sub_id}/check")
     async def check_subscription(sub_id: int, _: None = Depends(require_admin)):
         return {"ok": True, **await service.check_subscription(sub_id)}
+
+    @app.get("/api/subscriptions/{sub_id}/analytics")
+    async def subscription_analytics(sub_id: int, _: None = Depends(require_admin)):
+        return {"ok": True, **await service.get_subscription_analytics(sub_id)}
 
     @app.post("/api/query")
     async def query(payload: QueryRequest, _: None = Depends(require_admin)):

@@ -6,6 +6,79 @@ from typing import Any
 
 
 @dataclass(slots=True)
+class SearchFilters:
+    price_lower: float | None = None
+    price_upper: float | None = None
+    personal_only: bool = False
+    free_shipping: bool = False
+    new_publish_option: str | None = None
+    region: str | None = None
+
+    def normalized(self) -> "SearchFilters":
+        new_publish = (self.new_publish_option or "").strip()
+        region = (self.region or "").strip()
+        return SearchFilters(
+            price_lower=self.price_lower if self.price_lower and self.price_lower > 0 else None,
+            price_upper=self.price_upper if self.price_upper and self.price_upper > 0 else None,
+            personal_only=bool(self.personal_only),
+            free_shipping=bool(self.free_shipping),
+            new_publish_option=new_publish or None,
+            region=region or None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        filters = self.normalized()
+        return {
+            "price_lower": filters.price_lower,
+            "price_upper": filters.price_upper,
+            "personal_only": filters.personal_only,
+            "free_shipping": filters.free_shipping,
+            "new_publish_option": filters.new_publish_option,
+            "region": filters.region,
+        }
+
+
+@dataclass(slots=True)
+class DeepAnalysisResult:
+    item_id: str
+    analyzed_at: int
+    status: str
+    credit_status: str
+    credit_reason: str
+    summary: str
+    risk: str
+    image_urls: list[str]
+    seller_name: str | None = None
+    seller_id: str | None = None
+    seller_credit: str | None = None
+    want_count: int | None = None
+    browse_count: int | None = None
+    raw: dict[str, Any] | None = None
+
+    @property
+    def rejected(self) -> bool:
+        return self.status == "rejected" or self.credit_status == "bad"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "item_id": self.item_id,
+            "analyzed_at": self.analyzed_at,
+            "status": self.status,
+            "credit_status": self.credit_status,
+            "credit_reason": self.credit_reason,
+            "summary": self.summary,
+            "risk": self.risk,
+            "image_urls": list(self.image_urls),
+            "seller_name": self.seller_name,
+            "seller_id": self.seller_id,
+            "seller_credit": self.seller_credit,
+            "want_count": self.want_count,
+            "browse_count": self.browse_count,
+            "raw": self.raw,
+        }
+
+
+@dataclass(slots=True)
 class Subscription:
     id: int
     umo: str
@@ -24,6 +97,20 @@ class Subscription:
     consecutive_failures: int
     price_min: float | None = None
     price_max: float | None = None
+    personal_only: bool = False
+    free_shipping: bool = False
+    new_publish_option: str | None = None
+    region: str | None = None
+
+    def search_filters(self) -> SearchFilters:
+        return SearchFilters(
+            price_lower=self.price_min,
+            price_upper=self.price_max,
+            personal_only=self.personal_only,
+            free_shipping=self.free_shipping,
+            new_publish_option=self.new_publish_option,
+            region=self.region,
+        ).normalized()
 
 
 @dataclass(slots=True)
@@ -89,6 +176,7 @@ class RecommendationCandidate:
     hist_avg: float | None = None
     # 市场均价（EMA，跨商品、跨时间的关键词级别均价）
     market_price: float | None = None
+    deep_analysis: DeepAnalysisResult | None = None
 
 
 @dataclass(slots=True)
@@ -100,6 +188,7 @@ class RecommendationItem:
     title: str
     price: float
     url: str
+    deep_analysis: DeepAnalysisResult | None = None
 
 
 @dataclass(slots=True)

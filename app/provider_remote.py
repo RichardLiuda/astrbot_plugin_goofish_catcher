@@ -9,10 +9,12 @@ import httpx
 from .config import PluginSettings
 from .provider import ProviderConfigurationError
 from .types import (
+    DeepAnalysisResult,
     FavoriteItemResult,
     NormalizedItem,
     ProviderError,
     ProviderErrorCode,
+    SearchFilters,
 )
 
 
@@ -123,12 +125,17 @@ class RemoteSearchProvider:
         keyword: str,
         pages: int,
         timeout_sec: int,
+        filters: SearchFilters | None = None,
         price_lower: float | None = None,
         price_upper: float | None = None,
     ) -> list[NormalizedItem]:
         # Give the remote worker enough time to finish its own Playwright timeout
         # and send back a structured AUTH_REQUIRED/CAPTCHA/TIMEOUT response.
         request_timeout_sec = max(timeout_sec + 10, int(timeout_sec * 1.5))
+        effective_filters = (filters or SearchFilters(
+            price_lower=price_lower,
+            price_upper=price_upper,
+        )).normalized()
         payload = {
             "keyword": keyword,
             "pages": pages,
@@ -136,10 +143,7 @@ class RemoteSearchProvider:
             "sort": "time_desc",
             "use_login": True,
         }
-        if price_lower is not None and price_lower > 0:
-            payload["price_lower"] = price_lower
-        if price_upper is not None and price_upper > 0:
-            payload["price_upper"] = price_upper
+        payload.update(effective_filters.to_dict())
         response, data = await self._request_json(
             method="POST",
             path="/v1/search",
@@ -168,6 +172,43 @@ class RemoteSearchProvider:
             if normalized is not None:
                 items.append(normalized)
         return items
+
+    async def analyze_item_detail(
+        self,
+        *,
+        item: NormalizedItem,
+        timeout_sec: int,
+    ) -> DeepAnalysisResult:
+        request_timeout_sec = max(timeout_sec + 10, int(timeout_sec * 1.5))
+        response, data = await self._request_json(
+            method="POST",
+            path="/v1/deep-analysis",
+            timeout_sec=request_timeout_sec,
+            json_body={
+                "item": {
+                    "item_id": item.item_id,
+                    "title": item.title,
+                    "price": item.price,
+                    "url": item.url,
+                    "publish_time": item.publish_time,
+                    "raw": item.raw,
+                },
+                "timeout_ms": int(timeout_sec * 1000),
+            },
+        )
+        data = _expect_ok_object(
+            response=response,
+            data=data,
+            parse_error_message="remote deep analysis json root is not an object",
+            ok_error_message="remote deep analysis did not return ok=true",
+        )
+        analysis_raw = data.get("analysis")
+        if not isinstance(analysis_raw, dict):
+            raise ProviderError(
+                ProviderErrorCode.PARSE_ERROR,
+                "remote deep analysis payload is not an object",
+            )
+        return _to_deep_analysis(analysis_raw, item_id=item.item_id)
 
     async def favorite_item(
         self,
@@ -381,6 +422,31 @@ def _to_item(raw: dict[str, Any]) -> NormalizedItem | None:
         url=url,
         publish_time=publish_time,
         raw=raw,
+    )
+
+
+def _to_deep_analysis(raw: dict[str, Any], *, item_id: str) -> DeepAnalysisResult:
+    image_urls_raw = raw.get("image_urls")
+    image_urls = (
+        [str(url) for url in image_urls_raw if str(url).strip()]
+        if isinstance(image_urls_raw, list)
+        else []
+    )
+    return DeepAnalysisResult(
+        item_id=str(raw.get("item_id") or item_id),
+        analyzed_at=int(raw.get("analyzed_at") or 0),
+        status=str(raw.get("status") or "passed"),
+        credit_status=str(raw.get("credit_status") or "unknown"),
+        credit_reason=str(raw.get("credit_reason") or ""),
+        summary=str(raw.get("summary") or ""),
+        risk=str(raw.get("risk") or ""),
+        image_urls=image_urls,
+        seller_name=str(raw.get("seller_name") or "").strip() or None,
+        seller_id=str(raw.get("seller_id") or "").strip() or None,
+        seller_credit=str(raw.get("seller_credit") or "").strip() or None,
+        want_count=_safe_int(raw.get("want_count")),
+        browse_count=_safe_int(raw.get("browse_count")),
+        raw=raw.get("raw") if isinstance(raw.get("raw"), dict) else None,
     )
 
 

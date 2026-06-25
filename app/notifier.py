@@ -7,6 +7,7 @@ import httpx
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context
 
 from .detector import EventPayload
@@ -146,16 +147,16 @@ class Notifier:
             )
 
         for idx, item in enumerate(recommendation.top, start=1):
-            lines.append(f"{idx}. [{item.score:.1f}] {item.title}")
-            lines.append(f"   价格：￥{item.price:.2f}")
-            lines.append(f"   理由：{item.reason}")
-            lines.append(f"   风险：{item.risk}")
-            lines.append(f"   链接：{item.url}")
+            lines.extend(_render_recommendation_item_lines(idx, item))
 
         lines.append(recommendation_reply_hint())
         lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
         text = "\n".join(lines)
-        sent = await self._send_to_umo(umo, text)
+        sent = await self._send_chain_to_umo(
+            umo,
+            _build_recommendation_chain(lines, recommendation),
+            fallback_text=text,
+        )
         await self._send_webhook(
             {
                 "event_type": "RECOMMENDATION_SUMMARY",
@@ -173,6 +174,11 @@ class Notifier:
                         "title": item.title,
                         "price": item.price,
                         "url": item.url,
+                        "deep_analysis": (
+                            item.deep_analysis.to_dict()
+                            if item.deep_analysis is not None
+                            else None
+                        ),
                     }
                     for item in recommendation.top
                 ],
@@ -213,14 +219,36 @@ class Notifier:
         )
 
     async def _send_to_umo(self, umo: str, text: str) -> bool:
+        return await self._send_chain_to_umo(
+            umo,
+            MessageChain().message(text),
+            fallback_text=text,
+        )
+
+    async def _send_chain_to_umo(
+        self,
+        umo: str,
+        chain: MessageChain,
+        *,
+        fallback_text: str,
+    ) -> bool:
         try:
-            await self.context.send_message(umo, MessageChain().message(text))
+            await self.context.send_message(umo, chain)
             return True
         except Exception as exc:
-            logger.error(
-                "[goofish_catcher] send_message failed: %s", exc, exc_info=True
+            logger.warning(
+                "[goofish_catcher] send rich message failed, retrying text-only: %s",
+                exc,
+                exc_info=True,
             )
-            return False
+            try:
+                await self.context.send_message(umo, MessageChain().message(fallback_text))
+                return True
+            except Exception as text_exc:
+                logger.error(
+                    "[goofish_catcher] send_message failed: %s", text_exc, exc_info=True
+                )
+                return False
 
     async def _send_webhook(self, payload: dict[str, Any]) -> None:
         if not self.webhook_url:
@@ -256,3 +284,81 @@ def _readable_fallback_reason(reason: str) -> str:
         "NO_CANDIDATE": "本轮没有可分析的候选商品",
     }
     return mapping.get(reason, f"已触发回退策略（{reason}）")
+
+
+def _build_recommendation_chain(
+    header_lines: list[str],
+    recommendation: RecommendationResult,
+) -> MessageChain:
+    if not recommendation.top:
+        return MessageChain([Plain("\n".join(header_lines))])
+
+    chain_parts: list[object] = []
+    preface_count = 4 + (1 if recommendation.fallback_reason else 0)
+    chain_parts.append(Plain("\n".join(header_lines[:preface_count]) + "\n"))
+    for idx, item in enumerate(recommendation.top, start=1):
+        analysis = item.deep_analysis
+        image_url = analysis.image_urls[0] if analysis and analysis.image_urls else None
+        text_lines = [
+            f"\n{idx}. [{item.score:.1f}] {item.title}",
+            f"价格：￥{item.price:.2f}",
+            f"理由：{item.reason}",
+            f"风险：{item.risk}",
+        ]
+        if analysis is not None:
+            text_lines.extend(
+                [
+                    f"信用：{analysis.credit_status}（{analysis.credit_reason}）",
+                    f"深度分析：{analysis.summary}",
+                ]
+            )
+        if image_url:
+            text_lines.append("主图：")
+            chain_parts.append(Plain("\n".join(text_lines) + "\n"))
+            try:
+                chain_parts.append(Image.fromURL(image_url))
+            except Exception:
+                chain_parts.append(Plain(f"{image_url}\n"))
+            chain_parts.append(Plain(f"\n链接：{item.url}\n"))
+        else:
+            text_lines.append(f"链接：{item.url}")
+            chain_parts.append(Plain("\n".join(text_lines) + "\n"))
+    chain_parts.append(
+        Plain(
+            "\n"
+            + recommendation_reply_hint()
+            + f"\n查看逐条请用 /闲鱼 明细 {recommendation.keyword}"
+        )
+    )
+    return MessageChain(chain_parts)
+
+
+def _render_recommendation_item_lines(idx: int, item) -> list[str]:
+    lines = [
+        f"{idx}. [{item.score:.1f}] {item.title}",
+        f"   价格：￥{item.price:.2f}",
+        f"   理由：{item.reason}",
+        f"   风险：{item.risk}",
+    ]
+    analysis = item.deep_analysis
+    if analysis is not None:
+        lines.append(
+            f"   信用：{analysis.credit_status}（{analysis.credit_reason or '暂无说明'}）"
+        )
+        if analysis.summary:
+            lines.append(f"   深度分析：{analysis.summary}")
+        if analysis.risk:
+            lines.append(f"   详情风险：{analysis.risk}")
+        heat = []
+        if analysis.want_count is not None:
+            heat.append(f"想要 {analysis.want_count}")
+        if analysis.browse_count is not None:
+            heat.append(f"浏览 {analysis.browse_count}")
+        if heat:
+            lines.append(f"   热度：{' / '.join(heat)}")
+        if analysis.image_urls:
+            lines.append(f"   主图：{analysis.image_urls[0]}")
+    else:
+        lines.append("   深度分析：未获取到详情，按保守规则不过滤")
+    lines.append(f"   链接：{item.url}")
+    return lines

@@ -4,6 +4,8 @@ import {
 	Button,
 	CircularProgress,
 	Stack,
+	Switch,
+	Typography,
 	html,
 	startTransition,
 	useEffect,
@@ -144,9 +146,87 @@ export function DashboardPage({
 								onChange=${(event) =>
 									onTemporaryQueryChange({
 										pages: event.target.value
+								})}
+								wrapperSx=${{ width: { xs: '100%', md: 120 } }}
+							/>
+							<${AppTextField}
+								label="最低价"
+								type="number"
+								value=${temporaryQuery.price_min ?? ''}
+								onChange=${(event) =>
+									onTemporaryQueryChange({
+										price_min: event.target.value
 									})}
 								wrapperSx=${{ width: { xs: '100%', md: 120 } }}
 							/>
+							<${AppTextField}
+								label="最高价"
+								type="number"
+								value=${temporaryQuery.price_max ?? ''}
+								onChange=${(event) =>
+									onTemporaryQueryChange({
+										price_max: event.target.value
+									})}
+								wrapperSx=${{ width: { xs: '100%', md: 120 } }}
+							/>
+							<${AppTextField}
+								label="新发布范围"
+								value=${temporaryQuery.new_publish_option ?? ''}
+								onChange=${(event) =>
+									onTemporaryQueryChange({
+										new_publish_option: event.target.value
+									})}
+								hint="如 24小时内 / 7天内"
+							/>
+							<${AppTextField}
+								label="地区"
+								value=${temporaryQuery.region ?? ''}
+								onChange=${(event) =>
+									onTemporaryQueryChange({
+										region: event.target.value
+									})}
+								hint="如 江苏/南京/全南京"
+							/>
+							<${Box} className="field-block">
+								<div className="field-label">个人闲置</div>
+								<${Stack}
+									direction="row"
+									alignItems="center"
+									spacing=${1}
+									sx=${{ minHeight: 44 }}
+								>
+									<${Switch}
+										checked=${Boolean(temporaryQuery.personal_only)}
+										onChange=${(event) =>
+											onTemporaryQueryChange({
+												personal_only: event.target.checked
+											})}
+									/>
+									<${Typography} variant="body2" color="text.secondary">
+										仅个人闲置
+									<//>
+								<//>
+							<//>
+							<${Box} className="field-block">
+								<div className="field-label">包邮</div>
+								<${Stack}
+									direction="row"
+									alignItems="center"
+									spacing=${1}
+									sx=${{ minHeight: 44 }}
+								>
+									<${Switch}
+										checked=${Boolean(temporaryQuery.free_shipping)}
+										onChange=${(event) =>
+											onTemporaryQueryChange({
+												free_shipping: event.target.checked
+											})}
+									/>
+									<${Typography} variant="body2" color="text.secondary">
+										仅包邮
+									<//>
+								<//>
+							<//>
 							<${Button}
 								variant="contained"
 								onClick=${onRunTemporaryQuery}

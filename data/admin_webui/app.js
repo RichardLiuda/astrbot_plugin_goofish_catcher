@@ -43,6 +43,12 @@ const MONITOR_ACTIVE_INTERVAL_MS = 2000
 const DEFAULT_TEMP_QUERY = {
 	keyword: '',
 	pages: 1,
+	price_min: '',
+	price_max: '',
+	personal_only: false,
+	free_shipping: false,
+	new_publish_option: '',
+	region: '',
 	preview: null,
 	loading: false
 }
@@ -101,7 +107,21 @@ function App() {
 				method: 'POST',
 				body: {
 					keyword,
-					pages: Number(temporaryQuery.pages || 1)
+					pages: Number(temporaryQuery.pages || 1),
+					price_min:
+						temporaryQuery.price_min === '' || temporaryQuery.price_min == null
+							? null
+							: Number(temporaryQuery.price_min),
+					price_max:
+						temporaryQuery.price_max === '' || temporaryQuery.price_max == null
+							? null
+							: Number(temporaryQuery.price_max),
+					personal_only: Boolean(temporaryQuery.personal_only),
+					free_shipping: Boolean(temporaryQuery.free_shipping),
+					new_publish_option: String(
+						temporaryQuery.new_publish_option || ''
+					).trim(),
+					region: String(temporaryQuery.region || '').trim()
 				}
 			})
 			setTemporaryQuery((current) => ({

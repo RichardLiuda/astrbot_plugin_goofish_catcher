@@ -27,6 +27,7 @@ from .provider_retry import (
 from .recommender import GoofishRecommender
 from .storage import SubscriptionStorage
 from .types import (
+    DeepAnalysisResult,
     NormalizedItem,
     ProviderError,
     ProviderErrorCode,
@@ -39,6 +40,8 @@ _PRICE_SPIKE_FACTOR = 10.0
 
 EVENT_NEW = "NEW"
 EVENT_PRICE_DROP = "PRICE_DROP"
+DEEP_ANALYSIS_MAX_CANDIDATES = 10
+DEEP_ANALYSIS_CACHE_TTL_SEC = 6 * 3600
 
 
 def _matches_price_range(item: NormalizedItem, sub: Subscription) -> bool:
@@ -197,8 +200,81 @@ class MonitoringScheduler:
             len(rejected_items),
         )
         candidates = await self._process_items(sub, kept_items, now_ts)
+        candidates = await self.deep_analyze_candidates(candidates)
         await self.storage.update_schedule_success(sub.id, now_ts, sub.interval_sec)
         return candidates, len(kept_items)
+
+    async def deep_analyze_candidates(
+        self,
+        candidates: list[RecommendationCandidate],
+    ) -> list[RecommendationCandidate]:
+        if not candidates:
+            return candidates
+        now_ts = int(time.time())
+        selected = candidates[:DEEP_ANALYSIS_MAX_CANDIDATES]
+        cached = await self.storage.get_deep_analysis_bulk(
+            [candidate.item_id for candidate in selected]
+        )
+        kept: list[RecommendationCandidate] = []
+        for candidate in candidates:
+            if candidate not in selected:
+                kept.append(candidate)
+                continue
+            analysis = cached.get(candidate.item_id)
+            if analysis is None or now_ts - analysis.analyzed_at > DEEP_ANALYSIS_CACHE_TTL_SEC:
+                analysis = await self._fetch_candidate_deep_analysis(candidate, now_ts)
+            candidate.deep_analysis = analysis
+            if analysis and analysis.rejected:
+                logger.info(
+                    "[goofish_catcher] deep analysis rejected item_id=%s reason=%s",
+                    candidate.item_id,
+                    analysis.credit_reason,
+                )
+                continue
+            kept.append(candidate)
+        return kept
+
+    async def _fetch_candidate_deep_analysis(
+        self,
+        candidate: RecommendationCandidate,
+        now_ts: int,
+    ) -> DeepAnalysisResult | None:
+        analyze = getattr(self.provider, "analyze_item_detail", None)
+        if not callable(analyze):
+            return None
+        try:
+            item = NormalizedItem(
+                item_id=candidate.item_id,
+                title=candidate.title,
+                price=candidate.price,
+                url=candidate.url,
+                publish_time=candidate.publish_time,
+            )
+            analysis = await asyncio.wait_for(
+                analyze(item=item, timeout_sec=max(8, self.settings.fetch_timeout_sec)),
+                timeout=max(12, self.settings.fetch_timeout_sec + 8),
+            )
+            await self.storage.upsert_deep_analysis(analysis)
+            return analysis
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] deep analysis failed item_id=%s: %s",
+                candidate.item_id,
+                exc,
+            )
+            fallback = DeepAnalysisResult(
+                item_id=candidate.item_id,
+                analyzed_at=now_ts,
+                status="passed",
+                credit_status="unknown",
+                credit_reason="深度分析失败，按保守规则不过滤",
+                summary="深度分析失败，已保守放行",
+                risk=str(exc),
+                image_urls=[],
+                raw={"error": str(exc)},
+            )
+            await self.storage.upsert_deep_analysis(fallback)
+            return fallback
 
     async def _enqueue_sub_id(self, sub_id: int) -> bool:
         async with self._inflight_lock:
@@ -311,6 +387,7 @@ class MonitoringScheduler:
                     keyword=sub.keyword,
                     pages=max(1, min(sub.pages, self.settings.max_pages)),
                     timeout_sec=self.settings.fetch_timeout_sec,
+                    filters=sub.search_filters(),
                 ),
                 timeout=estimate_captcha_retry_timeout_sec(
                     timeout_sec=self.settings.fetch_timeout_sec,
@@ -353,6 +430,7 @@ class MonitoringScheduler:
                     )
 
             candidates = await self._process_items(sub, items, now_ts, market_price=market_snapshot)
+            candidates = await self.deep_analyze_candidates(candidates)
             await self.storage.finish_fetch_run(
                 run_id,
                 finished_at=now_ts,

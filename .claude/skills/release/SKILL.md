@@ -49,7 +49,15 @@ git diff HEAD       # 确认未提交改动
 当前插件版本（vX.Y.Z）需要 Worker **≥ vA.B.C**。
 ```
 
-每次发版都要把括号里的插件版本号更新为新版本号。**只有**本次改动涉及 Worker 接口变更（breaking change）时，才同时更新 `≥ vA.B.C` 部分。
+每次发版都要把括号里的插件版本号更新为新版本号。
+
+**`≥ vA.B.C` 何时需要同步更新**：只要本次改动包含 `worker_server.py` 的任何功能性修改（新增行为、修复 bug、默认值变更等），就必须把 `≥ vA.B.C` 更新为新版本号，并在 CHANGELOG 条目顶部加上：
+
+```markdown
+> **⚠️ Worker 端行为变更，`remote_rest` 模式需在 Worker 服务器上 `git pull` 并重启。**
+```
+
+仅当本次改动**完全不涉及** `worker_server.py`（只改插件侧逻辑、UI、文档等）时，`≥ vA.B.C` 才保持不变。
 
 ### 4. 更新 metadata.yaml
 

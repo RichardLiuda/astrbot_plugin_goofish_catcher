@@ -21,10 +21,27 @@ sys.modules["astrbot.api"] = astrbot_api_module
 sys.modules["astrbot.api.star"] = astrbot_api_star_module
 
 from app.recommender import GoofishRecommender
-from app.types import RecommendationCandidate
+from app.types import DeepAnalysisResult, RecommendationCandidate, SearchFilters
 
 
 class RecommendPriceThresholdTest(unittest.IsolatedAsyncioTestCase):
+    def test_search_filters_normalize_advanced_fields(self) -> None:
+        filters = SearchFilters(
+            price_lower=0,
+            price_upper=1500,
+            personal_only=True,
+            free_shipping=True,
+            new_publish_option=" 24小时内 ",
+            region=" 江苏/南京/全南京 ",
+        ).normalized()
+
+        self.assertIsNone(filters.price_lower)
+        self.assertEqual(filters.price_upper, 1500)
+        self.assertTrue(filters.personal_only)
+        self.assertTrue(filters.free_shipping)
+        self.assertEqual(filters.new_publish_option, "24小时内")
+        self.assertEqual(filters.region, "江苏/南京/全南京")
+
     async def test_analyze_filters_items_above_threshold(self) -> None:
         recommender = GoofishRecommender(
             context=SimpleNamespace(),
@@ -100,6 +117,50 @@ class RecommendPriceThresholdTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.top, [])
         self.assertEqual(result.fallback_reason, "PRICE_THRESHOLD_EMPTY")
+
+    async def test_analyze_carries_deep_analysis_to_result(self) -> None:
+        recommender = GoofishRecommender(
+            context=SimpleNamespace(),
+            settings=SimpleNamespace(
+                llm_top_k=3,
+                llm_max_candidates=20,
+                llm_enabled=False,
+                llm_min_score=0.0,
+            ),
+        )
+        analysis = DeepAnalysisResult(
+            item_id="good-credit",
+            analyzed_at=1,
+            status="passed",
+            credit_status="good",
+            credit_reason="卖家信用信息良好",
+            summary="信用良好；想要 12",
+            risk="未发现明确低信用风险",
+            image_urls=["https://example.com/a.jpg"],
+            want_count=12,
+        )
+        candidates = [
+            RecommendationCandidate(
+                event_type="NEW",
+                keyword="镜头",
+                item_id="good-credit",
+                title="Sony 20-70",
+                price=4999.0,
+                url="https://example.com/good-credit",
+                publish_time=None,
+                observed_at=1,
+                deep_analysis=analysis,
+            )
+        ]
+
+        result = await recommender.analyze(
+            umo="test",
+            keyword="镜头",
+            candidates=candidates,
+        )
+
+        self.assertEqual(result.top[0].deep_analysis, analysis)
+        self.assertIn("good", result.top[0].deep_analysis.credit_status)
 
 
 if __name__ == "__main__":

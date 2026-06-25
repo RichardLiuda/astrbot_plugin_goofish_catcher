@@ -60,6 +60,10 @@ class SubscriptionSummary:
     consecutive_failures: int
     price_min: float | None = None
     price_max: float | None = None
+    personal_only: bool = False
+    free_shipping: bool = False
+    new_publish_option: str | None = None
+    region: str | None = None
 
 
 @dataclass(slots=True)
@@ -155,6 +159,7 @@ class ItemDetail:
     price_history: list[PriceHistoryPoint] = field(default_factory=list)
     notifications: list[NotificationRecord] = field(default_factory=list)
     fetch_runs: list[FetchRunSummary] = field(default_factory=list)
+    deep_analysis: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -184,6 +189,7 @@ class QueryPreviewItem:
     score: float
     reason: str
     risk: str
+    deep_analysis: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

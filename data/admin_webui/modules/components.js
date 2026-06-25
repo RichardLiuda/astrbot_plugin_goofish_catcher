@@ -10,6 +10,7 @@ import {
 	DialogContent,
 	DialogTitle,
 	Stack,
+	Switch,
 	TextField,
 	Typography,
 	html,
@@ -347,11 +348,21 @@ export function QueryPreviewPanel({ title, preview }) {
 							<div className="result-grid">
 								${preview.items.map((item) => {
 									const risk = riskChipProps(item.risk)
+									const analysis = item.deep_analysis || null
+									const imageUrl = analysis?.image_urls?.[0] || ''
 									return html`
 										<div
 											className="result-card"
 											key=${item.item_id}
 										>
+											${imageUrl
+												? html`<img
+														className="result-card-image"
+														src=${imageUrl}
+														alt=${item.title}
+														loading="lazy"
+													/>`
+												: null}
 											<div className="result-card-head">
 												<div
 													className="result-card-title"
@@ -379,7 +390,45 @@ export function QueryPreviewPanel({ title, preview }) {
 													color=${risk.color}
 													variant=${risk.variant}
 												/>
+												${analysis
+													? html`<${Chip}
+															size="small"
+															label=${`信用 ${analysis.credit_status || 'unknown'}`}
+															color=${analysis.credit_status === 'good'
+																? 'success'
+																: analysis.credit_status === 'bad'
+																	? 'error'
+																	: 'default'}
+															variant="outlined"
+														/>`
+													: null}
 											</div>
+											${analysis
+												? html`
+														<div className="deep-analysis-box">
+															<div>
+																卖家信用：${analysis.credit_reason ||
+																analysis.credit_status ||
+																'-'}
+															</div>
+															<div>
+																深度分析：${analysis.summary ||
+																'暂无摘要'}
+															</div>
+															${analysis.want_count != null ||
+															analysis.browse_count != null
+																? html`<div>
+																		热度：${analysis.want_count != null
+																			? `想要 ${analysis.want_count}`
+																			: ''}
+																		${analysis.browse_count != null
+																			? ` 浏览 ${analysis.browse_count}`
+																			: ''}
+																	</div>`
+																: null}
+														</div>
+													`
+												: null}
 											<${Button}
 												variant="outlined"
 												href=${item.url}
@@ -513,6 +562,77 @@ export function SubscriptionDialog({ open, value, onClose, onSubmit }) {
 						`
 					)}
 				</div>
+				<${Box} sx=${{ mt: 2.5 }}>
+					<${Typography} variant="subtitle2" sx=${{ mb: 1.5 }}>
+						高级筛选
+					<//>
+					<div className="form-grid">
+						<${Box} className="field-block">
+							<div className="field-label">个人闲置</div>
+							<${Stack}
+								direction="row"
+								alignItems="center"
+								spacing=${1.5}
+								sx=${{ minHeight: 44 }}
+							>
+								<${Switch}
+									checked=${Boolean(form.personal_only)}
+									onChange=${(event) =>
+										setForm((current) => ({
+											...current,
+											personal_only: event.target.checked
+										}))}
+								/>
+								<${Typography} variant="body2" color="text.secondary">
+									只看个人闲置商品
+								<//>
+							<//>
+							<div className="field-hint">默认关闭，不影响旧订阅</div>
+						<//>
+						<${Box} className="field-block">
+							<div className="field-label">包邮</div>
+							<${Stack}
+								direction="row"
+								alignItems="center"
+								spacing=${1.5}
+								sx=${{ minHeight: 44 }}
+							>
+								<${Switch}
+									checked=${Boolean(form.free_shipping)}
+									onChange=${(event) =>
+										setForm((current) => ({
+											...current,
+											free_shipping: event.target.checked
+										}))}
+								/>
+								<${Typography} variant="body2" color="text.secondary">
+									只看包邮商品
+								<//>
+							<//>
+							<div className="field-hint">默认关闭</div>
+						<//>
+						<${AppTextField}
+							label="新发布范围"
+							value=${form.new_publish_option ?? ''}
+							onChange=${(event) =>
+								setForm((current) => ({
+									...current,
+									new_publish_option: event.target.value
+								}))}
+							hint="如 24小时内 / 7天内 / 14天内，留空不限"
+						/>
+						<${AppTextField}
+							label="地区"
+							value=${form.region ?? ''}
+							onChange=${(event) =>
+								setForm((current) => ({
+									...current,
+									region: event.target.value
+								}))}
+							hint="格式如 江苏/南京/全南京，留空不限"
+						/>
+					</div>
+				<//>
 			<//>
 			<${DialogActions} sx=${{ px: 3, pb: 3, pt: 2 }}>
 				<${Button} onClick=${onClose}>取消<//>

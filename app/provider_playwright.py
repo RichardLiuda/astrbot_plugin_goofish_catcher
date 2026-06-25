@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -30,7 +32,14 @@ from .provider_agent import (
     check_login_via_llm,
     find_favorite_button_via_llm,
 )
-from .types import FavoriteItemResult, NormalizedItem, ProviderError, ProviderErrorCode
+from .types import (
+    DeepAnalysisResult,
+    FavoriteItemResult,
+    NormalizedItem,
+    ProviderError,
+    ProviderErrorCode,
+    SearchFilters,
+)
 
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
 _DETAIL_FAVORITE_BUTTON_SELECTOR = "div[class*='buttons--'] div[class*='right--']"
@@ -320,10 +329,15 @@ class PlaywrightSearchProvider:
         keyword: str,
         pages: int,
         timeout_sec: int,
+        filters: SearchFilters | None = None,
         price_lower: float | None = None,
         price_upper: float | None = None,
     ) -> list[NormalizedItem]:
         async with self._operation_lock:
+            effective_filters = (filters or SearchFilters(
+                price_lower=price_lower,
+                price_upper=price_upper,
+            )).normalized()
             browser = None
             if self.settings.playwright_user_data_dir is None:
                 browser = await self._ensure_browser()
@@ -337,8 +351,7 @@ class PlaywrightSearchProvider:
                     keyword=keyword,
                     page_index=page_index,
                     timeout_ms=timeout_ms,
-                    price_lower=price_lower,
-                    price_upper=price_upper,
+                    filters=effective_filters,
                 )
                 for item in page_items:
                     unique[item.item_id] = item
@@ -347,6 +360,77 @@ class PlaywrightSearchProvider:
                     break
 
             return list(unique.values())
+
+    async def analyze_item_detail(
+        self,
+        *,
+        item: NormalizedItem,
+        timeout_sec: int,
+    ) -> DeepAnalysisResult:
+        async with self._operation_lock:
+            timeout_ms = max(5, timeout_sec) * 1000
+            context, should_close_context = await self._open_operation_context()
+            page = await context.new_page()
+            captured_payloads: list[dict[str, Any] | list[Any]] = []
+            error_flags: set[str] = set()
+            self._attach_page_state_watchers(page, error_flags)
+
+            async def on_response(response) -> None:
+                url = response.url.lower()
+                content_type = (response.headers.get("content-type") or "").lower()
+                if _is_auth_url(url):
+                    error_flags.add("auth")
+                if _is_captcha_url(url):
+                    error_flags.add("captcha")
+                if "json" not in content_type:
+                    return
+                try:
+                    payload = await response.json()
+                except Exception:
+                    return
+                if isinstance(payload, (dict, list)):
+                    captured_payloads.append(payload)
+
+            page.on("response", on_response)
+            try:
+                await page.goto(item.url, wait_until="domcontentloaded", timeout=timeout_ms)
+                await self._maybe_wait_for_network_idle(page, timeout_ms)
+                await page.wait_for_timeout(1000)
+                page_error = await self._classify_timeout_page_state(
+                    page,
+                    error_flags=error_flags,
+                )
+                if page_error is not None:
+                    raise page_error
+                detail = _build_deep_analysis_result(
+                    item=item,
+                    payloads=captured_payloads,
+                    page_title=_normalize_item_page_title(await page.title()),
+                )
+                await self._persist_context_storage_state(context)
+                return detail
+            except TimeoutError as exc:
+                timeout_error = await self._classify_timeout_page_state(
+                    page,
+                    error_flags=error_flags,
+                )
+                if timeout_error is not None:
+                    raise timeout_error from exc
+                raise ProviderError(
+                    ProviderErrorCode.TIMEOUT,
+                    f"playwright timeout while analyzing item detail: {exc}",
+                ) from exc
+            except PlaywrightError as exc:
+                raise ProviderError(
+                    ProviderErrorCode.UNKNOWN,
+                    f"playwright detail page error: {exc}",
+                    retry_after_sec=300,
+                ) from exc
+            finally:
+                if callable(getattr(page, "close", None)):
+                    await page.close()
+                if should_close_context:
+                    await context.close()
 
     async def favorite_item(
         self,
@@ -549,8 +633,7 @@ class PlaywrightSearchProvider:
         keyword: str,
         page_index: int,
         timeout_ms: int,
-        price_lower: float | None = None,
-        price_upper: float | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[NormalizedItem]:
         del browser
         context, should_close_context = await self._open_operation_context()
@@ -611,10 +694,11 @@ class PlaywrightSearchProvider:
                 captured_payloads.append(payload)
 
         page.on("response", on_response)
+        filters = (filters or SearchFilters()).normalized()
         search_url = self._build_search_url(
             keyword=keyword,
-            price_lower=price_lower,
-            price_upper=price_upper,
+            price_lower=filters.price_lower,
+            price_upper=filters.price_upper,
         )
 
         try:
@@ -661,6 +745,13 @@ class PlaywrightSearchProvider:
                     )
             if page_error is not None:
                 raise page_error
+
+            await self._apply_search_filters(
+                page=page,
+                filters=filters,
+                captured_payloads=captured_payloads,
+                timeout_ms=timeout_ms,
+            )
 
             if page_index > 1:
                 # Goofish keeps the browser URL stable and drives pagination
@@ -730,6 +821,12 @@ class PlaywrightSearchProvider:
                     search_url, wait_until="domcontentloaded", timeout=timeout_ms
                 )
                 await self._maybe_wait_for_network_idle(page, timeout_ms)
+                await self._apply_search_filters(
+                    page=page,
+                    filters=filters,
+                    captured_payloads=captured_payloads,
+                    timeout_ms=timeout_ms,
+                )
                 items = await self._wait_for_items_ready(
                     page=page,
                     captured_payloads=captured_payloads,
@@ -766,6 +863,84 @@ class PlaywrightSearchProvider:
                 await page.close()
             if should_close_context:
                 await context.close()
+
+    async def _apply_search_filters(
+        self,
+        *,
+        page,
+        filters: SearchFilters,
+        captured_payloads: list[dict[str, Any] | list[Any]],
+        timeout_ms: int,
+    ) -> None:
+        """Best-effort UI filters. Search still succeeds if Goofish changes selectors."""
+        if not (
+            filters.personal_only
+            or filters.free_shipping
+            or filters.new_publish_option
+            or filters.region
+        ):
+            return
+        timeout = max(1500, min(6000, timeout_ms // 3))
+
+        async def _click_text(text: str, *, exact: bool = True) -> bool:
+            try:
+                locator = page.get_by_text(text, exact=exact).first
+                if await locator.count() <= 0:
+                    return False
+                captured_payloads.clear()
+                await locator.click(timeout=timeout)
+                await page.wait_for_timeout(900)
+                return True
+            except Exception as exc:
+                logger.debug("[goofish_catcher] search filter click failed text=%r: %s", text, exc)
+                return False
+
+        if filters.new_publish_option:
+            if await _click_text("新发布"):
+                await _click_text(filters.new_publish_option, exact=False)
+
+        if filters.personal_only:
+            await _click_text("个人闲置")
+
+        if filters.free_shipping:
+            await _click_text("包邮")
+
+        if filters.region:
+            await self._apply_region_filter(page, filters.region, captured_payloads, timeout)
+
+        await self._maybe_wait_for_network_idle(page, timeout_ms)
+
+    async def _apply_region_filter(
+        self,
+        page,
+        region: str,
+        captured_payloads: list[dict[str, Any] | list[Any]],
+        timeout_ms: int,
+    ) -> None:
+        parts = [part.strip() for part in str(region or "").split("/") if part.strip()]
+        if not parts:
+            return
+        try:
+            trigger = page.get_by_text("区域", exact=True).first
+            if await trigger.count() <= 0:
+                return
+            await trigger.click(timeout=timeout_ms)
+            await page.wait_for_timeout(800)
+            popover = page.locator("div.ant-popover").last
+            if await popover.count() <= 0:
+                popover = page.locator("body")
+            for part in parts[:3]:
+                option = popover.get_by_text(part, exact=False).first
+                if await option.count() > 0:
+                    await option.click(timeout=timeout_ms)
+                    await page.wait_for_timeout(500)
+            search_btn = popover.get_by_text(re.compile(r"查看|确定|搜索"), exact=False).first
+            if await search_btn.count() > 0:
+                captured_payloads.clear()
+                await search_btn.click(timeout=timeout_ms)
+                await page.wait_for_timeout(900)
+        except Exception as exc:
+            logger.debug("[goofish_catcher] region filter failed region=%r: %s", region, exc)
 
     async def _try_quick_login(self, page, context) -> bool:
         """若页面弹出「快速进入」一键登录对话框（已记住账号），自动点击恢复会话。
@@ -1417,6 +1592,212 @@ class PlaywrightSearchProvider:
             publish_time=publish_time,
             raw=data,
         )
+
+
+def _build_deep_analysis_result(
+    *,
+    item: NormalizedItem,
+    payloads: list[dict[str, Any] | list[Any]],
+    page_title: str,
+) -> DeepAnalysisResult:
+    merged = _merge_detail_payloads(payloads)
+    item_do = _find_first_nested_dict(merged, ("itemDO", "item", "itemInfo", "auction"))
+    seller_do = _find_first_nested_dict(merged, ("sellerDO", "seller", "sellerInfo", "user"))
+    detail_source: dict[str, Any] = {}
+    if isinstance(item.raw, dict):
+        detail_source.update(item.raw)
+    if item_do:
+        detail_source.update(item_do)
+    if seller_do:
+        detail_source["seller"] = seller_do
+
+    title = _pick_first_text(item_do or {}, ("title", "itemTitle", "subject")) if item_do else None
+    seller_name = _pick_first_text(
+        seller_do or {},
+        ("nick", "nickName", "sellerNick", "userNick", "nickname"),
+    ) if seller_do else None
+    seller_id = _pick_first_text(
+        seller_do or {},
+        ("sellerId", "userId", "id"),
+    ) if seller_do else None
+    seller_credit = _pick_first_text(
+        seller_do or {},
+        ("zhimaLevel", "zhimaLevelName", "levelName", "creditLevel", "creditText"),
+    ) if seller_do else None
+    if seller_do and not seller_credit:
+        zhima_info = seller_do.get("zhimaLevelInfo")
+        if isinstance(zhima_info, dict):
+            seller_credit = _pick_first_text(zhima_info, ("levelName", "name", "text"))
+
+    image_urls = _extract_image_urls(detail_source)
+    want_count = _parse_optional_int(_pick_first_text(item_do or {}, ("wantCnt", "wantCount", "want_count"))) if item_do else None
+    browse_count = _parse_optional_int(_pick_first_text(item_do or {}, ("browseCnt", "browseCount", "browse_count"))) if item_do else None
+
+    credit_status, credit_reason = _classify_credit(
+        seller_credit=seller_credit,
+        seller_payload=seller_do or {},
+        item_payload=item_do or {},
+    )
+    status = "rejected" if credit_status == "bad" else "passed"
+    risk = "信用风险较高" if status == "rejected" else "未发现明确低信用风险"
+    summary_parts = [
+        f"信用：{seller_credit or credit_status}",
+        credit_reason,
+    ]
+    if want_count is not None:
+        summary_parts.append(f"想要 {want_count}")
+    if browse_count is not None:
+        summary_parts.append(f"浏览 {browse_count}")
+    if seller_name:
+        summary_parts.append(f"卖家 {seller_name}")
+
+    return DeepAnalysisResult(
+        item_id=item.item_id,
+        analyzed_at=int(time.time()),
+        status=status,
+        credit_status=credit_status,
+        credit_reason=credit_reason,
+        summary="；".join(part for part in summary_parts if part),
+        risk=risk,
+        image_urls=image_urls,
+        seller_name=seller_name,
+        seller_id=seller_id,
+        seller_credit=seller_credit,
+        want_count=want_count,
+        browse_count=browse_count,
+        raw={
+            "title": title or page_title or item.title,
+            "payload_count": len(payloads),
+            "item": _safe_jsonable(item_do or {}),
+            "seller": _safe_jsonable(seller_do or {}),
+        },
+    )
+
+
+def _merge_detail_payloads(payloads: list[dict[str, Any] | list[Any]]) -> dict[str, Any]:
+    return {"payloads": payloads}
+
+
+def _find_first_nested_dict(node: Any, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key in keys:
+                value = current.get(key)
+                if isinstance(value, dict):
+                    return value
+            stack.extend(value for value in current.values() if isinstance(value, (dict, list)))
+        elif isinstance(current, list):
+            stack.extend(value for value in current if isinstance(value, (dict, list)))
+    return None
+
+
+def _extract_image_urls(node: Any, *, limit: int = 6) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add_url(value: Any) -> None:
+        if len(urls) >= limit:
+            return
+        text = str(value or "").strip()
+        if not text:
+            return
+        if text.startswith("//"):
+            text = "https:" + text
+        if not (text.startswith("http://") or text.startswith("https://")):
+            return
+        lowered = text.lower()
+        if not any(marker in lowered for marker in (".jpg", ".jpeg", ".png", ".webp", "alicdn", "img")):
+            return
+        if text in seen:
+            return
+        seen.add(text)
+        urls.append(text)
+
+    stack = [node]
+    while stack and len(urls) < limit:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                lowered_key = str(key).lower()
+                if lowered_key in {"url", "image", "imageurl", "picurl", "src"} or "image" in lowered_key or "pic" in lowered_key:
+                    if isinstance(value, str):
+                        add_url(value)
+                if isinstance(value, (dict, list)):
+                    stack.append(value)
+        elif isinstance(current, list):
+            stack.extend(value for value in current if isinstance(value, (dict, list, str)))
+        elif isinstance(current, str):
+            add_url(current)
+    return urls
+
+
+def _classify_credit(
+    *,
+    seller_credit: str | None,
+    seller_payload: dict[str, Any],
+    item_payload: dict[str, Any],
+) -> tuple[str, str]:
+    seller_text = " ".join(
+        str(value)
+        for value in (
+            seller_credit,
+            json.dumps(seller_payload, ensure_ascii=False)[:1200],
+        )
+        if value
+    )
+    item_text = json.dumps(item_payload, ensure_ascii=False)[:800].lower()
+    lowered = seller_text.lower()
+    bad_markers = (
+        "信用较差",
+        "信用差",
+        "芝麻较差",
+        "较差",
+        "差评很多",
+        "风险卖家",
+        "严重违规",
+        "骗子",
+        "诈骗",
+    )
+    good_markers = (
+        "信用极好",
+        "信用优秀",
+        "芝麻信用优秀",
+        "优秀",
+        "极好",
+        "良好",
+    )
+    severe_item_markers = ("风险卖家", "严重违规", "骗子", "诈骗")
+    if any(marker in lowered for marker in bad_markers) or any(
+        marker in item_text for marker in severe_item_markers
+    ):
+        return "bad", "检测到明确低信用或严重负面风险标记"
+    if any(marker in lowered for marker in good_markers):
+        return "good", "卖家信用信息良好"
+    if seller_credit:
+        return "unknown", f"卖家信用信息：{seller_credit}"
+    return "unknown", "未获取到明确卖家信用信息，按保守规则不过滤"
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    match = re.search(r"\d+", str(value))
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
+
+
+def _safe_jsonable(value: Any) -> Any:
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except Exception:
+        return str(value)
 
 
 def _is_auth_url(url: str) -> bool:

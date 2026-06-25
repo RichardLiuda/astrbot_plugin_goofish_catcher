@@ -9,7 +9,7 @@ from typing import Any
 
 from astrbot.api import AstrBotConfig, logger, llm_tool
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Node, Nodes, Plain
+from astrbot.api.message_components import Image, Node, Nodes, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
@@ -57,6 +57,7 @@ from .app.types import (
     ProviderErrorCode,
     RecommendationCandidate,
     RecommendationResult,
+    SearchFilters,
 )
 
 PLUGIN_NAME = "astrbot_plugin_goofish_catcher"
@@ -683,6 +684,7 @@ class GoofishCatcherPlugin(Star):
         *,
         keyword: str,
         pages: int,
+        filters: SearchFilters | None = None,
         price_lower: float | None = None,
         price_upper: float | None = None,
     ) -> list[NormalizedItem]:
@@ -693,6 +695,7 @@ class GoofishCatcherPlugin(Star):
             keyword=keyword,
             pages=pages,
             timeout_sec=self.settings.fetch_timeout_sec,
+            filters=filters,
             price_lower=price_lower,
             price_upper=price_upper,
         )
@@ -1090,6 +1093,10 @@ class GoofishCatcherPlugin(Star):
         pages: int = 1,
         min_price: float = 0,
         max_price: float = 0,
+        personal_only: bool = False,
+        free_shipping: bool = False,
+        new_publish_option: str = "",
+        region: str = "",
     ) -> str:
         """实时搜索闲鱼商品（直接调脚本，速度快，无需浏览器 Agent）。
         结果以列表形式发出，用户可引用该消息并回复序号来快速收藏商品。
@@ -1100,6 +1107,10 @@ class GoofishCatcherPlugin(Star):
             pages(number): 搜索页数，默认 1，最多 3
             min_price(number): 最低价格（元），0 表示不限
             max_price(number): 最高价格（元），0 表示不限
+            personal_only(boolean): 是否只看个人闲置
+            free_shipping(boolean): 是否只看包邮
+            new_publish_option(string): 新发布范围，如 24小时内/7天内/14天内，空表示不限
+            region(string): 地区筛选，如 江苏/南京/全南京，空表示不限
         """
         if err := self._llm_tools_guard():
             return err
@@ -1109,13 +1120,20 @@ class GoofishCatcherPlugin(Star):
         pages = max(1, min(int(pages), 3))
         min_price = float(min_price) if min_price else 0.0
         max_price = float(max_price) if max_price else 0.0
+        filters = SearchFilters(
+            price_lower=min_price if min_price > 0 else None,
+            price_upper=max_price if max_price > 0 else None,
+            personal_only=personal_only,
+            free_shipping=free_shipping,
+            new_publish_option=new_publish_option,
+            region=region,
+        ).normalized()
 
         try:
             items = await self._search_with_captcha_retry(
                 keyword=keyword,
                 pages=pages,
-                price_lower=min_price if min_price > 0 else None,
-                price_upper=max_price if max_price > 0 else None,
+                filters=filters,
             )
         except ProviderError as exc:
             if exc.code == ProviderErrorCode.AUTH_REQUIRED:
@@ -1236,6 +1254,10 @@ class GoofishCatcherPlugin(Star):
                 "interval_sec": it.get("interval_sec"),
                 "price_min": it.get("price_min"),
                 "price_max": it.get("price_max"),
+                "personal_only": it.get("personal_only"),
+                "free_shipping": it.get("free_shipping"),
+                "new_publish_option": it.get("new_publish_option"),
+                "region": it.get("region"),
                 "last_run_at": it.get("last_run_at"),
             }
             for it in items
@@ -1254,6 +1276,10 @@ class GoofishCatcherPlugin(Star):
         pages: int = 0,
         price_min: float = 0,
         price_max: float = 0,
+        personal_only: bool = False,
+        free_shipping: bool = False,
+        new_publish_option: str = "",
+        region: str = "",
     ) -> str:
         """创建一个新的闲鱼关键词监控订阅，系统会定时搜索并推送新商品或降价通知。
 
@@ -1263,6 +1289,10 @@ class GoofishCatcherPlugin(Star):
             pages(number): 每次搜索的页数，0 表示使用系统默认值
             price_min(number): 最低价格过滤（元），0 表示不限
             price_max(number): 最高价格过滤（元），0 表示不限
+            personal_only(boolean): 是否只看个人闲置
+            free_shipping(boolean): 是否只看包邮
+            new_publish_option(string): 新发布范围，如 24小时内/7天内/14天内，空表示不限
+            region(string): 地区筛选，如 江苏/南京/全南京，空表示不限
         """
         if err := self._llm_tools_guard():
             return err
@@ -1279,6 +1309,14 @@ class GoofishCatcherPlugin(Star):
             payload["price_min"] = price_min
         if price_max > 0:
             payload["price_max"] = price_max
+        if personal_only:
+            payload["personal_only"] = True
+        if free_shipping:
+            payload["free_shipping"] = True
+        if new_publish_option:
+            payload["new_publish_option"] = new_publish_option
+        if region:
+            payload["region"] = region
         try:
             data = await self._admin_service.create_subscription(payload)
         except (KeyError, ValueError) as exc:
@@ -1299,6 +1337,10 @@ class GoofishCatcherPlugin(Star):
         pages: int = 0,
         price_min: float = -1,
         price_max: float = -1,
+        personal_only: bool | None = None,
+        free_shipping: bool | None = None,
+        new_publish_option: str | None = None,
+        region: str | None = None,
     ) -> str:
         """修改已有订阅的参数。只传需要修改的字段，不传则保持原值不变。
 
@@ -1309,6 +1351,10 @@ class GoofishCatcherPlugin(Star):
             pages(number): 新页数，0 表示不修改
             price_min(number): 新最低价格，-1 表示不修改，0 表示清除限制
             price_max(number): 新最高价格，-1 表示不修改，0 表示清除限制
+            personal_only(boolean): 是否只看个人闲置；不传则不修改
+            free_shipping(boolean): 是否只看包邮；不传则不修改
+            new_publish_option(string): 新发布范围；空字符串表示清除
+            region(string): 地区筛选；空字符串表示清除
         """
         if err := self._llm_tools_guard():
             return err
@@ -1324,6 +1370,14 @@ class GoofishCatcherPlugin(Star):
             payload["price_min"] = price_min if price_min > 0 else None
         if price_max >= 0:
             payload["price_max"] = price_max if price_max > 0 else None
+        if personal_only is not None:
+            payload["personal_only"] = bool(personal_only)
+        if free_shipping is not None:
+            payload["free_shipping"] = bool(free_shipping)
+        if new_publish_option is not None:
+            payload["new_publish_option"] = new_publish_option or None
+        if region is not None:
+            payload["region"] = region or None
         try:
             data = await self._admin_service.update_subscription(sub_id, payload)
         except (KeyError, ValueError) as exc:
@@ -1856,11 +1910,13 @@ class GoofishCatcherPlugin(Star):
             message_query_args=_extract_subcommand_args(event.get_message_str()),
             parsed_keyword=str(keyword).strip(),
         )
-        keyword_text, page_count, price_min, price_max = _parse_query_input(
+        keyword_text, page_count, search_filters = _parse_query_input(
             raw_keyword=raw_query_args,
             default_pages=self.settings.default_pages,
             max_pages=self.settings.max_pages,
         )
+        price_min = search_filters.price_lower
+        price_max = search_filters.price_upper
         if not keyword_text:
             yield event.plain_result(
                 "关键词不能为空。示例：/闲鱼 查询 适马 60-600 --pages 2"
@@ -1872,8 +1928,7 @@ class GoofishCatcherPlugin(Star):
                 self._search_with_captcha_retry(
                     keyword=keyword_text,
                     pages=page_count,
-                    price_lower=price_min,
-                    price_upper=price_max,
+                    filters=search_filters,
                 ),
                 timeout=timeout_sec,
             )
@@ -1893,6 +1948,7 @@ class GoofishCatcherPlugin(Star):
                 items=filtered_items,
                 observed_at=int(time.time()),
             )
+            candidates = await self.scheduler.deep_analyze_candidates(candidates)
             recommendation = await self.recommender.analyze(
                 umo=event.unified_msg_origin,
                 keyword=keyword_text,
@@ -1916,6 +1972,26 @@ class GoofishCatcherPlugin(Star):
                     )
                 except Exception as exc:
                     logger.warning("[goofish_catcher] query send forward failed: %s", exc)
+                    try:
+                        await self.context.send_message(
+                            event.unified_msg_origin,
+                            MessageChain().message(
+                                _render_query_recommendation_preview(
+                                    recommendation=recommendation,
+                                    page_count=page_count,
+                                    raw_total=len(raw_items),
+                                    filtered_total=len(filtered_items),
+                                    filter_mode=filter_mode,
+                                    price_min=price_min,
+                                    price_max=price_max,
+                                )
+                            ),
+                        )
+                    except Exception as fallback_exc:
+                        logger.warning(
+                            "[goofish_catcher] query fallback text send failed: %s",
+                            fallback_exc,
+                        )
                 if recommendation.top:
                     self._forward_search_cache[event.unified_msg_origin] = ReplyFavoriteTarget(
                         source="recommendation",
@@ -1930,8 +2006,8 @@ class GoofishCatcherPlugin(Star):
                         ],
                     )
             else:
-                yield event.plain_result(
-                    _render_query_recommendation_preview(
+                yield event.chain_result(
+                    _build_query_recommendation_chain(
                         recommendation=recommendation,
                         page_count=page_count,
                         raw_total=len(raw_items),
@@ -2298,15 +2374,154 @@ def _build_query_result_nodes(
         header_lines.append("未产出可推荐条目，请尝试更精确的关键词后重试。")
     node_list = [Node([Plain("\n".join(header_lines))])]
     for idx, item in enumerate(recommendation.top, start=1):
-        text = (
-            f"{idx}. [{item.score:.1f}] {item.title}\n"
-            f"价格：￥{item.price:.2f}\n"
-            f"理由：{item.reason}\n"
-            f"风险：{item.risk}\n"
-            f"链接：{item.url}"
-        )
-        node_list.append(Node([Plain(text)]))
+        node_list.append(Node(_build_recommendation_item_parts(idx, item)))
     return Nodes(node_list)
+
+
+def _build_query_recommendation_chain(
+    recommendation: RecommendationResult,
+    *,
+    page_count: int,
+    raw_total: int,
+    filtered_total: int,
+    filter_mode: str,
+    price_min: float | None = None,
+    price_max: float | None = None,
+) -> list[Any]:
+    lines = _query_recommendation_header_lines(
+        recommendation=recommendation,
+        page_count=page_count,
+        raw_total=raw_total,
+        filtered_total=filtered_total,
+        filter_mode=filter_mode,
+        price_min=price_min,
+        price_max=price_max,
+    )
+    if not recommendation.top:
+        return [Plain("\n".join(lines))]
+
+    parts: list[Any] = [Plain("\n".join(lines))]
+    for idx, item in enumerate(recommendation.top, start=1):
+        parts.append(Plain("\n\n"))
+        parts.extend(_build_recommendation_item_parts(idx, item))
+
+    re_execute = _query_re_execute_hint(
+        keyword=recommendation.keyword,
+        price_min=price_min,
+        price_max=price_max,
+    )
+    parts.append(Plain(f"\n\n{recommendation_reply_hint()}\n可再次执行 {re_execute}"))
+    return parts
+
+
+def _build_recommendation_item_parts(idx: int, item, *, include_link: bool = True) -> list[Any]:
+    analysis = item.deep_analysis
+    image_url = ""
+    if analysis and analysis.image_urls:
+        image_url = str(analysis.image_urls[0] or "").strip()
+
+    intro_lines = [
+        f"{idx}. [{item.score:.1f}] {item.title}",
+        f"价格：￥{item.price:.2f}",
+        f"理由：{item.reason}",
+        f"风险：{item.risk}",
+    ]
+    parts: list[Any] = [Plain("\n".join(intro_lines))]
+    if image_url:
+        parts.append(Image.fromURL(image_url))
+
+    tail_lines = _render_deep_analysis_lines(analysis, image_url=image_url)
+    if include_link:
+        tail_lines.append(f"链接：{item.url}")
+    tail_text = "\n".join(tail_lines)
+    if tail_text:
+        parts.append(Plain(("\n" if image_url else "\n") + tail_text))
+    return parts
+
+
+def _render_recommendation_item_text(idx: int, item, *, include_link: bool = True) -> list[str]:
+    lines = [
+        f"{idx}. [{item.score:.1f}] {item.title}",
+        f"   价格：￥{item.price:.2f}",
+        f"   理由：{item.reason}",
+        f"   风险：{item.risk}",
+    ]
+    lines.extend(f"   {line}" for line in _render_deep_analysis_lines(
+        item.deep_analysis,
+        image_url=(item.deep_analysis.image_urls[0] if item.deep_analysis and item.deep_analysis.image_urls else ""),
+    ))
+    if include_link:
+        lines.append(f"   链接：{item.url}")
+    return lines
+
+
+def _render_deep_analysis_lines(analysis, *, image_url: str = "") -> list[str]:
+    if analysis is None:
+        return ["深度分析：未获取到详情，按保守规则不过滤"]
+    lines = [
+        f"卖家信用：{analysis.credit_status}（{analysis.credit_reason or '暂无说明'}）",
+        f"深度结论：{analysis.summary or '暂无摘要'}",
+    ]
+    if analysis.risk:
+        lines.append(f"详情风险：{analysis.risk}")
+    counts = []
+    if analysis.want_count is not None:
+        counts.append(f"想要 {analysis.want_count}")
+    if analysis.browse_count is not None:
+        counts.append(f"浏览 {analysis.browse_count}")
+    if counts:
+        lines.append("热度：" + " / ".join(counts))
+    if image_url:
+        lines.append(f"主图：{image_url}")
+    return lines
+
+
+def _query_recommendation_header_lines(
+    recommendation: RecommendationResult,
+    *,
+    page_count: int,
+    raw_total: int,
+    filtered_total: int,
+    filter_mode: str,
+    price_min: float | None = None,
+    price_max: float | None = None,
+) -> list[str]:
+    lines = [
+        f"【查询推荐】关键词：{recommendation.keyword}",
+        f"抓取页数：{page_count} | 原始结果：{raw_total} | 初筛后：{filtered_total}",
+        f"初筛模式：{filter_mode}",
+    ]
+    if price_min is not None or price_max is not None:
+        parts = []
+        if price_min is not None:
+            parts.append(f"≥￥{price_min:.0f}")
+        if price_max is not None:
+            parts.append(f"≤￥{price_max:.0f}")
+        lines.append(f"价格区间：{' '.join(parts)}")
+    lines += [
+        f"候选数：{recommendation.total_candidates} | 推荐数：{len(recommendation.top)}",
+        f"分析方式：{'LLM' if recommendation.used_llm else 'Heuristic'}",
+        f"总体建议：{recommendation.summary}",
+    ]
+    if recommendation.fallback_reason:
+        lines.append(f"回退原因：{recommendation.fallback_reason}")
+    if not recommendation.top:
+        lines.append("未产出可推荐条目，请尝试更精确的关键词后重试。")
+    return lines
+
+
+def _query_re_execute_hint(
+    *,
+    keyword: str,
+    price_min: float | None,
+    price_max: float | None,
+) -> str:
+    re_execute = f"/闲鱼 查询 {keyword}"
+    if price_min is not None:
+        re_execute += f" --min-price {price_min:.0f}"
+    if price_max is not None:
+        re_execute += f" --max-price {price_max:.0f}"
+    return re_execute
 
 
 def _render_recommendation_preview(recommendation: RecommendationResult) -> str:
@@ -2325,11 +2540,7 @@ def _render_recommendation_preview(recommendation: RecommendationResult) -> str:
         return "\n".join(lines)
 
     for idx, item in enumerate(recommendation.top, start=1):
-        lines.append(f"{idx}. [{item.score:.1f}] {item.title}")
-        lines.append(f"   价格：￥{item.price:.2f}")
-        lines.append(f"   理由：{item.reason}")
-        lines.append(f"   风险：{item.risk}")
-        lines.append(f"   链接：{item.url}")
+        lines.extend(_render_recommendation_item_text(idx, item))
     lines.append(recommendation_reply_hint())
     lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
     return "\n".join(lines)
@@ -2408,13 +2619,13 @@ def _parse_query_input(
     *,
     default_pages: int,
     max_pages: int,
-) -> tuple[str, int, float | None, float | None]:
+) -> tuple[str, int, SearchFilters]:
     text = raw_keyword.strip()
     page_count = max(1, min(default_pages, max_pages))
     price_min: float | None = None
     price_max: float | None = None
     if not text:
-        return "", page_count, price_min, price_max
+        return "", page_count, SearchFilters()
 
     matches = list(
         re.finditer(
@@ -2446,7 +2657,45 @@ def _parse_query_input(
             text = re.sub(r"\s+", " ", text).strip()
             text = re.sub(r"^[，,。.!?]+|[，,。.!?]+$", "", text).strip()
 
-    return text, page_count, price_min, price_max
+    personal_only = False
+    free_shipping = False
+    for flag_re, field in [
+        (r"(?<!\S)--personal-only\b", "personal_only"),
+        (r"(?<!\S)--free-shipping\b", "free_shipping"),
+    ]:
+        if re.search(flag_re, text, flags=re.IGNORECASE):
+            if field == "personal_only":
+                personal_only = True
+            else:
+                free_shipping = True
+            text = re.sub(flag_re, " ", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s+", " ", text).strip()
+
+    new_publish_option = None
+    region = None
+    for flag_re, field in [
+        (r"(?<!\S)--new-publish(?:\s*=\s*|\s+)?([^\s]+)", "new_publish_option"),
+        (r"(?<!\S)--region(?:\s*=\s*|\s+)?([^\s]+)", "region"),
+    ]:
+        flag_matches = list(re.finditer(flag_re, text, flags=re.IGNORECASE))
+        if flag_matches:
+            m = flag_matches[-1]
+            if field == "new_publish_option":
+                new_publish_option = m.group(1)
+            else:
+                region = m.group(1)
+            text = f"{text[: m.start()]} {text[m.end() :]}"
+            text = re.sub(r"\s+", " ", text).strip()
+            text = re.sub(r"^[，,。.!?]+|[，,。.!?]+$", "", text).strip()
+
+    return text, page_count, SearchFilters(
+        price_lower=price_min,
+        price_upper=price_max,
+        personal_only=personal_only,
+        free_shipping=free_shipping,
+        new_publish_option=new_publish_option,
+        region=region,
+    ).normalized()
 
 
 def _render_query_recommendation_preview(
@@ -2459,43 +2708,30 @@ def _render_query_recommendation_preview(
     price_min: float | None = None,
     price_max: float | None = None,
 ) -> str:
-    lines = [
-        f"【查询推荐】关键词：{recommendation.keyword}",
-        f"抓取页数：{page_count} | 原始结果：{raw_total} | 初筛后：{filtered_total}",
-        f"初筛模式：{filter_mode}",
-    ]
-    if price_min is not None or price_max is not None:
-        parts = []
-        if price_min is not None:
-            parts.append(f"≥￥{price_min:.0f}")
-        if price_max is not None:
-            parts.append(f"≤￥{price_max:.0f}")
-        lines.append(f"价格区间：{' '.join(parts)}")
-    lines += [
-        f"候选数：{recommendation.total_candidates} | 推荐数：{len(recommendation.top)}",
-        f"分析方式：{'LLM' if recommendation.used_llm else 'Heuristic'}",
-        f"总体建议：{recommendation.summary}",
-    ]
-    if recommendation.fallback_reason:
-        lines.append(f"回退原因：{recommendation.fallback_reason}")
+    lines = _query_recommendation_header_lines(
+        recommendation=recommendation,
+        page_count=page_count,
+        raw_total=raw_total,
+        filtered_total=filtered_total,
+        filter_mode=filter_mode,
+        price_min=price_min,
+        price_max=price_max,
+    )
 
     if not recommendation.top:
-        lines.append("未产出可推荐条目，请尝试更精确的关键词后重试。")
         return "\n".join(lines)
 
     for idx, item in enumerate(recommendation.top, start=1):
-        lines.append(f"{idx}. [{item.score:.1f}] {item.title}")
-        lines.append(f"   价格：￥{item.price:.2f}")
-        lines.append(f"   理由：{item.reason}")
-        lines.append(f"   风险：{item.risk}")
-        lines.append(f"   链接：{item.url}")
+        lines.extend(_render_recommendation_item_text(idx, item))
     lines.append(recommendation_reply_hint())
-    re_execute = f"/闲鱼 查询 {recommendation.keyword}"
-    if price_min is not None:
-        re_execute += f" --min-price {price_min:.0f}"
-    if price_max is not None:
-        re_execute += f" --max-price {price_max:.0f}"
-    lines.append(f"可再次执行 {re_execute}")
+    lines.append(
+        "可再次执行 "
+        + _query_re_execute_hint(
+            keyword=recommendation.keyword,
+            price_min=price_min,
+            price_max=price_max,
+        )
+    )
     return "\n".join(lines)
 
 

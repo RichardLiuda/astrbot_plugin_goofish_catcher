@@ -226,3 +226,4 @@ run.sh
 docs
 thirdparty
 .claude
+.claude/skills/release/SKILL.md
