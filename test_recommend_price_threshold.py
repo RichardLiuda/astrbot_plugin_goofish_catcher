@@ -12,19 +12,66 @@ astrbot_api_module.logger = SimpleNamespace(
     warning=lambda *args, **kwargs: None,
     info=lambda *args, **kwargs: None,
     error=lambda *args, **kwargs: None,
+    debug=lambda *args, **kwargs: None,
 )
 astrbot_api_star_module = types.ModuleType("astrbot.api.star")
 astrbot_api_star_module.Context = object
+astrbot_api_star_module.StarTools = object
+astrbot_api_event_module = types.ModuleType("astrbot.api.event")
+astrbot_api_event_module.MessageChain = object
+astrbot_api_message_components_module = types.ModuleType("astrbot.api.message_components")
+astrbot_api_message_components_module.Image = object
+astrbot_api_message_components_module.Plain = object
+
+
+class _Reply:
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+astrbot_api_message_components_module.Reply = _Reply
+try:
+    import httpx as _httpx  # noqa: F401
+except ModuleNotFoundError:
+    httpx_module = types.ModuleType("httpx")
+    httpx_module.AsyncClient = object
+    sys.modules.setdefault("httpx", httpx_module)
 
 sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules["astrbot.api"] = astrbot_api_module
 sys.modules["astrbot.api.star"] = astrbot_api_star_module
+sys.modules["astrbot.api.event"] = astrbot_api_event_module
+sys.modules["astrbot.api.message_components"] = astrbot_api_message_components_module
 
+from app.detector import should_recover_unsent_new_event
 from app.recommender import GoofishRecommender
 from app.types import DeepAnalysisResult, RecommendationCandidate, SearchFilters
 
 
 class RecommendPriceThresholdTest(unittest.IsolatedAsyncioTestCase):
+    def test_unsent_new_event_can_be_recovered_after_send_failure(self) -> None:
+        self.assertTrue(
+            should_recover_unsent_new_event(
+                first_seen_at=1000,
+                publish_time=None,
+                now_ts=1100,
+                new_window_sec=1800,
+                recovery_sec=24 * 3600,
+            )
+        )
+
+    def test_unsent_new_event_recovery_is_bounded(self) -> None:
+        self.assertFalse(
+            should_recover_unsent_new_event(
+                first_seen_at=1000,
+                publish_time=None,
+                now_ts=1000 + 25 * 3600,
+                new_window_sec=1800,
+                recovery_sec=24 * 3600,
+            )
+        )
+
     def test_search_filters_normalize_advanced_fields(self) -> None:
         filters = SearchFilters(
             price_lower=0,

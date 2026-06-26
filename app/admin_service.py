@@ -469,6 +469,11 @@ class AdminService:
             raise ValueError("keyword is required")
         if not umo:
             raise ValueError("umo is required")
+        if not _is_valid_unified_msg_origin(umo):
+            raise ValueError(
+                "umo must be AstrBot unified_msg_origin, e.g. "
+                "platform:MessageType:session_id"
+            )
         interval_sec = int(
             payload.get(
                 "interval_sec",
@@ -1022,3 +1027,10 @@ class AdminService:
         if not isinstance(payload, dict):
             return []
         return [f"{key}: {value}" for key, value in payload.items() if str(key).strip()]
+
+
+def _is_valid_unified_msg_origin(umo: str) -> bool:
+    if not isinstance(umo, str):
+        return False
+    parts = umo.split(":", 2)
+    return len(parts) == 3 and all(part.strip() for part in parts)

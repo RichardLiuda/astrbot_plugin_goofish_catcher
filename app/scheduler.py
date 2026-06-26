@@ -15,6 +15,7 @@ from .detector import (
     build_payload_hash,
     evaluate_price_drop,
     in_cooldown,
+    should_recover_unsent_new_event,
     within_new_window,
 )
 from .notifier import Notifier
@@ -40,8 +41,12 @@ _PRICE_SPIKE_FACTOR = 10.0
 
 EVENT_NEW = "NEW"
 EVENT_PRICE_DROP = "PRICE_DROP"
-DEEP_ANALYSIS_MAX_CANDIDATES = 10
+DEEP_ANALYSIS_MAX_CANDIDATES = 3
 DEEP_ANALYSIS_CACHE_TTL_SEC = 6 * 3600
+DEEP_ANALYSIS_INCOMPLETE_RETRY_SEC = 10 * 60
+DEEP_ANALYSIS_COOLDOWN_ON_GUARD_SEC = 30 * 60
+DEEP_ANALYSIS_INTERVAL_RANGE_SEC = (8.0, 15.0)
+NEW_EVENT_UNSENT_RECOVERY_SEC = 24 * 3600
 
 
 def _matches_price_range(item: NormalizedItem, sub: Subscription) -> bool:
@@ -51,6 +56,19 @@ def _matches_price_range(item: NormalizedItem, sub: Subscription) -> bool:
     if sub.price_max is not None and price > sub.price_max:
         return False
     return True
+
+
+def _deep_analysis_incomplete(analysis: DeepAnalysisResult) -> bool:
+    if analysis.credit_status != "unknown":
+        return False
+    if analysis.seller_credit:
+        return False
+    reason = analysis.credit_reason or ""
+    return (
+        "未获取到明确卖家信用信息" in reason
+        or "深度分析失败" in reason
+        or not analysis.seller_name
+    )
 
 
 def calculate_retry_delay(
@@ -99,6 +117,9 @@ class MonitoringScheduler:
         self._worker_tasks: list[asyncio.Task] = []
         self._inflight_sub_ids: set[int] = set()
         self._inflight_lock = asyncio.Lock()
+        self._deep_analysis_blocked_until = 0
+        self._deep_analysis_block_reason = ""
+        self._last_deep_analysis_at = 0.0
 
     @property
     def running(self) -> bool:
@@ -221,9 +242,78 @@ class MonitoringScheduler:
                 kept.append(candidate)
                 continue
             analysis = cached.get(candidate.item_id)
-            if analysis is None or now_ts - analysis.analyzed_at > DEEP_ANALYSIS_CACHE_TTL_SEC:
+            analysis_age = now_ts - analysis.analyzed_at if analysis is not None else None
+            incomplete_retry = (
+                analysis is not None
+                and _deep_analysis_incomplete(analysis)
+                and analysis_age is not None
+                and analysis_age > DEEP_ANALYSIS_INCOMPLETE_RETRY_SEC
+            )
+            if (
+                analysis is None
+                or analysis_age is not None
+                and analysis_age > DEEP_ANALYSIS_CACHE_TTL_SEC
+                or incomplete_retry
+            ):
+                if now_ts < self._deep_analysis_blocked_until:
+                    logger.warning(
+                        "[goofish_catcher] deep analysis skipped item_id=%s blocked_for=%ss reason=%s",
+                        candidate.item_id,
+                        self._deep_analysis_blocked_until - now_ts,
+                        self._deep_analysis_block_reason or "-",
+                    )
+                    candidate.deep_analysis = analysis
+                    kept.append(candidate)
+                    continue
+                if analysis is None:
+                    logger.info(
+                        "[goofish_catcher] deep analysis cache miss item_id=%s title=%r",
+                        candidate.item_id,
+                        candidate.title[:80],
+                    )
+                elif incomplete_retry:
+                    logger.info(
+                        "[goofish_catcher] deep analysis cache incomplete item_id=%s age=%ss retry_ttl=%ss old_credit=%s seller=%s seller_credit=%s reason=%s",
+                        candidate.item_id,
+                        analysis_age,
+                        DEEP_ANALYSIS_INCOMPLETE_RETRY_SEC,
+                        analysis.credit_status,
+                        analysis.seller_name or "-",
+                        analysis.seller_credit or "-",
+                        analysis.credit_reason,
+                    )
+                else:
+                    logger.info(
+                        "[goofish_catcher] deep analysis cache stale item_id=%s age=%ss ttl=%ss old_credit=%s reason=%s",
+                        candidate.item_id,
+                        analysis_age,
+                        DEEP_ANALYSIS_CACHE_TTL_SEC,
+                        analysis.credit_status,
+                        analysis.credit_reason,
+                    )
                 analysis = await self._fetch_candidate_deep_analysis(candidate, now_ts)
+            else:
+                logger.info(
+                    "[goofish_catcher] deep analysis cache hit item_id=%s age=%ss credit=%s seller=%s reason=%s",
+                    candidate.item_id,
+                    analysis_age,
+                    analysis.credit_status,
+                    analysis.seller_name or "-",
+                    analysis.credit_reason,
+                )
             candidate.deep_analysis = analysis
+            if analysis is not None:
+                logger.info(
+                    "[goofish_catcher] deep analysis result item_id=%s status=%s credit=%s seller=%s seller_credit=%s want=%s browse=%s reason=%s",
+                    candidate.item_id,
+                    analysis.status,
+                    analysis.credit_status,
+                    analysis.seller_name or "-",
+                    analysis.seller_credit or "-",
+                    analysis.want_count,
+                    analysis.browse_count,
+                    analysis.credit_reason,
+                )
             if analysis and analysis.rejected:
                 logger.info(
                     "[goofish_catcher] deep analysis rejected item_id=%s reason=%s",
@@ -243,6 +333,17 @@ class MonitoringScheduler:
         if not callable(analyze):
             return None
         try:
+            elapsed = time.monotonic() - self._last_deep_analysis_at
+            target_interval = random.uniform(*DEEP_ANALYSIS_INTERVAL_RANGE_SEC)
+            if elapsed < target_interval:
+                delay = target_interval - elapsed
+                logger.info(
+                    "[goofish_catcher] deep analysis throttle sleep=%.1fs item_id=%s interval=%.1fs",
+                    delay,
+                    candidate.item_id,
+                    target_interval,
+                )
+                await asyncio.sleep(delay)
             item = NormalizedItem(
                 item_id=candidate.item_id,
                 title=candidate.title,
@@ -255,7 +356,44 @@ class MonitoringScheduler:
                 timeout=max(12, self.settings.fetch_timeout_sec + 8),
             )
             await self.storage.upsert_deep_analysis(analysis)
+            self._last_deep_analysis_at = time.monotonic()
             return analysis
+        except ProviderError as exc:
+            if exc.code in {
+                ProviderErrorCode.CAPTCHA,
+                ProviderErrorCode.RATE_LIMITED,
+                ProviderErrorCode.AUTH_REQUIRED,
+            }:
+                self._deep_analysis_blocked_until = now_ts + (
+                    exc.retry_after_sec or DEEP_ANALYSIS_COOLDOWN_ON_GUARD_SEC
+                )
+                self._deep_analysis_block_reason = f"{exc.code.value}: {exc.message}"
+                logger.warning(
+                    "[goofish_catcher] deep analysis guard blocked item_id=%s code=%s cooldown=%ss message=%s; skip remaining detail pages and do not cache unknown fallback",
+                    candidate.item_id,
+                    exc.code.value,
+                    self._deep_analysis_blocked_until - now_ts,
+                    exc.message,
+                )
+                return None
+            logger.warning(
+                "[goofish_catcher] deep analysis provider failed item_id=%s: %s",
+                candidate.item_id,
+                exc,
+            )
+            fallback = DeepAnalysisResult(
+                item_id=candidate.item_id,
+                analyzed_at=now_ts,
+                status="passed",
+                credit_status="unknown",
+                credit_reason="深度分析失败，按保守规则不过滤",
+                summary="深度分析失败，已保守放行",
+                risk=str(exc),
+                image_urls=[],
+                raw={"error": str(exc)},
+            )
+            await self.storage.upsert_deep_analysis(fallback)
+            return fallback
         except Exception as exc:
             logger.warning(
                 "[goofish_catcher] deep analysis failed item_id=%s: %s",
@@ -689,6 +827,11 @@ class MonitoringScheduler:
 
         item_ids = [item.item_id for item in normalized_items]
         existing_map = await self.storage.get_items_by_ids(sub.id, item_ids)
+        last_new_sent_map = await self.storage.get_last_notification_sent_map(
+            sub.id,
+            item_ids,
+            EVENT_NEW,
+        )
         last_drop_sent_map = await self.storage.get_last_notification_sent_map(
             sub.id,
             item_ids,
@@ -761,6 +904,56 @@ class MonitoringScheduler:
 
             old_price = existing.last_price
             if old_price is None or float(old_price) == float(item.price):
+                if (
+                    item.item_id not in last_new_sent_map
+                    and should_recover_unsent_new_event(
+                        first_seen_at=existing.first_seen_at,
+                        publish_time=item.publish_time,
+                        now_ts=now_ts,
+                        new_window_sec=sub.new_window_sec,
+                        recovery_sec=NEW_EVENT_UNSENT_RECOVERY_SEC,
+                    )
+                ):
+                    payload = EventPayload(
+                        event_type=EVENT_NEW,
+                        keyword=sub.keyword,
+                        item_id=item.item_id,
+                        title=item.title,
+                        price=item.price,
+                        url=item.url,
+                        publish_time=item.publish_time,
+                        observed_at=now_ts,
+                    )
+                    payload_hash = build_payload_hash(payload)
+                    existed = await self.storage.notification_hash_exists(
+                        sub.id,
+                        item.item_id,
+                        EVENT_NEW,
+                        payload_hash,
+                    )
+                    if not existed:
+                        logger.info(
+                            "[goofish_catcher] recover unsent NEW candidate sub=%s item_id=%s first_seen_at=%s",
+                            sub.id,
+                            item.item_id,
+                            existing.first_seen_at,
+                        )
+                        candidates.append(
+                            RecommendationCandidate(
+                                event_type=EVENT_NEW,
+                                keyword=sub.keyword,
+                                item_id=item.item_id,
+                                title=item.title,
+                                price=item.price,
+                                url=item.url,
+                                publish_time=item.publish_time,
+                                observed_at=now_ts,
+                                payload_hash=payload_hash,
+                                hist_min=stats.hist_min if stats else None,
+                                hist_avg=stats.hist_avg if stats else None,
+                                market_price=market_price,
+                            )
+                        )
                 continue
 
             # 价格异常检测：价格暴涨（如卖家改错价再纠正）不触发降价，只记录警告

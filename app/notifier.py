@@ -232,6 +232,14 @@ class Notifier:
         *,
         fallback_text: str,
     ) -> bool:
+        if not _is_valid_unified_msg_origin(umo):
+            logger.error(
+                "[goofish_catcher] invalid umo=%r, cannot send message. "
+                "Expected AstrBot unified_msg_origin format like "
+                "'platform:MessageType:session_id'.",
+                umo,
+            )
+            return False
         try:
             await self.context.send_message(umo, chain)
             return True
@@ -265,6 +273,13 @@ class Notifier:
             )
         except Exception as exc:
             logger.warning("[goofish_catcher] webhook post failed: %s", exc)
+
+
+def _is_valid_unified_msg_origin(umo: str) -> bool:
+    if not isinstance(umo, str):
+        return False
+    parts = umo.split(":", 2)
+    return len(parts) == 3 and all(part.strip() for part in parts)
 
 
 def _format_time(timestamp: int) -> str:

@@ -61,6 +61,28 @@ def within_new_window(
     return publish_time >= now_ts - window_sec
 
 
+def should_recover_unsent_new_event(
+    *,
+    first_seen_at: int,
+    publish_time: int | None,
+    now_ts: int,
+    new_window_sec: int,
+    recovery_sec: int,
+) -> bool:
+    """Recover NEW candidates whose first notification failed to send.
+
+    Items are stored before notifications are delivered.  If delivery fails, the
+    next run sees the item as already known and would otherwise suppress the NEW
+    event forever.  This bounded recovery check lets the scheduler retry that
+    unsent NEW notification without reviving very old inventory.
+    """
+
+    if not within_new_window(publish_time, now_ts, new_window_sec):
+        return False
+    recovery_window = max(new_window_sec, recovery_sec)
+    return first_seen_at >= now_ts - recovery_window
+
+
 def evaluate_price_drop(
     last_price: float | None,
     current_price: float,

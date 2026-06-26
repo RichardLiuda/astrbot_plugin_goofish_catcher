@@ -78,11 +78,12 @@ class FakeGoofishLoginSession:
     validate_code = "OK"
     validate_reason = "SUCCESS::调用成功"
     validate_results: list[dict[str, object]] | None = None
+    page_url_value = "https://passport.goofish.example/login"
 
     def __init__(self, **_: object) -> None:
         kwargs = _
         type(self).created_count += 1
-        self.page_url = "https://passport.goofish.example/login"
+        self.page_url = type(self).page_url_value
         self.closed = False
         raw_profile_dir = kwargs.get("user_data_dir")
         self.user_data_dir = Path(raw_profile_dir) if raw_profile_dir else None
@@ -145,6 +146,7 @@ class WorkerAuthRouteTests(unittest.TestCase):
         FakeGoofishLoginSession.validate_code = "OK"
         FakeGoofishLoginSession.validate_reason = "SUCCESS::调用成功"
         FakeGoofishLoginSession.validate_results = None
+        FakeGoofishLoginSession.page_url_value = "https://passport.goofish.example/login"
 
     def test_auth_start_reuses_active_session_and_confirm_saves_state(self) -> None:
         settings = build_settings(self.base_dir)
@@ -351,6 +353,7 @@ class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
         FakeGoofishLoginSession.validate_code = "OK"
         FakeGoofishLoginSession.validate_reason = "SUCCESS::调用成功"
         FakeGoofishLoginSession.validate_results = None
+        FakeGoofishLoginSession.page_url_value = "https://passport.goofish.example/login"
 
     async def _cleanup_temp_dir(self) -> None:
         self._temp_dir.cleanup()
@@ -381,6 +384,22 @@ class LocalAuthSessionControllerTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaises(RuntimeError):
                 await controller.confirm_auth_session(session_id=first["session_id"])
+
+    async def test_local_auth_start_auto_saves_when_probe_page_already_logged_in(self) -> None:
+        settings = build_settings(self.base_dir)
+        controller = LocalAuthSessionController(settings)
+        FakeGoofishLoginSession.page_url_value = (
+            "https://www.goofish.com/search?q=%E9%97%B2%E9%B1%BC"
+        )
+
+        with patch("app.auth_session.GoofishLoginSession", FakeGoofishLoginSession):
+            result = await controller.start_auth_session(force_restart=False)
+
+        self.assertTrue(result["auto_login_done"])
+        self.assertEqual(result["status"], "auto_login")
+        self.assertIsNone(result["session_id"])
+        self.assertTrue((self.base_dir / "storage_state.json").exists())
+        self.assertIsNone(controller._active_session)
 
     async def test_local_auth_cancel_clears_active_session(self) -> None:
         settings = build_settings(self.base_dir)
@@ -528,6 +547,7 @@ class StorageResumeTests(unittest.IsolatedAsyncioTestCase):
             keyword="auth-sub",
             interval_sec=600,
             pages=1,
+            recommend_max_price=None,
             drop_abs=50.0,
             drop_pct=0.05,
             new_window_sec=1800,
@@ -538,6 +558,7 @@ class StorageResumeTests(unittest.IsolatedAsyncioTestCase):
             keyword="captcha-sub",
             interval_sec=600,
             pages=1,
+            recommend_max_price=None,
             drop_abs=50.0,
             drop_pct=0.05,
             new_window_sec=1800,
@@ -548,6 +569,7 @@ class StorageResumeTests(unittest.IsolatedAsyncioTestCase):
             keyword="manual-sub",
             interval_sec=600,
             pages=1,
+            recommend_max_price=None,
             drop_abs=50.0,
             drop_pct=0.05,
             new_window_sec=1800,
@@ -593,7 +615,7 @@ class ProviderCaptchaRetryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            async def search(self, *, keyword, pages, timeout_sec):
+            async def search(self, *, keyword, pages, timeout_sec, **_kwargs):
                 self.calls += 1
                 if self.calls < 3:
                     raise ProviderError(
@@ -620,7 +642,7 @@ class ProviderCaptchaRetryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            async def search(self, *, keyword, pages, timeout_sec):
+            async def search(self, *, keyword, pages, timeout_sec, **_kwargs):
                 self.calls += 1
                 raise ProviderError(
                     ProviderErrorCode.CAPTCHA,
@@ -888,8 +910,8 @@ class PlaywrightOperationSerializationTests(unittest.IsolatedAsyncioTestCase):
         async def fake_ensure_browser():
             return object()
 
-        async def fake_fetch_single_page(*, browser, keyword, page_index, timeout_ms):
-            del browser, page_index, timeout_ms
+        async def fake_fetch_single_page(*, browser, keyword, page_index, timeout_ms, **_kwargs):
+            del browser, page_index, timeout_ms, _kwargs
             call_order.append(f"start:{keyword}")
             await asyncio.sleep(0.05)
             call_order.append(f"end:{keyword}")

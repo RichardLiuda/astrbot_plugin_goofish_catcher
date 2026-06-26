@@ -14,6 +14,7 @@ from .login_session import (
     PLUGIN_NAME,
     GoofishLoginSession,
     get_astrbot_root,
+    _is_auth_url,
 )
 from .types import ProviderError, ProviderErrorCode
 
@@ -62,6 +63,11 @@ def resolve_local_storage_state_path() -> Path:
         )
     plugin_data_dir.mkdir(parents=True, exist_ok=True)
     return plugin_data_dir / "storage_state.json"
+
+
+def _looks_like_logged_in_probe_url(url: str) -> bool:
+    text = str(url or "").strip().lower()
+    return "www.goofish.com" in text and not _is_auth_url(text)
 
 
 async def save_login_session_state(
@@ -117,7 +123,31 @@ class LocalAuthSessionController:
                 force_direct=self.settings.playwright_force_direct,
             )
             try:
-                await session.start_login_session()
+                snapshot = await session.start_login_session()
+
+                # The recovery page may already be logged in (for example after
+                # Goofish auto-refreshes remembered cookies).  In that state the
+                # screenshot is a normal search page, not a QR/login page.  Do a
+                # validation pass before sending a needless QR prompt.
+                if _looks_like_logged_in_probe_url(
+                    str(getattr(snapshot, "page_url", "") or "")
+                ):
+                    try:
+                        validation = await session.validate_login()
+                        if validation.get("ok"):
+                            logger.info(
+                                "[goofish_catcher] login recovery page already logged in, auto-saving session"
+                            )
+                            return await self._save_auto_login_session(
+                                session,
+                                profile_dir=profile_dir,
+                                cleanup_profile_dir=cleanup_profile_dir,
+                            )
+                    except Exception as already_login_exc:
+                        logger.info(
+                            "[goofish_catcher] pre-QR logged-in validation failed: %s",
+                            already_login_exc,
+                        )
 
                 # Try quick login before falling back to QR scan flow.
                 try:
@@ -128,30 +158,11 @@ class LocalAuthSessionController:
                             logger.info(
                                 "[goofish_catcher] quick login validated OK, auto-saving session"
                             )
-                            save_result = await save_login_session_state(
+                            return await self._save_auto_login_session(
                                 session,
-                                stable_path=self.settings.plugin_data_dir / "storage_state.json",
+                                profile_dir=profile_dir,
+                                cleanup_profile_dir=cleanup_profile_dir,
                             )
-                            session_transferred = False
-                            if callable(self.on_after_confirm):
-                                session_transferred = bool(
-                                    await self.on_after_confirm(session)
-                                )
-                            if not session_transferred:
-                                await session.close()
-                                await _cleanup_profile_dir(
-                                    profile_dir, enabled=cleanup_profile_dir
-                                )
-                            return {
-                                "ok": True,
-                                "auto_login_done": True,
-                                "session_id": None,
-                                "status": "auto_login",
-                                "screenshot_base64": "",
-                                "page_url": "",
-                                "saved_at": int(time.time()),
-                                "saved_path": str(save_result["saved_path"]),
-                            }
                 except Exception as quick_exc:
                     logger.warning(
                         "[goofish_catcher] quick login attempt failed: %s", quick_exc
@@ -171,6 +182,34 @@ class LocalAuthSessionController:
                 await session.close()
                 await _cleanup_profile_dir(profile_dir, enabled=cleanup_profile_dir)
                 raise _to_provider_error(exc, action="start local login session") from exc
+
+    async def _save_auto_login_session(
+        self,
+        session: GoofishLoginSession,
+        *,
+        profile_dir: Path | None,
+        cleanup_profile_dir: bool,
+    ) -> dict[str, Any]:
+        save_result = await save_login_session_state(
+            session,
+            stable_path=self.settings.plugin_data_dir / "storage_state.json",
+        )
+        session_transferred = False
+        if callable(self.on_after_confirm):
+            session_transferred = bool(await self.on_after_confirm(session))
+        if not session_transferred:
+            await session.close()
+            await _cleanup_profile_dir(profile_dir, enabled=cleanup_profile_dir)
+        return {
+            "ok": True,
+            "auto_login_done": True,
+            "session_id": None,
+            "status": "auto_login",
+            "screenshot_base64": "",
+            "page_url": "",
+            "saved_at": int(time.time()),
+            "saved_path": str(save_result["saved_path"]),
+        }
 
     async def confirm_auth_session(self, *, session_id: str) -> dict[str, Any]:
         async with self._lock:
