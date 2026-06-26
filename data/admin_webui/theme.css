@@ -1630,6 +1630,65 @@ a {
   color: var(--primary);
 }
 
+.enhanced-chart-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chart-legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.chart-legend-row.compact {
+  margin: 2px 0;
+}
+
+.chart-legend-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.chart-legend-item > span {
+  width: 22px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.chart-legend-item.median > span,
+.chart-legend-item.notice-drop > span {
+  background: var(--warning);
+}
+
+.chart-legend-item.range > span {
+  height: 10px;
+  background: rgba(217, 119, 6, 0.18);
+  border: 1px solid rgba(217, 119, 6, 0.24);
+}
+
+.chart-legend-item.notice-new > span {
+  background: var(--success);
+}
+
+.chart-legend-meta {
+  color: var(--muted);
+}
+
 .analytics-svg {
   width: 100%;
   height: 220px;
@@ -1639,16 +1698,54 @@ a {
   background: var(--surface-muted);
 }
 
+.enhanced-analytics-svg {
+  height: 260px;
+}
+
 .chart-meta {
   margin-top: 10px;
   color: var(--muted);
   font-size: 0.88rem;
 }
 
+.chart-meta-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .trend-bars {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.trend-summary-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.trend-summary-row > div {
+  padding: 12px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  background: var(--surface-muted);
+}
+
+.trend-summary-row strong {
+  display: block;
+  color: var(--text);
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.trend-summary-row span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
 }
 
 .trend-bar-row {
@@ -1669,6 +1766,34 @@ a {
   border-radius: 999px;
   overflow: hidden;
   background: var(--border-soft);
+}
+
+.trend-bar-stack {
+  display: flex;
+  height: 100%;
+  width: 100%;
+  min-width: 4px;
+}
+
+.trend-bar-segment {
+  height: 100%;
+  min-width: 0;
+}
+
+.trend-bar-segment:first-child {
+  border-radius: 999px 0 0 999px;
+}
+
+.trend-bar-segment:last-child {
+  border-radius: 0 999px 999px 0;
+}
+
+.trend-bar-segment.new {
+  background: var(--success);
+}
+
+.trend-bar-segment.drop {
+  background: var(--warning);
 }
 
 .trend-bar-fill {

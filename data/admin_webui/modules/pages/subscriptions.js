@@ -601,38 +601,224 @@ function StatMini({ label, value }) {
 	`
 }
 
+function iqrBounds(sorted) {
+	const n = sorted.length
+	const q1 = sorted[Math.floor(n / 4)]
+	const q3 = sorted[Math.floor((n * 3) / 4)]
+	const iqr = q3 - q1
+	const mid = sorted[Math.floor(n / 2)]
+	if (iqr > 0) {
+		return { lo: q1 - 1.5 * iqr, hi: q3 + 1.5 * iqr }
+	}
+	// IQR=0：大多数价格相同，用中位数 ±10 倍兜底
+	if (mid > 0) return { lo: mid * 0.1, hi: mid * 10 }
+	return null
+}
+
 function MiniLineChart({ points, valueKey }) {
-	const values = (points || [])
-		.map((point) => Number(point[valueKey]))
-		.filter((value) => Number.isFinite(value))
+	const rawPoints = points || []
+	const dailyPoints = aggregateDailyPricePoints(rawPoints, valueKey)
+	const values = dailyPoints.flatMap((point) => [
+		point.avg,
+		point.median,
+		point.min,
+		point.max
+	])
 	if (!values.length) {
 		return html`<${EmptyState}
 			title="暂无价格样本"
 			description="订阅产生价格历史后会显示走势。"
 		/>`
 	}
-	const width = 720
-	const height = 220
-	const min = Math.min(...values)
-	const max = Math.max(...values)
-	const span = max - min || 1
-	const d = values
-		.map((value, index) => {
-			const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width
-			const y = height - ((value - min) / span) * (height - 24) - 12
-			return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
-		})
+
+	const width = 760
+	const height = 260
+	const padL = 72
+	const padR = 20
+	const padT = 18
+	const padB = 34
+	const plotW = width - padL - padR
+	const plotH = height - padT - padB
+
+	const sorted = [...values].sort((a, b) => a - b)
+	const bounds = iqrBounds(sorted)
+	const yMin = bounds ? Math.max(sorted[0], bounds.lo) : sorted[0]
+	const yMax = bounds ? Math.min(sorted[sorted.length - 1], bounds.hi) : sorted[sorted.length - 1]
+	const span = yMax - yMin || 1
+
+	const toX = (index) => {
+		if (dailyPoints.length === 1) return padL + plotW / 2
+		return padL + (plotW / (dailyPoints.length - 1)) * index
+	}
+	const toY = (value) => {
+		const clamped = Math.min(Math.max(value, yMin), yMax)
+		return padT + (1 - (clamped - yMin) / span) * plotH
+	}
+	const buildSeriesPath = (key) => dailyPoints
+		.map((point, index) => `${index === 0 ? 'M' : 'L'}${toX(index).toFixed(1)},${toY(point[key]).toFixed(1)}`)
 		.join(' ')
+	const buildRangePath = () => {
+		if (!dailyPoints.length) return ''
+		const upper = dailyPoints
+			.map((point, index) => `${index === 0 ? 'M' : 'L'}${toX(index).toFixed(1)},${toY(point.max).toFixed(1)}`)
+			.join(' ')
+		const lower = [...dailyPoints]
+			.reverse()
+			.map((point, offset) => {
+				const index = dailyPoints.length - 1 - offset
+				return `L${toX(index).toFixed(1)},${toY(point.min).toFixed(1)}`
+			})
+			.join(' ')
+		return `${upper} ${lower} Z`
+	}
+
+	const avgPath = buildSeriesPath('avg')
+	const medianPath = buildSeriesPath('median')
+	const rangePath = buildRangePath()
+	const firstX = toX(0)
+	const lastX = toX(dailyPoints.length - 1)
+	const baseline = padT + plotH
+	const areaPath = avgPath
+		? `${avgPath} L${lastX.toFixed(1)},${baseline.toFixed(1)} L${firstX.toFixed(1)},${baseline.toFixed(1)} Z`
+		: ''
+
+	const yTicks = Array.from({ length: 5 }, (_, i) => {
+		const ratio = i / 4
+		const price = yMin + ratio * span
+		const y = padT + (1 - ratio) * plotH
+		return { y, label: compactMoney(price) }
+	})
+	const xLabelCount = Math.min(5, dailyPoints.length)
+	const xLabels = Array.from({ length: xLabelCount }, (_, i) => {
+		const idx = Math.round((i / (xLabelCount - 1 || 1)) * (dailyPoints.length - 1))
+		return { x: toX(idx), label: dailyPoints[idx]?.label || '' }
+	})
+	const latest = dailyPoints[dailyPoints.length - 1]
+	const allSampleCount = dailyPoints.reduce((sum, point) => sum + point.count, 0)
+
 	return html`
-		<div className="chart-shell">
-			<svg viewBox=${`0 0 ${width} ${height}`} className="analytics-svg">
-				<path d=${d} fill="none" stroke="currentColor" strokeWidth="3" />
+		<div className="chart-shell enhanced-chart-shell">
+			<div className="chart-legend-row">
+				<div className="chart-legend-group">
+					<span className="chart-legend-item avg"><span></span>每日均价</span>
+					<span className="chart-legend-item median"><span></span>每日中位数</span>
+					<span className="chart-legend-item range"><span></span>最低/最高区间</span>
+				</div>
+				<div className="chart-legend-meta">
+					${dailyPoints.length} 天 · ${allSampleCount} 个价格样本
+				</div>
+			</div>
+			<svg viewBox=${`0 0 ${width} ${height}`} className="analytics-svg enhanced-analytics-svg" role="img" aria-label="历史价格趋势">
+				<defs>
+					<linearGradient id="goofish-price-area-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+						<stop offset="0%" stopColor="var(--primary)" stopOpacity="0.28" />
+						<stop offset="100%" stopColor="var(--primary)" stopOpacity="0" />
+					</linearGradient>
+					<linearGradient id="goofish-price-range-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+						<stop offset="0%" stopColor="var(--warning)" stopOpacity="0.16" />
+						<stop offset="100%" stopColor="var(--warning)" stopOpacity="0.05" />
+					</linearGradient>
+				</defs>
+
+				${yTicks.map(({ y, label }) => html`
+					<line
+						x1=${padL} y1=${y.toFixed(1)}
+						x2=${width - padR} y2=${y.toFixed(1)}
+						stroke="var(--border-soft)" strokeWidth="1" strokeDasharray="4 6"
+					/>
+					<text
+						x=${padL - 8} y=${y.toFixed(1)}
+						textAnchor="end" dominantBaseline="middle"
+						fill="var(--muted)" fontSize="11"
+					>${label}</text>
+				`)}
+
+				<line x1=${padL} y1=${padT} x2=${padL} y2=${baseline} stroke="var(--border-soft)" strokeWidth="1" />
+				<line x1=${padL} y1=${baseline} x2=${width - padR} y2=${baseline} stroke="var(--border-soft)" strokeWidth="1" />
+				<path d=${rangePath} fill="url(#goofish-price-range-fill)" />
+				<path d=${areaPath} fill="url(#goofish-price-area-fill)" />
+				<path d=${avgPath} fill="none" stroke="var(--primary)" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+				<path d=${medianPath} fill="none" stroke="var(--warning)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="8 7" />
+
+				${dailyPoints.map((point, index) => html`
+					<g key=${point.day}>
+						<circle cx=${toX(index).toFixed(1)} cy=${toY(point.avg).toFixed(1)} r="4.5" fill="var(--primary)">
+							<title>${`${point.day} 均价 ${formatMoney(point.avg)}，中位数 ${formatMoney(point.median)}，样本 ${point.count}`}</title>
+						</circle>
+						<circle cx=${toX(index).toFixed(1)} cy=${toY(point.median).toFixed(1)} r="3.5" fill="var(--warning)">
+							<title>${`${point.day} 中位数 ${formatMoney(point.median)}`}</title>
+						</circle>
+					</g>
+				`)}
+				${xLabels.map(({ x, label }) => label && html`
+					<text
+						x=${x.toFixed(1)} y=${height - 10}
+						textAnchor="middle"
+						fill="var(--muted)" fontSize="11"
+					>${label}</text>
+				`)}
+				<line
+					x1=${lastX.toFixed(1)} y1=${padT}
+					x2=${lastX.toFixed(1)} y2=${baseline}
+					stroke="var(--primary)" strokeWidth="1.2" strokeDasharray="3 7"
+					opacity="0.55"
+				/>
+				<circle cx=${lastX.toFixed(1)} cy=${toY(latest.avg).toFixed(1)} r="7" fill="none" stroke="var(--primary)" strokeWidth="2" opacity="0.72" />
 			</svg>
-			<div className="chart-meta">
-				最低 ${formatMoney(min)} · 最高 ${formatMoney(max)}
+			<div className="chart-meta chart-meta-grid">
+				<span>展示范围 ${compactMoney(yMin)} ~ ${compactMoney(yMax)}</span>
+				<span>最新 ${latest?.label || '-'}：均价 ${formatMoney(latest?.avg)} / 中位数 ${formatMoney(latest?.median)} / 区间 ${formatMoney(latest?.min)}~${formatMoney(latest?.max)}</span>
 			</div>
 		</div>
 	`
+}
+
+function aggregateDailyPricePoints(rawPoints, valueKey) {
+	const groups = new Map()
+	for (const point of rawPoints || []) {
+		const value = Number(point?.[valueKey])
+		if (!Number.isFinite(value)) continue
+		const ts = Number(point?.observed_at || 0)
+		const day = ts
+			? new Date(ts * 1000).toLocaleDateString('zh-CN', {
+				year: 'numeric',
+				month: '2-digit',
+				day: '2-digit'
+			})
+			: '未知日期'
+		if (!groups.has(day)) groups.set(day, [])
+		groups.get(day).push(value)
+	}
+	return Array.from(groups.entries()).map(([day, dayValues]) => {
+		const sorted = [...dayValues].sort((a, b) => a - b)
+		const avg = sorted.reduce((sum, value) => sum + value, 0) / sorted.length
+		return {
+			day,
+			label: day.replace(/^\d{4}\//, ''),
+			count: sorted.length,
+			avg: roundMoney(avg),
+			median: roundMoney(medianOfSorted(sorted)),
+			min: sorted[0],
+			max: sorted[sorted.length - 1],
+		}
+	})
+}
+
+function medianOfSorted(sorted) {
+	if (!sorted.length) return 0
+	const mid = Math.floor(sorted.length / 2)
+	return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+}
+
+function roundMoney(value) {
+	return Math.round(Number(value || 0) * 100) / 100
+}
+
+function compactMoney(value) {
+	const number = Number(value)
+	if (!Number.isFinite(number)) return '-'
+	if (Math.abs(number) >= 10000) return `¥${(number / 10000).toFixed(1)}万`
+	return `¥${Math.round(number)}`
 }
 
 function MiniTrendBars({ trends }) {
@@ -643,25 +829,55 @@ function MiniTrendBars({ trends }) {
 			description="最近 30 天没有通知记录。"
 		/>`
 	}
+	const normalizedRows = rows.map((item) => ({
+		...item,
+		newCount: Number(item.new_count || 0),
+		dropCount: Number(item.price_drop_count || 0),
+	}))
+	const totalNew = normalizedRows.reduce((sum, item) => sum + item.newCount, 0)
+	const totalDrop = normalizedRows.reduce((sum, item) => sum + item.dropCount, 0)
+	const last7Total = normalizedRows
+		.slice(-7)
+		.reduce((sum, item) => sum + item.newCount + item.dropCount, 0)
 	const max = Math.max(
 		1,
-		...rows.map((item) => Number(item.new_count || 0) + Number(item.price_drop_count || 0))
+		...normalizedRows.map((item) => item.newCount + item.dropCount)
 	)
 	return html`
 		<div className="trend-bars">
-			${rows.map((item) => {
-				const total = Number(item.new_count || 0) + Number(item.price_drop_count || 0)
+			<div className="trend-summary-row">
+				<div><strong>${totalNew}</strong><span>上新通知</span></div>
+				<div><strong>${totalDrop}</strong><span>降价通知</span></div>
+				<div><strong>${last7Total}</strong><span>近 7 天合计</span></div>
+			</div>
+			<div className="chart-legend-row compact">
+				<div className="chart-legend-group">
+					<span className="chart-legend-item notice-new"><span></span>上新</span>
+					<span className="chart-legend-item notice-drop"><span></span>降价</span>
+				</div>
+				<div className="chart-legend-meta">按天堆叠展示</div>
+			</div>
+			${normalizedRows.map((item) => {
+				const total = item.newCount + item.dropCount
 				return html`
 					<div className="trend-bar-row" key=${item.day}>
 						<div className="trend-bar-day">${item.day}</div>
 						<div className="trend-bar-track">
-							<div
-								className="trend-bar-fill"
-								style=${{ width: `${Math.max(4, (total / max) * 100)}%` }}
-							></div>
+							<div className="trend-bar-stack">
+								<div
+									className="trend-bar-segment new"
+									title=${`上新 ${item.newCount}`}
+									style=${{ width: `${(item.newCount / max) * 100}%` }}
+								></div>
+								<div
+									className="trend-bar-segment drop"
+									title=${`降价 ${item.dropCount}`}
+									style=${{ width: `${(item.dropCount / max) * 100}%` }}
+								></div>
+							</div>
 						</div>
 						<div className="trend-bar-value">
-							上新 ${item.new_count || 0} / 降价 ${item.price_drop_count || 0}
+							合计 ${total} · 上新 ${item.newCount} / 降价 ${item.dropCount}
 						</div>
 					</div>
 				`

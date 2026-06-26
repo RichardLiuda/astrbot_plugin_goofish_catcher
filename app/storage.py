@@ -2220,12 +2220,34 @@ class SubscriptionStorage:
         if sorted_prices:
             mid = len(sorted_prices) // 2
             median = (sorted_prices[mid] + sorted_prices[~mid]) / 2.0
+
+            # IQR 离群值过滤：剔除超出 [Q1 - 1.5*IQR, Q3 + 1.5*IQR] 的极端挂价，
+            # 避免 ¥1 / ¥3.8亿 等垃圾价格污染均值和极值展示。
+            # 中位数本身对离群值免疫，不参与过滤。
+            n = len(sorted_prices)
+            q1 = sorted_prices[n // 4]
+            q3 = sorted_prices[(n * 3) // 4]
+            iqr = q3 - q1
+            if iqr > 0:
+                lo = q1 - 1.5 * iqr
+                hi = q3 + 1.5 * iqr
+            else:
+                # IQR=0：大多数价格相同（如都是 ¥1000），用中位数的宽泛比例窗口兜底，
+                # 保留中位数 ±10 倍范围内的价格，足以过滤 ¥1 / 天价 等极端异常值。
+                lo = median * 0.1 if median > 0 else -1
+                hi = median * 10.0 if median > 0 else float("inf")
+            clean_prices = [p for p in sorted_prices if lo <= p <= hi]
+
+            # 至少保留 1 个样本（极端情况兜底）
+            if not clean_prices:
+                clean_prices = sorted_prices
+
             stats = {
                 "sample_count": len(sorted_prices),
-                "avg_price": round(sum(sorted_prices) / len(sorted_prices), 2),
+                "avg_price": round(sum(clean_prices) / len(clean_prices), 2),
                 "median_price": round(median, 2),
-                "min_price": round(min(sorted_prices), 2),
-                "max_price": round(max(sorted_prices), 2),
+                "min_price": round(min(clean_prices), 2),
+                "max_price": round(max(clean_prices), 2),
             }
         else:
             stats = {
