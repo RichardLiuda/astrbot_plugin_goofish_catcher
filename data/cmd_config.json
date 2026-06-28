@@ -58,7 +58,9 @@
     "websearch_provider": "default",
     "websearch_tavily_key": [],
     "websearch_bocha_key": [],
+    "websearch_brave_key": [],
     "websearch_baidu_app_builder_key": "",
+    "websearch_firecrawl_key": [],
     "web_search_link": false,
     "display_reasoning_text": false,
     "identifier": false,
@@ -71,13 +73,14 @@
     "prompt_prefix": "{{prompt}}",
     "context_limit_reached_strategy": "truncate_by_turns",
     "llm_compress_instruction": "Based on our full conversation history, produce a concise summary of key takeaways and/or project progress.\n1. Systematically cover all core topics discussed and the final conclusion/outcome for each; clearly highlight the latest primary focus.\n2. If any tools were used, summarize tool usage (total call count) and extract the most valuable insights from tool outputs.\n3. If there was an initial user goal, state it first and describe the current progress/status.\n4. Write the summary in the user's language.\n",
-    "llm_compress_keep_recent": 6,
+    "llm_compress_keep_recent_ratio": 0.15,
     "llm_compress_provider_id": "",
     "max_context_length": -1,
     "dequeue_context_length": 1,
     "streaming_response": false,
     "show_tool_use_status": false,
     "show_tool_call_result": false,
+    "buffer_intermediate_messages": false,
     "sanitize_context_by_modalities": false,
     "max_quoted_fallback_images": 20,
     "quoted_message_parser": {
@@ -117,7 +120,13 @@
       "shipyard_neo_endpoint": "",
       "shipyard_neo_access_token": "",
       "shipyard_neo_profile": "python-default",
-      "shipyard_neo_ttl": 3600
+      "shipyard_neo_ttl": 3600,
+      "cua_image": "linux",
+      "cua_os_type": "linux",
+      "cua_idle_timeout": 0,
+      "cua_telemetry_enabled": false,
+      "cua_local": true,
+      "cua_api_key": ""
     },
     "image_compress_enabled": true,
     "image_compress_options": {
@@ -188,10 +197,24 @@
     "enable": true,
     "username": "astrbot",
     "password": "77b90590a8945a7d36c963981a307dc9",
+    "pbkdf2_password": "",
+    "password_storage_upgraded": false,
+    "password_change_required": false,
     "jwt_secret": "",
     "host": "0.0.0.0",
     "port": 6185,
     "disable_access_log": true,
+    "trust_proxy_headers": false,
+    "auth_rate_limit": {
+      "enable": true,
+      "average_interval": 1.0,
+      "max_burst": 3
+    },
+    "totp": {
+      "enable": false,
+      "secret": "",
+      "recovery_code_hash": ""
+    },
     "ssl": {
       "enable": false,
       "cert_file": "",
@@ -251,5 +274,6 @@
   "kb_fusion_top_k": 20,
   "kb_final_top_k": 5,
   "kb_agentic_mode": false,
-  "disable_builtin_commands": false
+  "disable_builtin_commands": false,
+  "disable_metrics": false
 }

@@ -48,6 +48,9 @@ DEEP_ANALYSIS_COOLDOWN_ON_GUARD_SEC = 30 * 60
 DEEP_ANALYSIS_INTERVAL_RANGE_SEC = (8.0, 15.0)
 NEW_EVENT_UNSENT_RECOVERY_SEC = 24 * 3600
 
+# 连续失败多少次后向用户推送一次告警（针对 NETWORK_ERROR 等非暂停类错误）
+_CONSECUTIVE_FAILURE_ALERT_THRESHOLD = 3
+
 
 def _matches_price_range(item: NormalizedItem, sub: Subscription) -> bool:
     price = item.price
@@ -651,6 +654,17 @@ class MonitoringScheduler:
                 sub.id,
                 retry_sec,
             )
+            if failure_count % _CONSECUTIVE_FAILURE_ALERT_THRESHOLD == 0:
+                await self.notifier.send_alert(
+                    umo=sub.umo,
+                    keyword=sub.keyword,
+                    code=ProviderErrorCode.TIMEOUT.value,
+                    message="provider search timed out",
+                    action_hint=(
+                        f"已连续超时 {failure_count} 次，将在 {retry_sec}s 后自动重试。"
+                        "订阅未暂停，无需手动操作；如持续告警请检查 Worker 状态。"
+                    ),
+                )
             return
         except ProviderError as exc:
             now_ts = int(time.time())
@@ -735,6 +749,18 @@ class MonitoringScheduler:
                 exc.code.value,
                 retry_sec,
             )
+            # 连续失败达到阈值时推送告警，避免 NETWORK_ERROR 等错误静默丢失
+            if failure_count % _CONSECUTIVE_FAILURE_ALERT_THRESHOLD == 0:
+                await self.notifier.send_alert(
+                    umo=sub.umo,
+                    keyword=sub.keyword,
+                    code=exc.code.value,
+                    message=exc.message,
+                    action_hint=(
+                        f"已连续失败 {failure_count} 次，将在 {retry_sec}s 后自动重试。"
+                        "订阅未暂停，无需手动操作；如持续告警请检查 Worker 状态。"
+                    ),
+                )
             return
         except Exception as exc:
             now_ts = int(time.time())
@@ -760,6 +786,17 @@ class MonitoringScheduler:
                 exc,
                 exc_info=True,
             )
+            if failure_count % _CONSECUTIVE_FAILURE_ALERT_THRESHOLD == 0:
+                await self.notifier.send_alert(
+                    umo=sub.umo,
+                    keyword=sub.keyword,
+                    code=ProviderErrorCode.UNKNOWN.value,
+                    message=str(exc),
+                    action_hint=(
+                        f"已连续失败 {failure_count} 次，将在 {retry_sec}s 后自动重试。"
+                        "订阅未暂停，无需手动操作；如持续告警请检查日志。"
+                    ),
+                )
         finally:
             await self.activity_monitor.finish_task(activity_id)
 

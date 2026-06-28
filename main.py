@@ -46,6 +46,7 @@ from .app.reply_favorite import (
     recommendation_reply_hint,
     ReplyFavoriteItem,
     ReplyFavoriteTarget,
+    _extract_item_id_from_url,
 )
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator, AUTH_PAUSE_REASONS, AUTO_LOGIN_DONE_SENTINEL
 from .app.recommender import GoofishRecommender
@@ -1211,6 +1212,85 @@ class GoofishCatcherPlugin(Star):
             "用户可引用上方消息并回复序号（如 1 或 1 3）来收藏商品，无需额外操作。"
         )
 
+    @llm_tool(name="goofish_query_recommend")
+    async def goofish_query_recommend(
+        self,
+        event: AstrMessageEvent,
+        keyword: str,
+        pages: int = 1,
+        min_price: float = 0,
+        max_price: float = 0,
+        recommend_max_price: float = 0,
+        personal_only: bool = False,
+        free_shipping: bool = False,
+        new_publish_option: str = "",
+        region: str = "",
+        top_k: int = 0,
+    ) -> str:
+        """实时搜索并推荐闲鱼商品，会执行预筛、深度分析、风险/信用判断和推荐排序。
+
+        适合用户让 AI “帮我搜并推荐几个靠谱的”时使用；如果只需要原始搜索列表，优先使用 goofish_search_live。
+
+        Args:
+            keyword(string): 搜索关键词
+            pages(number): 搜索页数，默认 1，最多 3
+            min_price(number): 搜索最低价格（元），0 表示不限
+            max_price(number): 搜索最高价格（元），0 表示不限
+            recommend_max_price(number): 推荐最高价（元），0 表示不限；高于该价格的候选不进入最终推荐
+            personal_only(boolean): 是否只看个人闲置
+            free_shipping(boolean): 是否只看包邮
+            new_publish_option(string): 新发布范围，如 24小时内/7天内/14天内，空表示不限
+            region(string): 地区筛选，如 江苏/南京/全南京，空表示不限
+            top_k(number): 推荐数量，0 表示使用系统默认
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+
+        pages = max(1, min(int(pages), 3))
+        payload: dict[str, Any] = {
+            "keyword": keyword,
+            "pages": pages,
+            "price_min": float(min_price) if min_price and min_price > 0 else None,
+            "price_max": float(max_price) if max_price and max_price > 0 else None,
+            "recommend_max_price": (
+                float(recommend_max_price)
+                if recommend_max_price and recommend_max_price > 0
+                else None
+            ),
+            "personal_only": bool(personal_only),
+            "free_shipping": bool(free_shipping),
+            "new_publish_option": new_publish_option,
+            "region": region,
+            "top_k": max(1, min(int(top_k), 10)) if top_k and top_k > 0 else None,
+        }
+        try:
+            data = await self._admin_service.query(payload)
+        except ProviderError as exc:
+            if exc.code == ProviderErrorCode.AUTH_REQUIRED:
+                return "闲鱼会话已过期，请先登录：/闲鱼 登录"
+            if exc.code == ProviderErrorCode.CAPTCHA:
+                return "遇到闲鱼验证码/风控，请稍后重试。"
+            return f"推荐查询失败：{exc.code.value} - {exc.message}"
+        except Exception as exc:
+            return f"推荐查询失败：{exc}"
+
+        preview = data.get("preview") or {}
+        items = (preview.get("items") or [])[: max(1, min(int(top_k or self.settings.llm_top_k), 10))]
+        compact = {
+            "keyword": preview.get("keyword", keyword),
+            "raw_total": preview.get("raw_total"),
+            "filtered_total": preview.get("filtered_total"),
+            "filter_mode": preview.get("filter_mode"),
+            "summary": preview.get("summary"),
+            "used_llm": preview.get("used_llm"),
+            "fallback_reason": preview.get("fallback_reason"),
+            "recommend_max_price": payload["recommend_max_price"],
+            "items": items,
+        }
+        result = _json.dumps(compact, ensure_ascii=False)
+        return result[:4000] if len(result) > 4000 else result
+
     @llm_tool(name="goofish_get_overview")
     async def goofish_get_overview(self, event: AstrMessageEvent) -> str:
         """获取闲鱼监控系统的整体运行状态，包括订阅数量、最近抓取成功率、调度器状态等。
@@ -1252,6 +1332,7 @@ class GoofishCatcherPlugin(Star):
                 "keyword": it.get("keyword"),
                 "enabled": it.get("enabled"),
                 "interval_sec": it.get("interval_sec"),
+                "recommend_max_price": it.get("recommend_max_price"),
                 "price_min": it.get("price_min"),
                 "price_max": it.get("price_max"),
                 "personal_only": it.get("personal_only"),
@@ -1276,6 +1357,7 @@ class GoofishCatcherPlugin(Star):
         pages: int = 0,
         price_min: float = 0,
         price_max: float = 0,
+        recommend_max_price: float = 0,
         personal_only: bool = False,
         free_shipping: bool = False,
         new_publish_option: str = "",
@@ -1289,6 +1371,7 @@ class GoofishCatcherPlugin(Star):
             pages(number): 每次搜索的页数，0 表示使用系统默认值
             price_min(number): 最低价格过滤（元），0 表示不限
             price_max(number): 最高价格过滤（元），0 表示不限
+            recommend_max_price(number): 推荐最高价（元），0 表示不限；高于该价格的商品不进入最终推荐
             personal_only(boolean): 是否只看个人闲置
             free_shipping(boolean): 是否只看包邮
             new_publish_option(string): 新发布范围，如 24小时内/7天内/14天内，空表示不限
@@ -1309,6 +1392,8 @@ class GoofishCatcherPlugin(Star):
             payload["price_min"] = price_min
         if price_max > 0:
             payload["price_max"] = price_max
+        if recommend_max_price > 0:
+            payload["recommend_max_price"] = recommend_max_price
         if personal_only:
             payload["personal_only"] = True
         if free_shipping:
@@ -1337,6 +1422,7 @@ class GoofishCatcherPlugin(Star):
         pages: int = 0,
         price_min: float = -1,
         price_max: float = -1,
+        recommend_max_price: float = -1,
         personal_only: bool | None = None,
         free_shipping: bool | None = None,
         new_publish_option: str | None = None,
@@ -1351,6 +1437,7 @@ class GoofishCatcherPlugin(Star):
             pages(number): 新页数，0 表示不修改
             price_min(number): 新最低价格，-1 表示不修改，0 表示清除限制
             price_max(number): 新最高价格，-1 表示不修改，0 表示清除限制
+            recommend_max_price(number): 新推荐最高价，-1 表示不修改，0 表示清除限制
             personal_only(boolean): 是否只看个人闲置；不传则不修改
             free_shipping(boolean): 是否只看包邮；不传则不修改
             new_publish_option(string): 新发布范围；空字符串表示清除
@@ -1370,6 +1457,10 @@ class GoofishCatcherPlugin(Star):
             payload["price_min"] = price_min if price_min > 0 else None
         if price_max >= 0:
             payload["price_max"] = price_max if price_max > 0 else None
+        if recommend_max_price >= 0:
+            payload["recommend_max_price"] = (
+                recommend_max_price if recommend_max_price > 0 else None
+            )
         if personal_only is not None:
             payload["personal_only"] = bool(personal_only)
         if free_shipping is not None:
@@ -1522,7 +1613,7 @@ class GoofishCatcherPlugin(Star):
         event: AstrMessageEvent,
         item_id: str,
     ) -> str:
-        """查询某个闲鱼商品的详细信息，包括基本信息、价格历史（最近10条）和通知记录（最近5条）。
+        """查询某个闲鱼商品的详细信息，包括基本信息、深度分析缓存、价格历史（最近10条）和通知记录（最近5条）。
 
         Args:
             item_id(string): 商品 ID（可从 goofish_list_items 的结果中获取）
@@ -1537,12 +1628,154 @@ class GoofishCatcherPlugin(Star):
         # 截断价格历史和通知记录
         item_data = {
             "item": data.get("item"),
+            "deep_analysis": data.get("deep_analysis"),
             "price_history": (data.get("price_history") or [])[:10],
             "notifications": (data.get("notifications") or [])[:5],
             "subscription_count": len(data.get("subscriptions") or []),
         }
         result = _json.dumps(item_data, ensure_ascii=False)
         return result[:3000] if len(result) > 3000 else result
+
+    @llm_tool(name="goofish_analyze_item_detail")
+    async def goofish_analyze_item_detail(
+        self,
+        event: AstrMessageEvent,
+        item_id: str = "",
+        url: str = "",
+        title: str = "",
+        price: float = 0,
+        force_refresh: bool = False,
+    ) -> str:
+        """对单个闲鱼商品执行深度分析，获取卖家信用、主图、想要人数、浏览量和风险结论。
+
+        优先传 item_id；如果商品不在数据库中，可同时传 url/title/price。默认会复用已有缓存，force_refresh=true 时会重新打开详情页。
+
+        Args:
+            item_id(string): 商品 ID，可从搜索结果或商品链接中获取
+            url(string): 商品链接；item_id 不在数据库时可传
+            title(string): 商品标题；可选
+            price(number): 商品价格；可选
+            force_refresh(boolean): 是否强制刷新详情页，默认 false
+        """
+        if err := self._llm_tools_guard():
+            return err
+        if self.provider is None or self.storage is None:
+            return "深度分析组件未就绪，请稍后重试。"
+        import json as _json
+
+        resolved_id = (item_id or "").strip() or (_extract_item_id_from_url(url) or "")
+        if not resolved_id:
+            return "请提供 item_id 或可解析出 item_id 的闲鱼商品链接。"
+
+        summary = await self.storage.get_item_summary(resolved_id)
+        resolved_url = (url or "").strip() or (summary.url if summary else "")
+        if not resolved_url:
+            resolved_url = f"https://www.goofish.com/item?id={resolved_id}"
+        resolved_title = (title or "").strip() or (summary.title if summary else "") or f"闲鱼商品 {resolved_id}"
+        resolved_price = float(price) if price and price > 0 else (
+            float(summary.price) if summary else 0.0
+        )
+
+        if not force_refresh:
+            cached = await self.storage.get_deep_analysis(resolved_id)
+            if cached is not None:
+                result = {
+                    "item_id": resolved_id,
+                    "source": "cache",
+                    "analysis": cached.to_dict(),
+                }
+                text = _json.dumps(result, ensure_ascii=False)
+                return text[:4000] if len(text) > 4000 else text
+
+        candidate = RecommendationCandidate(
+            event_type="DETAIL",
+            keyword=resolved_title[:40],
+            item_id=resolved_id,
+            title=resolved_title,
+            price=resolved_price,
+            url=resolved_url,
+            publish_time=summary.publish_time if summary else None,
+            observed_at=int(time.time()),
+        )
+
+        if self.scheduler is not None and not force_refresh:
+            analyzed = await self.scheduler.deep_analyze_candidates([candidate])
+            analysis = analyzed[0].deep_analysis if analyzed else None
+            if analysis is None:
+                # deep_analyze_candidates drops rejected candidates from its return value,
+                # but still persists their analysis. Re-read the cache so a rejected
+                # analysis can be returned instead of opening the detail page again.
+                cached_after_scheduler = await self.storage.get_deep_analysis(resolved_id)
+                if cached_after_scheduler is not None:
+                    analysis = cached_after_scheduler
+            if analysis is not None:
+                result = {
+                    "item_id": resolved_id,
+                    "source": "scheduler",
+                    "analysis": analysis.to_dict(),
+                }
+                text = _json.dumps(result, ensure_ascii=False)
+                return text[:4000] if len(text) > 4000 else text
+
+        try:
+            item = NormalizedItem(
+                item_id=resolved_id,
+                title=resolved_title,
+                price=resolved_price,
+                url=resolved_url,
+                publish_time=summary.publish_time if summary else None,
+            )
+            analysis = await self.provider.analyze_item_detail(
+                item=item,
+                timeout_sec=max(8, self.settings.fetch_timeout_sec),
+            )
+            await self.storage.upsert_deep_analysis(analysis)
+        except ProviderError as exc:
+            if exc.code == ProviderErrorCode.AUTH_REQUIRED:
+                return "闲鱼会话已过期，请先登录：/闲鱼 登录"
+            if exc.code in {ProviderErrorCode.CAPTCHA, ProviderErrorCode.RATE_LIMITED}:
+                return f"深度分析触发闲鱼验证码/风控，已停止本次分析：{exc.message}"
+            return f"深度分析失败：{exc.code.value} - {exc.message}"
+        except Exception as exc:
+            return f"深度分析失败：{exc}"
+
+        result = {
+            "item_id": resolved_id,
+            "source": "fresh",
+            "analysis": analysis.to_dict(),
+        }
+        text = _json.dumps(result, ensure_ascii=False)
+        return text[:4000] if len(text) > 4000 else text
+
+    @llm_tool(name="goofish_get_subscription_analytics")
+    async def goofish_get_subscription_analytics(
+        self,
+        event: AstrMessageEvent,
+        sub_id: int,
+    ) -> str:
+        """获取某个订阅的价格趋势、市场均价、通知趋势和最近推荐商品等统计数据。
+
+        Args:
+            sub_id(number): 订阅 ID
+        """
+        if err := self._llm_tools_guard():
+            return err
+        import json as _json
+        try:
+            data = await self._admin_service.get_subscription_analytics(sub_id)
+        except KeyError as exc:
+            return f"订阅不存在：{exc}"
+        slim = {
+            "subscription": data.get("subscription"),
+            "price_stats": data.get("price_stats"),
+            "market_price": data.get("market_price"),
+            "notification_summary": data.get("notification_summary"),
+            "price_trend": (data.get("price_trend") or [])[-30:],
+            "notification_trend": (data.get("notification_trend") or [])[-30:],
+            "recent_notifications": (data.get("recent_notifications") or [])[:10],
+        }
+        text = _json.dumps(slim, ensure_ascii=False)
+        return text[:4000] if len(text) > 4000 else text
 
     @llm_tool(name="goofish_check_login")
     async def goofish_check_login(self, event: AstrMessageEvent) -> str:

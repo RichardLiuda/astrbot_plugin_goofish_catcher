@@ -4,9 +4,32 @@
 
 ## 远程 Worker 兼容性
 
-当前插件版本（v3.3.2）需要 Worker **≥ v3.3.2**。
+当前插件版本（v3.4.0）需要 Worker **≥ v3.3.2**。
 
 > Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
+
+---
+
+## [3.4.0] - 2026-06-28
+
+### Added
+
+- 新增 `goofish_query_recommend` LLM 工具，可实时搜索并按推荐价格阈值、筛选条件和 Top K 返回推荐结果。
+- 新增 `goofish_analyze_item_detail` LLM 工具，可对单个商品执行或复用深度分析，返回卖家信用、主图、想要人数、浏览量和风险结论。
+- 新增 `goofish_get_subscription_analytics` LLM 工具，便于查询订阅价格趋势、市场均价、通知趋势和最近推荐记录。
+- 新增 VitePress 风格 T2I 文档模板，支持深色主题、代码块语言标识和数学公式渲染。
+
+### Changed
+
+- LLM 订阅创建、更新和列表工具支持展示与维护推荐最高价阈值；临时推荐查询支持自定义推荐数量。
+- 调度器对连续超时、网络错误和未知异常新增分级告警，订阅不暂停时也会在连续失败达到阈值后提示用户。
+- 同步默认 AstrBot 命令配置项，适配新版 WebSearch、Admin、CUA 和指标开关配置。
+
+### Fixed
+
+- 修复临时推荐查询中 `recommend_max_price=0` 被当作 0 元阈值导致所有商品被过滤的问题。
+- 修复商品深度分析工具遇到已缓存的拒绝结果时可能重复打开详情页的问题，降低触发风控的概率。
+- 修复 VitePress T2I 模板对 Markdown HTML 直接写入页面带来的脚本注入风险。
 
 ---
 

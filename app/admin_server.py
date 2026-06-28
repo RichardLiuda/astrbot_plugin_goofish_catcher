@@ -52,6 +52,8 @@ class QueryRequest(BaseModel):
     pages: int = Field(default=1, ge=1)
     price_min: float | None = Field(default=None, ge=0)
     price_max: float | None = Field(default=None, ge=0)
+    recommend_max_price: float | None = Field(default=None, ge=0)
+    top_k: int | None = Field(default=None, ge=0, le=20)
     personal_only: bool = False
     free_shipping: bool = False
     new_publish_option: str | None = None

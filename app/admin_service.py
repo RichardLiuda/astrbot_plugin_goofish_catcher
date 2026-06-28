@@ -214,10 +214,26 @@ class AdminService:
             new_publish_option=self._normalize_optional_text(payload.get("new_publish_option")),
             region=self._normalize_optional_text(payload.get("region")),
         ).normalized()
+        recommend_max_price_raw = payload.get("recommend_max_price")
+        if recommend_max_price_raw in (None, ""):
+            recommend_max_price = None
+        else:
+            recommend_max_price_value = float(recommend_max_price_raw)
+            recommend_max_price = (
+                recommend_max_price_value if recommend_max_price_value > 0 else None
+            )
+        top_k_raw = payload.get("top_k")
+        if top_k_raw in (None, ""):
+            top_k = self.settings.llm_top_k
+        else:
+            top_k_value = int(top_k_raw)
+            top_k = top_k_value if top_k_value > 0 else self.settings.llm_top_k
         preview = await self._run_query(
             keyword=keyword,
             page_count=page_count,
             filters=filters,
+            recommend_max_price=recommend_max_price,
+            top_k=max(1, min(top_k, 20)),
         )
         return {"preview": preview}
 
@@ -678,6 +694,8 @@ class AdminService:
         keyword: str,
         page_count: int,
         filters: SearchFilters | None = None,
+        recommend_max_price: float | None = None,
+        top_k: int | None = None,
     ) -> dict[str, Any]:
         if self.plugin._provider_error:
             raise RuntimeError(self.plugin._provider_error)
@@ -736,7 +754,8 @@ class AdminService:
                 umo="__admin__",
                 keyword=keyword,
                 candidates=candidates,
-                top_k=self.settings.llm_top_k,
+                top_k=top_k or self.settings.llm_top_k,
+                recommend_max_price=recommend_max_price,
             )
             return self._recommendation_to_payload(
                 recommendation=recommendation,
