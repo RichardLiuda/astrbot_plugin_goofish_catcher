@@ -266,11 +266,10 @@ export function ItemsPage({ notify }) {
 			const subIdNum = filters.subId ? parseInt(filters.subId, 10) : 0
 			await api('/api/items', {
 				method: 'DELETE',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
+				body: {
 					item_ids: Array.from(selected),
 					sub_id: subIdNum
-				})
+				}
 			})
 			notify(`已删除 ${selected.size} 条商品记录`, 'success')
 			setDeleteDialogOpen(false)
@@ -288,8 +287,7 @@ export function ItemsPage({ notify }) {
 			const subIdNum = filters.subId ? parseInt(filters.subId, 10) : 0
 			await api('/api/items', {
 				method: 'DELETE',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ item_ids: [itemId], sub_id: subIdNum })
+				body: { item_ids: [itemId], sub_id: subIdNum }
 			})
 			notify('商品记录已删除', 'success')
 			if (drawerOpen) setDrawerOpen(false)
