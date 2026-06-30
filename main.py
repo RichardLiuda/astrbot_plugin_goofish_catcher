@@ -1205,10 +1205,16 @@ class GoofishCatcherPlugin(Star):
                 logger.warning("[goofish_catcher] goofish_search_live send failed: %s", exc)
 
         shown = min(len(filtered), 20)
+        prices = [i.price for i in items_to_show if i.price and i.price > 0]
+        price_summary = (
+            f"，价格区间 ¥{min(prices):.0f}~¥{max(prices):.0f}，均价约 ¥{sum(prices)/len(prices):.0f}"
+            if prices
+            else ""
+        )
         return (
             f"已搜索「{keyword}」，共 {len(items)} 件"
             + (f"，价格过滤后 {len(filtered)} 件" if len(filtered) != len(items) else "")
-            + f"，已展示前 {shown} 件。"
+            + f"，已展示前 {shown} 件{price_summary}。"
             "用户可引用上方消息并回复序号（如 1 或 1 3）来收藏商品，无需额外操作。"
         )
 
