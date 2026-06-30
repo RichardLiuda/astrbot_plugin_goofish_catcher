@@ -107,6 +107,11 @@ class PlaywrightSearchProvider:
         }
         if executable_path is not None:
             launch_kwargs["executable_path"] = str(executable_path)
+        proxy_server = getattr(self.settings, "playwright_proxy", None)
+        if proxy_server:
+            # When an upstream proxy is configured it takes priority over the
+            # force_direct (--no-proxy-server) flags in _build_launch_args.
+            launch_kwargs["proxy"] = {"server": proxy_server}
         return launch_kwargs
 
     async def export_storage_state(self) -> dict[str, Any] | None:

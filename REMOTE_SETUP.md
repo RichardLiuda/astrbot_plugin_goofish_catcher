@@ -47,6 +47,48 @@ uv pip install -r requirements.txt
 uv run python -m playwright install chromium chromium-headless-shell
 ```
 
+### 无桌面服务器（Linux VPS / 云服务器）特别说明
+
+云服务器通常没有图形界面，需要用 `xvfb` 虚拟显示才能启动 headful 浏览器（登录态生成时需要显示二维码）。
+
+**安装依赖：**
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y xvfb \
+    libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 \
+    libcups2 libdbus-1-3 libdrm2 libxcomposite1 libxdamage1 \
+    libxfixes3 libxrandr2 libxss1
+
+# OpenCloudOS / CentOS / RHEL
+sudo yum install -y xorg-x11-server-Xvfb \
+    mesa-libgbm alsa-lib at-spi2-atk cups-libs dbus-libs \
+    libdrm libXcomposite libXdamage libXfixes libXrandr \
+    libXScrnSaver
+```
+
+`playwright install chromium chromium-headless-shell` 安装时如果报缺少系统库，可先运行：
+
+```bash
+uv run python -m playwright install-deps chromium
+```
+
+**生成登录态（云服务器）：**
+
+用 `xvfb-run` 启动 `save_state.py`，浏览器会在虚拟显示中打开：
+
+```bash
+xvfb-run --auto-servernum uv run python save_state.py
+```
+
+执行后浏览器处于虚拟桌面，无法直接看到二维码。建议先用 `capture` 截图，或通过 VNC / X11 转发查看；也可以通过 AstrBot 的 Web 登录流程（见下文"通过 AstrBot 扫码登录"）代替。
+
+**关于云服务器 IP 风控：**
+
+闲鱼对腾讯云、阿里云等数据中心 IP 段有主动拦截策略。即使扫码成功，搜索时也会持续返回 `AUTH_REQUIRED` 或 `FAIL_SYS_SESSION_EXPIRED`。
+
+**根本解决方案是配置代理，将浏览器出站流量路由到住宅 IP**（见下文"代理配置"章节）。
+
 ## 三、生成登录态
 
 在远程主机项目目录执行：
@@ -100,6 +142,51 @@ mv ./storage_state.json ./worker_data/storage_state.json
 ```
 
 如果你希望 worker 使用系统 Chrome/Chromium 而不是 Playwright 自带 Chromium，请配置 `executable_path` 或环境变量 `GOOFISH_WORKER_EXECUTABLE_PATH`。建议使用绝对路径；显式配置后如果路径不存在或浏览器无法启动，worker 会直接报错，不会回退到 Playwright 自带 Chromium。
+
+### 代理配置
+
+如果 worker 运行在数据中心 IP 上（腾讯云、阿里云、AWS 等），闲鱼会对该 IP 段进行风控，导致登录态失效或搜索始终返回 `AUTH_REQUIRED`。
+
+**解决方法：配置一个住宅 IP 代理，让浏览器的所有出站流量（包括登录和搜索）都经过该代理。**
+
+在 `worker_config.json` 中加入 `playwright_proxy` 字段：
+
+```json
+{
+  "data_dir": "./worker_data",
+  "storage_state_file": "storage_state.json",
+  "force_direct": false,
+  "playwright_proxy": "socks5://your-residential-ip:1080"
+}
+```
+
+也可以通过环境变量设置：
+
+```bash
+export GOOFISH_WORKER_PROXY="socks5://your-residential-ip:1080"
+uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
+```
+
+支持的代理格式（与 Playwright 一致）：
+
+| 格式 | 示例 |
+|------|------|
+| SOCKS5 | `socks5://1.2.3.4:1080` |
+| HTTP 代理 | `http://1.2.3.4:8080` |
+| 带认证 | `socks5://user:pass@1.2.3.4:1080` |
+
+**注意：**
+
+- 配置代理后应同时将 `force_direct` 设为 `false`，避免两者冲突
+- 生成登录态（`save_state.py`）时也应通过同一代理，确保 cookie 绑定到代理出口 IP
+- 可以把代理写入 `worker_config.json`，`save_state.py` 和 worker 都会读取同一份配置
+
+**通过代理生成登录态：**
+
+```bash
+# worker_config.json 已配置 playwright_proxy 时，save_state.py 会自动使用
+uv run python save_state.py
+```
 
 ## 五、启动远程 Worker
 
@@ -374,15 +461,15 @@ AstrBot WebUI 中找到插件 `astrbot_plugin_goofish_catcher`，填写：
 - 插件没有重载
 - 改的是 AstrBot 全局配置文件，不是插件配置
 
-### 5. 搜索返回 `AUTH_REQUIRED`
+### 5. 搜索返回 `AUTH_REQUIRED` 或 `FAIL_SYS_SESSION_EXPIRED`
 
 通常原因：
 
 - 登录态文件失效
 - 闲鱼要求重新登录
-- 被风控或验证码拦截
+- **数据中心 IP 被风控**（腾讯云、阿里云、AWS 等 IP 段）
 
-处理方法：
+如果是普通登录态失效，重新生成即可：
 
 ```bash
 uv run python save_state.py
@@ -390,6 +477,24 @@ mv ./storage_state.json ./worker_data/storage_state.json
 ```
 
 然后重启 worker。
+
+**如果在云服务器上持续出现该错误（即使重新扫码也无效）**，根本原因是数据中心 IP 被闲鱼风控。
+请参考上文"代理配置"章节，配置住宅 IP 代理解决。
+
+### 6. 云服务器无法显示二维码 / 浏览器无法启动
+
+原因：云服务器没有图形界面，Playwright headful 浏览器需要显示服务。
+
+解决方法一：安装 `xvfb` 并用 `xvfb-run` 启动：
+
+```bash
+sudo apt-get install -y xvfb
+xvfb-run --auto-servernum uv run python save_state.py
+```
+
+解决方法二：通过 AstrBot 的扫码登录流程（在 AstrBot 内触发 `/闲鱼 登录`，插件会推送二维码截图）。
+
+解决方法三：在本地 Windows/macOS 机器上生成 `storage_state.json`，SCP 上传到服务器，再配合代理使用（需要保证登录时和运行时使用同一个出口 IP，即都走同一个代理）。
 
 ## 十四、安全建议
 

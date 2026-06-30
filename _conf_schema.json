@@ -40,6 +40,12 @@
     "hint": "远程 Worker 自己启用 API Key 鉴权时填写；走 Cloudflare Access 则留空",
     "default": ""
   },
+  "playwright_proxy": {
+    "type": "string",
+    "description": "浏览器代理",
+    "hint": "本地模式下将浏览器流量路由到指定代理，格式如 `socks5://1.2.3.4:1080` 或 `http://1.2.3.4:8080`。云服务器因数据中心 IP 被闲鱼风控时可配置住宅 IP 代理；留空则直连",
+    "default": ""
+  },
   "llm_enabled": {
     "type": "bool",
     "description": "启用 LLM 推荐分析",

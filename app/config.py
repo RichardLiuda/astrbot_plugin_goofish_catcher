@@ -177,6 +177,10 @@ class PluginSettings:
     llm_top_k: int = 3
     llm_min_score: float = 0.0
     llm_max_candidates: int = 20
+    # Optional upstream proxy for the browser (e.g. "socks5://host:port").
+    # When set, overrides force_direct and routes all browser traffic through
+    # the proxy — useful when running on a datacenter IP that goofish blocks.
+    playwright_proxy: str | None = None
     llm_prefilter_enabled: bool = True
     llm_prefilter_timeout_sec: int = 6
     llm_prefilter_max_items: int = 30
@@ -289,6 +293,7 @@ def load_plugin_settings(
     playwright_executable_path = _as_optional_path(
         raw.get("playwright_executable_path")
     )
+    playwright_proxy = str(raw.get("playwright_proxy", "")).strip() or None
     remote_headers_json = _normalize_remote_headers(raw, plugin_name=plugin_name)
     llm_provider_id = str(raw.get("llm_provider_id", "")).strip() or None
     llm_prefilter_provider_id = (
@@ -344,6 +349,7 @@ def load_plugin_settings(
         playwright_headless=False,
         playwright_block_assets=_as_bool(raw.get("playwright_block_assets"), True),
         playwright_force_direct=_as_bool(raw.get("playwright_force_direct"), True),
+        playwright_proxy=playwright_proxy,
         webhook_url=webhook_url,
         remote_base_url=remote_base_url,
         remote_api_key=remote_api_key,

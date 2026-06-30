@@ -128,6 +128,7 @@ class GoofishLoginSession:
         executable_path: Path | str | None = None,
         user_data_dir: Path | str | None = None,
         force_direct: bool = False,
+        proxy: str | None = None,
         login_url: str = DEFAULT_LOGIN_URL,
     ) -> None:
         self.executable_path = normalize_executable_path(executable_path)
@@ -137,6 +138,7 @@ class GoofishLoginSession:
             else None
         )
         self.force_direct = force_direct
+        self.proxy = proxy
         self.login_url = login_url
         self._playwright: Any | None = None
         self._browser: Any | None = None
@@ -170,6 +172,10 @@ class GoofishLoginSession:
             }
             if self.executable_path is not None:
                 launch_kwargs["executable_path"] = str(self.executable_path)
+            if self.proxy:
+                # Route the login browser through the configured upstream proxy so
+                # the session cookie is bound to the same egress IP the worker uses.
+                launch_kwargs["proxy"] = {"server": self.proxy}
 
             if self.user_data_dir is not None:
                 self.user_data_dir.mkdir(parents=True, exist_ok=True)

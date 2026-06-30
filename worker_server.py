@@ -166,6 +166,7 @@ class WorkerLoginSessionManager:
                 executable_path=self.settings.playwright_executable_path,
                 user_data_dir=self.settings.playwright_user_data_dir,
                 force_direct=self.settings.playwright_force_direct,
+                proxy=getattr(self.settings, "playwright_proxy", None),
             )
             try:
                 logger.info(
@@ -405,6 +406,11 @@ def build_worker_settings_from_env() -> PluginSettings:
             "force_direct",
             "GOOFISH_WORKER_FORCE_DIRECT",
             True,
+        ),
+        playwright_proxy=_cfg_optional_str(
+            config,
+            "playwright_proxy",
+            "GOOFISH_WORKER_PROXY",
         ),
         webhook_url=None,
         remote_base_url=None,

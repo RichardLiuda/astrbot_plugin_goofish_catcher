@@ -4,9 +4,25 @@
 
 ## 远程 Worker 兼容性
 
-当前插件版本（v3.4.2）需要 Worker **≥ v3.3.2**。
+当前插件版本（v3.5.0）需要 Worker **≥ v3.5.0**。
 
 > Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
+
+---
+
+## [3.5.0] - 2026-07-01
+
+> **⚠️ Worker 端行为变更，`remote_rest` 模式需在 Worker 服务器上 `git pull` 并重启。**
+
+### Added
+
+- 新增浏览器代理配置（`playwright_proxy`）：支持将 Playwright 浏览器的所有出站流量路由到指定上游代理（SOCKS5 / HTTP），可通过 `worker_config.json` 的 `playwright_proxy` 字段或环境变量 `GOOFISH_WORKER_PROXY` 配置。
+- AstrBot 插件配置面板新增"浏览器代理"配置项（`playwright_proxy`），本地模式下同样生效。
+- 登录态生成（`save_state.py` / Worker 在线扫码登录）同步使用相同代理，确保 cookie 绑定到与搜索请求相同的出口 IP。
+
+### Changed
+
+- `REMOTE_SETUP.md` 新增代理配置章节，补充云服务器（无桌面环境）部署说明，包括 xvfb 安装、系统库依赖、`xvfb-run` 用法，以及数据中心 IP 风控的根因分析和解决路径。
 
 ---
 
