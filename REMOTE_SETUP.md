@@ -188,6 +188,25 @@ uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
 uv run python save_state.py
 ```
 
+### 登录超时调优
+
+云服务器（尤其是无桌面环境 + xvfb）扫码登录的单次会话总时长默认 **60 秒**，包含二维码截图生成、传输给用户、用户扫码、以及 confirm 阶段的多轮网络请求。如果 worker 与调用方（AstrBot）之间网络延迟较高，或 `remote_timeout_sec` 本身调大过（见上文健康检查/超时配置），60 秒很容易被吃满，导致登录会话在 confirm 前就过期。
+
+可以通过 `worker_config.json` 的 `auth_timeout_sec` 字段或环境变量 `GOOFISH_WORKER_AUTH_TIMEOUT_SEC` 调大这个窗口：
+
+```json
+{
+  "auth_timeout_sec": 120
+}
+```
+
+```bash
+export GOOFISH_WORKER_AUTH_TIMEOUT_SEC=120
+uv run python -m uvicorn worker_server:app --host 127.0.0.1 --port 8787
+```
+
+AstrBot 插件本地模式（`playwright_local`）同样受影响，可在插件配置面板的"登录二维码超时（秒）"（`auth_timeout_sec`）中调整，默认同为 60 秒。
+
 ## 五、启动远程 Worker
 
 如果 `worker_config.json` 在项目根目录，直接启动：

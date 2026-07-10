@@ -273,6 +273,7 @@ class GoofishCatcherPlugin(Star):
         elif self.settings.provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL:
             auth_controller = LocalAuthSessionController(
                 self.settings,
+                auth_timeout_sec=self.settings.auth_timeout_sec,
                 on_before_start=self._recycle_local_provider_browser,
                 on_after_confirm=self._adopt_local_login_session,
             )

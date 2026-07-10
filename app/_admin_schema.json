@@ -27,6 +27,12 @@
     "hint": "建议开启，减少系统代理导致的 IP 波动；远程模式由远程主机自己的 worker 配置决定",
     "default": true
   },
+  "auth_timeout_sec": {
+    "type": "int",
+    "description": "登录二维码超时（秒）",
+    "hint": "本地模式扫码登录的会话总时长，默认 60 秒；云服务器等网络较慢环境可调到 90-120。远程模式由远程主机自己的 worker 配置决定",
+    "default": 60
+  },
   "remote_base_url": {
     "type": "string",
     "description": "远程地址",

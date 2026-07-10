@@ -412,6 +412,10 @@ def build_worker_settings_from_env() -> PluginSettings:
             "playwright_proxy",
             "GOOFISH_WORKER_PROXY",
         ),
+        auth_timeout_sec=max(
+            30,
+            _cfg_int(config, "auth_timeout_sec", "GOOFISH_WORKER_AUTH_TIMEOUT_SEC", 60),
+        ),
         webhook_url=None,
         remote_base_url=None,
         remote_api_key=None,
@@ -515,7 +519,9 @@ def create_runtime_from_env() -> WorkerRuntime:
     try:
         settings = build_worker_settings_from_env()
         provider = PlaywrightSearchProvider(settings)
-        login_manager = WorkerLoginSessionManager(settings, provider=provider)
+        login_manager = WorkerLoginSessionManager(
+            settings, auth_timeout_sec=settings.auth_timeout_sec, provider=provider
+        )
         agent_semaphore = (
             asyncio.Semaphore(settings.llm_agent_max_concurrent)
             if settings.llm_agent_enabled and llm_config is not None
@@ -535,7 +541,11 @@ def create_runtime_from_env() -> WorkerRuntime:
             provider=None,
             auth=auth,
             login_manager=(
-                WorkerLoginSessionManager(settings) if settings is not None else None
+                WorkerLoginSessionManager(
+                    settings, auth_timeout_sec=settings.auth_timeout_sec
+                )
+                if settings is not None
+                else None
             ),
             provider_error=(
                 "playwright is not installed. "
@@ -551,7 +561,11 @@ def create_runtime_from_env() -> WorkerRuntime:
             provider=None,
             auth=auth,
             login_manager=(
-                WorkerLoginSessionManager(settings) if settings is not None else None
+                WorkerLoginSessionManager(
+                    settings, auth_timeout_sec=settings.auth_timeout_sec
+                )
+                if settings is not None
+                else None
             ),
             provider_error=str(exc),
             provider_error_code=ProviderErrorCode.UNKNOWN,

@@ -843,6 +843,7 @@ class AdminService:
             "playwright_executable_path": str(settings.playwright_executable_path or ""),
             "playwright_block_assets": settings.playwright_block_assets,
             "playwright_force_direct": settings.playwright_force_direct,
+            "auth_timeout_sec": settings.auth_timeout_sec,
             "default_interval_sec": settings.default_interval_sec,
             "default_pages": settings.default_pages,
             "max_pages": settings.max_pages,
@@ -950,6 +951,7 @@ class AdminService:
                     "playwright_executable_path",
                     "playwright_block_assets",
                     "playwright_force_direct",
+                    "auth_timeout_sec",
                 ],
             },
             {

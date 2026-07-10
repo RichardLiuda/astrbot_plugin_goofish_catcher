@@ -181,6 +181,10 @@ class PluginSettings:
     # When set, overrides force_direct and routes all browser traffic through
     # the proxy — useful when running on a datacenter IP that goofish blocks.
     playwright_proxy: str | None = None
+    # QR login session lifetime (seconds). Default matches goofish's own QR
+    # expiry; raise it on slow remote/cloud deployments where screenshot
+    # round-trips and multi-step confirm eat into the window.
+    auth_timeout_sec: int = 60
     llm_prefilter_enabled: bool = True
     llm_prefilter_timeout_sec: int = 6
     llm_prefilter_max_items: int = 30
@@ -350,6 +354,7 @@ def load_plugin_settings(
         playwright_block_assets=_as_bool(raw.get("playwright_block_assets"), True),
         playwright_force_direct=_as_bool(raw.get("playwright_force_direct"), True),
         playwright_proxy=playwright_proxy,
+        auth_timeout_sec=max(30, _as_int(raw.get("auth_timeout_sec"), 60)),
         webhook_url=webhook_url,
         remote_base_url=remote_base_url,
         remote_api_key=remote_api_key,
