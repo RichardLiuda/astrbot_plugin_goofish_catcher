@@ -310,7 +310,14 @@ export function ItemsPage({ notify }) {
 			await load()
 			notify('深度搜索完成', 'success')
 		} catch (error) {
-			notify(error.message, 'error')
+			const code = error.payload?.error?.code
+			if (code === 'CAPTCHA') {
+				notify('触发了闲鱼滑块验证，本次深度搜索已失败，不支持自动过验证，请稍后重试', 'error')
+			} else if (code === 'AUTH_REQUIRED') {
+				notify('闲鱼登录态已过期，请先重新登录后再试', 'error')
+			} else {
+				notify(error.message, 'error')
+			}
 		} finally {
 			setDeepSearchLoading(false)
 		}

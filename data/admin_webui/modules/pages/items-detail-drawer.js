@@ -204,6 +204,12 @@ export function ItemDetailContent({
 																: null}
 															触发深度搜索
 														<//>
+														<${Typography}
+															variant="caption"
+															color="text.secondary"
+														>
+															商品详情页容易触发闲鱼滑块验证，触发后本次深度搜索会直接失败，不会自动完成验证，可稍后重试。
+														<//>
 													`
 												: null}
 										<//>

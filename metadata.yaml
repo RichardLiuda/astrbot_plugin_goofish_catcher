@@ -1,6 +1,6 @@
 name: astrbot_plugin_goofish_catcher
 display_name: 闲鱼蹲蹲助手
 desc: 闲鱼 Agent 化购物助理。LLM 可直接调用工具完成搜索、订阅管理、收藏及任意复杂页面操作；支持关键词订阅轮询、上新降价检测、LLM 推荐排序与 WebUI 管理。本地或远程部署均可，远程模式下 AstrBot 宿主机无需 Playwright。
-version: v3.5.0
+version: v3.6.0
 author: RichardLiu
 repo: https://github.com/RichardLiuda/astrbot_plugin_goofish_catcher
