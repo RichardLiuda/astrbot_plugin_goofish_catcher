@@ -145,6 +145,7 @@ export function ItemsPage({ notify }) {
 		blockedTerms: '',
 		minPrice: '',
 		maxPrice: '',
+		deepSearched: 'all',
 		sortBy: 'last_seen_at',
 		sortOrder: 'desc'
 	})
@@ -158,6 +159,7 @@ export function ItemsPage({ notify }) {
 	const [selected, setSelected] = useState(new Set())
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 	const [deleteLoading, setDeleteLoading] = useState(false)
+	const [deepSearchLoading, setDeepSearchLoading] = useState(false)
 
 	const isNarrowScreen = useMediaQuery('(max-width: 720px)')
 	const deferredSearch = useDeferredValue(filters.search)
@@ -186,6 +188,7 @@ export function ItemsPage({ notify }) {
 			if (filters.subId) params.set('sub_id', filters.subId)
 			if (filters.minPrice !== '') params.set('min_price', filters.minPrice)
 			if (filters.maxPrice !== '') params.set('max_price', filters.maxPrice)
+			if (filters.deepSearched !== 'all') params.set('deep_searched', filters.deepSearched)
 			const endpoint =
 				filters.view === 'by_subscription'
 					? '/api/items/by-subscription'
@@ -220,6 +223,7 @@ export function ItemsPage({ notify }) {
 		filters.view,
 		filters.minPrice,
 		filters.maxPrice,
+		filters.deepSearched,
 		filters.sortBy,
 		filters.sortOrder
 	])
@@ -298,6 +302,20 @@ export function ItemsPage({ notify }) {
 		}
 	}
 
+	async function handleTriggerDeepSearch(itemId) {
+		setDeepSearchLoading(true)
+		try {
+			const payload = await api(`/api/items/${itemId}/deep-search`, { method: 'POST' })
+			setDetail(payload.item)
+			await load()
+			notify('深度搜索完成', 'success')
+		} catch (error) {
+			notify(error.message, 'error')
+		} finally {
+			setDeepSearchLoading(false)
+		}
+	}
+
 	// ── 多选辅助 ─────────────────────────────────────────────────────────────
 	function toggleItem(itemId) {
 		setSelected((prev) => {
@@ -348,6 +366,7 @@ export function ItemsPage({ notify }) {
 			filters.blockedTerms.trim() ||
 			filters.minPrice !== '' ||
 			filters.maxPrice !== '' ||
+			filters.deepSearched !== 'all' ||
 			filters.sortBy !== 'last_seen_at' ||
 			filters.sortOrder !== 'desc'
 	)
@@ -384,6 +403,8 @@ export function ItemsPage({ notify }) {
 					onFocusSubscription=${focusSubscription}
 					onRunSubscriptionAction=${runSubscriptionAction}
 					onDelete=${handleDeleteOne}
+					onDeepSearch=${handleTriggerDeepSearch}
+					deepSearchLoading=${deepSearchLoading}
 				/>
 			<//>
 		`
@@ -440,6 +461,7 @@ export function ItemsPage({ notify }) {
 										onClick=${() => setFilters({
 											search: '', subId: '', view: 'flat',
 											blockedTerms: '', minPrice: '', maxPrice: '',
+											deepSearched: 'all',
 											sortBy: 'last_seen_at', sortOrder: 'desc'
 										})}
 										sx=${{ flexShrink: 0, height: 36 }}
@@ -450,7 +472,7 @@ export function ItemsPage({ notify }) {
 							: null}
 					<//>
 
-					${/* 第二行：视图 + 价格范围 + 排序 + 状态摘要 */ ''}
+					${/* 第二行：视图 + 价格范围 + 深度搜索 + 排序 + 状态摘要 */ ''}
 					<${Box} className="filter-bar-row">
 						<${TextField}
 							size="small"
@@ -483,6 +505,19 @@ export function ItemsPage({ notify }) {
 							onChange=${(e) => setFilters((c) => ({ ...c, maxPrice: e.target.value }))}
 							sx=${{ ...FILTER_SX, flex: '0 1 90px' }}
 						/>
+						<${FilterDivider} />
+						<${TextField}
+							size="small"
+							variant="outlined"
+							select=${true}
+							value=${filters.deepSearched}
+							onChange=${(e) => setFilters((c) => ({ ...c, deepSearched: e.target.value }))}
+							sx=${{ ...FILTER_SX, flex: '0 0 130px' }}
+						>
+							<${MenuItem} value="all">全部（深度搜索）<//>
+							<${MenuItem} value="yes">已深度搜索<//>
+							<${MenuItem} value="no">未深度搜索<//>
+						<//>
 						<${FilterDivider} />
 						<${TextField}
 							size="small"
@@ -664,6 +699,7 @@ export function ItemsPage({ notify }) {
 																		<${TableCell}>价格<//>
 																		<${TableCell}>最近发现<//>
 																		<${TableCell}>最新事件<//>
+																		<${TableCell}>深度搜索<//>
 																		<${TableCell}
 																			align="right"
 																			className="table-action-cell"
@@ -728,6 +764,20 @@ export function ItemsPage({ notify }) {
 																				<${TableCell}>
 																					${item.latest_event_type ||
 																					'-'}
+																				<//>
+																				<${TableCell}>
+																					<${Chip}
+																						size="small"
+																						label=${item.has_deep_analysis
+																							? '已搜索'
+																							: '未搜索'}
+																						color=${item.has_deep_analysis
+																							? 'success'
+																							: 'default'}
+																						variant=${item.has_deep_analysis
+																							? 'filled'
+																							: 'outlined'}
+																					/>
 																				<//>
 																				<${TableCell}
 																					align="right"
@@ -842,6 +892,7 @@ export function ItemsPage({ notify }) {
 														<${TableCell}>最近发现<//>
 														<${TableCell}>订阅数<//>
 														<${TableCell}>最新事件<//>
+														<${TableCell}>深度搜索<//>
 														<${TableCell}
 															align="right"
 															className="table-action-cell"
@@ -898,6 +949,14 @@ export function ItemsPage({ notify }) {
 																<//>
 																<${TableCell}>
 																	${item.latest_event_type || '-'}
+																<//>
+																<${TableCell}>
+																	<${Chip}
+																		size="small"
+																		label=${item.has_deep_analysis ? '已搜索' : '未搜索'}
+																		color=${item.has_deep_analysis ? 'success' : 'default'}
+																		variant=${item.has_deep_analysis ? 'filled' : 'outlined'}
+																	/>
 																<//>
 																<${TableCell}
 																	align="right"
@@ -958,6 +1017,8 @@ export function ItemsPage({ notify }) {
 							onFocusSubscription=${focusSubscription}
 							onRunSubscriptionAction=${runSubscriptionAction}
 							onDelete=${handleDeleteOne}
+							onDeepSearch=${handleTriggerDeepSearch}
+							deepSearchLoading=${deepSearchLoading}
 						/>
 					`
 				: null}

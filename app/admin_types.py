@@ -122,6 +122,7 @@ class ItemSummary:
     last_seen_at: int
     subscription_count: int
     latest_event_type: str | None
+    has_deep_analysis: bool = False
 
 
 @dataclass(slots=True)
@@ -139,6 +140,7 @@ class SubscriptionItemSummary:
     first_seen_at: int
     last_seen_at: int
     latest_event_type: str | None
+    has_deep_analysis: bool = False
 
 
 @dataclass(slots=True)

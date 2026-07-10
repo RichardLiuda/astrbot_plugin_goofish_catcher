@@ -1456,6 +1456,7 @@ class SubscriptionStorage:
         sub_id: int | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        deep_searched: bool | None = None,
         sort_by: str = "last_seen_at",
         sort_order: str = "desc",
         limit: int = 50,
@@ -1480,6 +1481,11 @@ class SubscriptionStorage:
         if sub_id is not None:
             where_parts.append("sub_id = ?")
             params.append(sub_id)
+        if deep_searched is not None:
+            exists_sql = (
+                "EXISTS (SELECT 1 FROM item_deep_analysis a WHERE a.item_id = base.item_id)"
+            )
+            where_parts.append(exists_sql if deep_searched else f"NOT {exists_sql}")
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         summary_filters: list[str] = []
         summary_params: list[object] = []
@@ -1598,7 +1604,11 @@ class SubscriptionStorage:
                             WHERE n.item_id = base.item_id
                             ORDER BY n.sent_at DESC, n.id DESC
                             LIMIT 1
-                        ) AS latest_event_type
+                        ) AS latest_event_type,
+                        EXISTS (
+                            SELECT 1 FROM item_deep_analysis a
+                            WHERE a.item_id = base.item_id
+                        ) AS has_deep_analysis
                     FROM items base
                     {where_sql}
                     GROUP BY base.item_id
@@ -1624,6 +1634,7 @@ class SubscriptionStorage:
                 last_seen_at=int(row["last_seen_at"]),
                 subscription_count=int(row["subscription_count"]),
                 latest_event_type=row["latest_event_type"],
+                has_deep_analysis=bool(row["has_deep_analysis"]),
             )
             for row in rows
         ]
@@ -1669,6 +1680,7 @@ class SubscriptionStorage:
         sub_id: int | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        deep_searched: bool | None = None,
         sort_by: str = "last_seen_at",
         sort_order: str = "desc",
         limit: int = 120,
@@ -1701,6 +1713,11 @@ class SubscriptionStorage:
         if max_price is not None:
             where_parts.append("COALESCE(i.last_price, 0) <= ?")
             params.append(max_price)
+        if deep_searched is not None:
+            exists_sql = (
+                "EXISTS (SELECT 1 FROM item_deep_analysis a WHERE a.item_id = i.item_id)"
+            )
+            where_parts.append(exists_sql if deep_searched else f"NOT {exists_sql}")
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         order_clause = self._subscription_item_order_clause(sort_by, sort_order)
 
@@ -1737,7 +1754,11 @@ class SubscriptionStorage:
                         WHERE n.sub_id = s.id AND n.item_id = i.item_id
                         ORDER BY n.sent_at DESC, n.id DESC
                         LIMIT 1
-                    ) AS latest_event_type
+                    ) AS latest_event_type,
+                    EXISTS (
+                        SELECT 1 FROM item_deep_analysis a
+                        WHERE a.item_id = i.item_id
+                    ) AS has_deep_analysis
                 FROM items i
                 JOIN subscriptions s ON s.id = i.sub_id
                 {where_sql}
@@ -1763,6 +1784,7 @@ class SubscriptionStorage:
                 first_seen_at=int(row["first_seen_at"]),
                 last_seen_at=int(row["last_seen_at"]),
                 latest_event_type=row["latest_event_type"],
+                has_deep_analysis=bool(row["has_deep_analysis"]),
             )
             for row in rows
         ]

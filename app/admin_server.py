@@ -237,6 +237,7 @@ def create_admin_app(plugin: Any) -> FastAPI:
         sub_id: int | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        deep_searched: str = "",
         sort_by: str = "last_seen_at",
         sort_order: str = "desc",
         limit: int = 50,
@@ -250,6 +251,7 @@ def create_admin_app(plugin: Any) -> FastAPI:
                 sub_id=sub_id,
                 min_price=min_price,
                 max_price=max_price,
+                deep_searched=deep_searched,
                 sort_by=sort_by,
                 sort_order=sort_order,
                 limit=limit,
@@ -263,6 +265,7 @@ def create_admin_app(plugin: Any) -> FastAPI:
         sub_id: int | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        deep_searched: str = "",
         sort_by: str = "last_seen_at",
         sort_order: str = "desc",
         limit: int = 120,
@@ -276,6 +279,7 @@ def create_admin_app(plugin: Any) -> FastAPI:
                 sub_id=sub_id,
                 min_price=min_price,
                 max_price=max_price,
+                deep_searched=deep_searched,
                 sort_by=sort_by,
                 sort_order=sort_order,
                 limit=limit,
@@ -286,6 +290,10 @@ def create_admin_app(plugin: Any) -> FastAPI:
     @app.get("/api/items/{item_id}")
     async def get_item_detail(item_id: str, _: None = Depends(require_admin)):
         return {"ok": True, "item": await service.get_item_detail(item_id)}
+
+    @app.post("/api/items/{item_id}/deep-search")
+    async def trigger_item_deep_search(item_id: str, _: None = Depends(require_admin)):
+        return {"ok": True, "item": await service.trigger_deep_search(item_id)}
 
     @app.delete("/api/items")
     async def delete_items(payload: ItemDeleteRequest, _: None = Depends(require_admin)):

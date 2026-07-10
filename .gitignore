@@ -227,3 +227,5 @@ docs
 thirdparty
 .claude
 .claude/skills/release/SKILL.md
+report
+.DS_Store

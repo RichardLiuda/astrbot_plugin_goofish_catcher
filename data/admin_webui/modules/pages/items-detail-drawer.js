@@ -27,7 +27,9 @@ export function ItemDetailContent({
 	detail,
 	onFocusSubscription,
 	onRunSubscriptionAction,
-	onDelete
+	onDelete,
+	onDeepSearch,
+	deepSearchLoading
 }) {
 	const detailItem = detail?.item
 	const deepAnalysis = detail?.deep_analysis || null
@@ -183,10 +185,29 @@ export function ItemDetailContent({
 											/>
 										<//>
 									`
-								: html`<${EmptyState}
-										title="暂无深度分析"
-										description="商品进入推荐候选后会缓存详情分析结果。"
-									/>`}
+								: html`
+										<${Stack} spacing=${1.5} alignItems="flex-start">
+											<${EmptyState}
+												title="暂无深度分析"
+												description="商品进入推荐候选后会缓存详情分析结果，也可以手动触发。"
+											/>
+											${onDeepSearch && detailItem?.item_id
+												? html`
+														<${Button}
+															variant="contained"
+															size="small"
+															disabled=${deepSearchLoading}
+															onClick=${() => onDeepSearch(detailItem.item_id)}
+														>
+															${deepSearchLoading
+																? html`<${CircularProgress} size=${16} sx=${{ mr: 1 }} />`
+																: null}
+															触发深度搜索
+														<//>
+													`
+												: null}
+										<//>
+									`}
 						<//>
 
 						<${SurfaceCard}
@@ -523,7 +544,9 @@ export function ItemDetailDrawer({
 	onClose,
 	onFocusSubscription,
 	onRunSubscriptionAction,
-	onDelete
+	onDelete,
+	onDeepSearch,
+	deepSearchLoading
 }) {
 	return html`
 		<${Drawer}
@@ -538,6 +561,8 @@ export function ItemDetailDrawer({
 					onFocusSubscription=${onFocusSubscription}
 					onRunSubscriptionAction=${onRunSubscriptionAction}
 					onDelete=${onDelete}
+					onDeepSearch=${onDeepSearch}
+					deepSearchLoading=${deepSearchLoading}
 				/>
 			<//>
 		<//>

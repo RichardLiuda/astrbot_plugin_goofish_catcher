@@ -22,6 +22,7 @@ _SOURCE_LABELS = {
     "subscription": "订阅检查",
     "manual_check": "手动检查",
     "temporary_query": "临时查询",
+    "deep_search": "深度搜索",
 }
 
 

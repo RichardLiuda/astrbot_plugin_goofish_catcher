@@ -27,6 +27,7 @@ from .config import (
     save_runtime_overrides,
 )
 from .types import (
+    NormalizedItem,
     ProviderError,
     RecommendationCandidate,
     RecommendationResult,
@@ -251,6 +252,7 @@ class AdminService:
         sub_id: int | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        deep_searched: str = "",
         sort_by: str = "last_seen_at",
         sort_order: str = "desc",
         limit: int = 50,
@@ -261,6 +263,7 @@ class AdminService:
             sub_id=sub_id,
             min_price=min_price,
             max_price=max_price,
+            deep_searched=self._normalize_deep_searched(deep_searched),
             sort_by=sort_by,
             sort_order=sort_order,
             limit=limit,
@@ -278,6 +281,7 @@ class AdminService:
         sub_id: int | None = None,
         min_price: float | None = None,
         max_price: float | None = None,
+        deep_searched: str = "",
         sort_by: str = "last_seen_at",
         sort_order: str = "desc",
         limit: int = 120,
@@ -288,6 +292,7 @@ class AdminService:
             sub_id=sub_id,
             min_price=min_price,
             max_price=max_price,
+            deep_searched=self._normalize_deep_searched(deep_searched),
             sort_by=sort_by,
             sort_order=sort_order,
             limit=limit,
@@ -297,6 +302,15 @@ class AdminService:
             "items": [asdict(item) for item in items],
             "total": total,
         }
+
+    @staticmethod
+    def _normalize_deep_searched(value: str) -> bool | None:
+        normalized = str(value or "").strip().lower()
+        if normalized == "yes":
+            return True
+        if normalized == "no":
+            return False
+        return None
 
     async def delete_items(self, item_ids: list[str], sub_id: int = 0) -> dict[str, Any]:
         deleted = await self.storage.delete_items_bulk(sub_id, item_ids)
@@ -316,6 +330,38 @@ class AdminService:
             deep_analysis=analysis.to_dict() if analysis is not None else None,
         )
         return asdict(detail)
+
+    async def trigger_deep_search(self, item_id: str) -> dict[str, Any]:
+        summary = await self.storage.get_item_summary(item_id)
+        if summary is None:
+            raise KeyError("item not found")
+        if self.plugin._provider_error:
+            raise RuntimeError(self.plugin._provider_error)
+        activity_id = await self.activity_monitor.start_task(
+            source="deep_search",
+            keyword=summary.title[:40],
+            umo="__admin__",
+            provider_mode=self.settings.provider_mode,
+            page_count=1,
+            message="正在深度搜索商品详情",
+        )
+        await self.activity_monitor.update_task(activity_id, phase="analyzing")
+        try:
+            item = NormalizedItem(
+                item_id=item_id,
+                title=summary.title,
+                price=summary.price,
+                url=summary.url,
+                publish_time=summary.publish_time,
+            )
+            analysis = await self.provider.analyze_item_detail(
+                item=item,
+                timeout_sec=max(8, self.settings.fetch_timeout_sec),
+            )
+            await self.storage.upsert_deep_analysis(analysis)
+        finally:
+            await self.activity_monitor.finish_task(activity_id)
+        return await self.get_item_detail(item_id)
 
     async def get_subscription_analytics(self, sub_id: int) -> dict[str, Any]:
         return await self.storage.get_subscription_analytics(sub_id)
