@@ -7,8 +7,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 from uuid import uuid4
+
+from .platforms.goofish import GOOFISH_PROFILE
 
 try:
     from astrbot.api import logger
@@ -17,16 +18,12 @@ except ModuleNotFoundError:
 
 PLUGIN_NAME = "astrbot_plugin_goofish_catcher"
 PROVIDER_MODE_PLAYWRIGHT_LOCAL = "playwright_local"
-DEFAULT_LOGIN_URL = "https://www.goofish.com/search?q=%E9%97%B2%E9%B1%BC"
+# 数据源 = GOOFISH_PROFILE（app/platforms/goofish.py）；
+# 保留这三个模块级别名，兼容既有 import 与 GoofishLoginSession 的默认值链路。
+DEFAULT_LOGIN_URL = GOOFISH_PROFILE.login_url
 DEFAULT_VIEWPORT = {"width": 1280, "height": 960}
-_LOGIN_STATUS_API_MARKERS = (
-    "mtop.taobao.idlemessage.pc.loginuser.get",
-    "mtop.idle.web.user.page.nav",
-)
-_EMBEDDED_LOGIN_MARKERS = (
-    "passport.goofish.com/mini_login.htm",
-    "alibaba-login-box",
-)
+_LOGIN_STATUS_API_MARKERS = GOOFISH_PROFILE.login_status_api_markers
+_EMBEDDED_LOGIN_MARKERS = GOOFISH_PROFILE.embedded_login_markers
 
 # Button texts that indicate a one-click / quick login option is available.
 # Clicking one of these should log the user in without QR scanning.
@@ -464,35 +461,10 @@ def _payload_indicates_captcha(payload: dict[str, Any]) -> bool:
     return any(marker in ret_text for marker in ("captcha", "验证码", "滑块"))
 
 
-def _is_auth_url(url: str) -> bool:
-    lowered = str(url or "").lower()
-    if not lowered:
-        return False
-    parsed = urlparse(lowered)
-    host = parsed.netloc
-    path = parsed.path or ""
-    if "passport.goofish.com" in host and (
-        "mini_login.htm" in path or path == "/login" or path.startswith("/login/")
-    ):
-        return True
-    if "goofish.com" in host and "mini_login.htm" in path:
-        return True
-    if "goofish.com" in host and "member/login" in path:
-        return True
-    return False
-
-
-def _is_captcha_url(url: str) -> bool:
-    lowered = str(url or "").lower()
-    if not lowered:
-        return False
-    parsed = urlparse(lowered)
-    host = parsed.netloc
-    path = parsed.path or ""
-    return bool(
-        ("cf.aliyun.com" in host and "nocaptcha" in path)
-        or "captcha" in path
-    )
+# 谓词实现与 provider_playwright 版逐字一致，已收口至 GOOFISH_PROFILE
+# （app/platforms/goofish.py）；保留模块级别名，auth_session.py 仍经此 import。
+_is_auth_url = GOOFISH_PROFILE.is_auth_url
+_is_captcha_url = GOOFISH_PROFILE.is_captcha_url
 
 
 def _collect_frame_urls(page) -> list[str]:

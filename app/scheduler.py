@@ -553,7 +553,7 @@ class MonitoringScheduler:
                 raw_prices = [item.price for item in raw_items if item.price > 0]
                 try:
                     mp = await self.storage.upsert_market_price(
-                        sub.keyword, raw_prices, now_ts
+                        sub.keyword, raw_prices, now_ts, platform=sub.platform
                     )
                     market_snapshot = mp.ema_price
                     logger.debug(

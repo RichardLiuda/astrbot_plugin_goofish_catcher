@@ -201,6 +201,9 @@ cython_debug/
 
 # Goofish worker runtime data
 worker_data/
+
+# Local lab artifacts (login sessions, QR screenshots, probe dumps)
+local_data/
 .cursorignore
 .cursorindexingignore
 

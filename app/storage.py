@@ -19,6 +19,7 @@ from .admin_types import (
     TrendBucket,
 )
 from .types import (
+    DEFAULT_PLATFORM,
     DeepAnalysisResult,
     ExistingItem,
     MarketPrice,
@@ -297,6 +298,38 @@ class SubscriptionStorage:
             await conn.execute("PRAGMA user_version = 6;")
             await conn.commit()
 
+        if version < 7:
+            col_rows = await (
+                await conn.execute("PRAGMA table_info(subscriptions)")
+            ).fetchall()
+            existing_cols = {row[1] for row in col_rows}
+            if "platform" not in existing_cols:
+                await conn.execute(
+                    "ALTER TABLE subscriptions ADD COLUMN platform TEXT NOT NULL DEFAULT 'goofish'"
+                )
+            await conn.executescript(
+                """
+                DROP INDEX IF EXISTS idx_subscriptions_umo_keyword;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_umo_platform_keyword
+                    ON subscriptions (umo, platform, keyword);
+
+                CREATE TABLE IF NOT EXISTS market_price_new (
+                    platform      TEXT NOT NULL DEFAULT 'goofish',
+                    keyword       TEXT NOT NULL,
+                    ema_price     REAL NOT NULL,
+                    sample_count  INTEGER NOT NULL DEFAULT 0,
+                    updated_at    INTEGER NOT NULL,
+                    PRIMARY KEY (platform, keyword)
+                );
+                INSERT INTO market_price_new (platform, keyword, ema_price, sample_count, updated_at)
+                    SELECT 'goofish', keyword, ema_price, sample_count, updated_at FROM market_price;
+                DROP TABLE market_price;
+                ALTER TABLE market_price_new RENAME TO market_price;
+                """
+            )
+            await conn.execute("PRAGMA user_version = 7;")
+            await conn.commit()
+
     @staticmethod
     def _row_to_subscription(row: aiosqlite.Row) -> Subscription:
         keys = row.keys() if hasattr(row, "keys") else []
@@ -306,10 +339,12 @@ class SubscriptionStorage:
         free_shipping = row["free_shipping"] if "free_shipping" in keys else 0
         new_publish_option = row["new_publish_option"] if "new_publish_option" in keys else None
         region = row["region"] if "region" in keys else None
+        platform = row["platform"] if "platform" in keys else None
         return Subscription(
             id=int(row["id"]),
             umo=str(row["umo"]),
             keyword=str(row["keyword"]),
+            platform=str(platform) if platform else DEFAULT_PLATFORM,
             interval_sec=int(row["interval_sec"]),
             pages=int(row["pages"]),
             recommend_max_price=(
@@ -344,15 +379,17 @@ class SubscriptionStorage:
             publish_time=row["publish_time"],
         )
 
-    async def get_subscription(self, umo: str, keyword: str) -> Subscription | None:
+    async def get_subscription(
+        self, umo: str, keyword: str, platform: str = DEFAULT_PLATFORM
+    ) -> Subscription | None:
         conn = self._conn_or_raise()
         row = await (
             await conn.execute(
                 """
                 SELECT * FROM subscriptions
-                WHERE umo = ? AND keyword = ?
+                WHERE umo = ? AND platform = ? AND keyword = ?
                 """,
-                (umo, keyword),
+                (umo, platform, keyword),
             )
         ).fetchone()
         return self._row_to_subscription(row) if row else None
@@ -388,6 +425,7 @@ class SubscriptionStorage:
         free_shipping: bool = False,
         new_publish_option: str | None = None,
         region: str | None = None,
+        platform: str = DEFAULT_PLATFORM,
     ) -> tuple[Subscription, bool]:
         conn = self._conn_or_raise()
         now_ts = int(time.time())
@@ -396,17 +434,17 @@ class SubscriptionStorage:
                 await conn.execute(
                     """
                     SELECT id FROM subscriptions
-                    WHERE umo = ? AND keyword = ?
+                    WHERE umo = ? AND platform = ? AND keyword = ?
                     LIMIT 1
                     """,
-                    (umo, keyword),
+                    (umo, platform, keyword),
                 )
             ).fetchone()
             created = existing is None
             await conn.execute(
                 """
                 INSERT INTO subscriptions (
-                    umo, keyword, interval_sec, pages, recommend_max_price,
+                    umo, platform, keyword, interval_sec, pages, recommend_max_price,
                     drop_abs, drop_pct,
                     new_window_sec, cooldown_sec, enabled, paused_reason,
                     last_run_at, next_run_at, consecutive_failures,
@@ -414,8 +452,8 @@ class SubscriptionStorage:
                     new_publish_option, region,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(umo, keyword) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(umo, platform, keyword) DO UPDATE SET
                     interval_sec = excluded.interval_sec,
                     pages = excluded.pages,
                     recommend_max_price = excluded.recommend_max_price,
@@ -436,6 +474,7 @@ class SubscriptionStorage:
                 """,
                 (
                     umo,
+                    platform,
                     keyword,
                     interval_sec,
                     pages,
@@ -460,10 +499,10 @@ class SubscriptionStorage:
                 await conn.execute(
                     """
                     SELECT * FROM subscriptions
-                    WHERE umo = ? AND keyword = ?
+                    WHERE umo = ? AND platform = ? AND keyword = ?
                     LIMIT 1
                     """,
-                    (umo, keyword),
+                    (umo, platform, keyword),
                 )
             ).fetchone()
 
@@ -471,15 +510,17 @@ class SubscriptionStorage:
             raise RuntimeError("failed to upsert subscription")
         return self._row_to_subscription(row), created
 
-    async def delete_subscription(self, umo: str, keyword: str) -> bool:
+    async def delete_subscription(
+        self, umo: str, keyword: str, platform: str = DEFAULT_PLATFORM
+    ) -> bool:
         conn = self._conn_or_raise()
         async with self._write_lock:
             cursor = await conn.execute(
                 """
                 DELETE FROM subscriptions
-                WHERE umo = ? AND keyword = ?
+                WHERE umo = ? AND platform = ? AND keyword = ?
                 """,
-                (umo, keyword),
+                (umo, platform, keyword),
             )
             await conn.commit()
         return cursor.rowcount > 0
@@ -1834,13 +1875,15 @@ class SubscriptionStorage:
             for row in rows
         ]
 
-    async def get_market_price(self, keyword: str) -> MarketPrice | None:
+    async def get_market_price(
+        self, keyword: str, platform: str = DEFAULT_PLATFORM
+    ) -> MarketPrice | None:
         """读取单个关键词的市场均价快照，不存在时返回 None。"""
         conn = self._conn_or_raise()
         row = await (
             await conn.execute(
-                "SELECT keyword, ema_price, sample_count, updated_at FROM market_price WHERE keyword = ?",
-                (keyword,),
+                "SELECT keyword, ema_price, sample_count, updated_at FROM market_price WHERE platform = ? AND keyword = ?",
+                (platform, keyword),
             )
         ).fetchone()
         if row is None:
@@ -1850,6 +1893,7 @@ class SubscriptionStorage:
             ema_price=float(row["ema_price"]),
             sample_count=int(row["sample_count"]),
             updated_at=int(row["updated_at"]),
+            platform=platform,
         )
 
     async def upsert_market_price(
@@ -1859,6 +1903,7 @@ class SubscriptionStorage:
         now_ts: int,
         *,
         alpha: float = 0.15,
+        platform: str = DEFAULT_PLATFORM,
     ) -> MarketPrice:
         """用本批价格样本通过 EMA 更新关键词的市场均价。
 
@@ -1868,14 +1913,14 @@ class SubscriptionStorage:
         - 首次写入时直接用中位数初始化
         """
         if not new_prices:
-            existing = await self.get_market_price(keyword)
+            existing = await self.get_market_price(keyword, platform)
             if existing is not None:
                 return existing
             raise ValueError("new_prices is empty and no existing market_price for keyword")
 
         valid = sorted(p for p in new_prices if p > 0)
         if not valid:
-            existing = await self.get_market_price(keyword)
+            existing = await self.get_market_price(keyword, platform)
             if existing is not None:
                 return existing
             raise ValueError("no valid (>0) prices in new_prices")
@@ -1888,8 +1933,8 @@ class SubscriptionStorage:
         async with self._write_lock:
             row = await (
                 await conn.execute(
-                    "SELECT ema_price, sample_count FROM market_price WHERE keyword = ?",
-                    (keyword,),
+                    "SELECT ema_price, sample_count FROM market_price WHERE platform = ? AND keyword = ?",
+                    (platform, keyword),
                 )
             ).fetchone()
 
@@ -1904,14 +1949,14 @@ class SubscriptionStorage:
             ema = round(ema, 2)
             await conn.execute(
                 """
-                INSERT INTO market_price (keyword, ema_price, sample_count, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(keyword) DO UPDATE SET
+                INSERT INTO market_price (platform, keyword, ema_price, sample_count, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(platform, keyword) DO UPDATE SET
                     ema_price    = excluded.ema_price,
                     sample_count = excluded.sample_count,
                     updated_at   = excluded.updated_at
                 """,
-                (keyword, ema, count, now_ts),
+                (platform, keyword, ema, count, now_ts),
             )
             await conn.commit()
 
@@ -1920,6 +1965,7 @@ class SubscriptionStorage:
             ema_price=ema,
             sample_count=count,
             updated_at=now_ts,
+            platform=platform,
         )
 
     async def get_price_stats_bulk(

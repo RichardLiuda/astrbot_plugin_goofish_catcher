@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import (
     Browser,
@@ -26,6 +26,12 @@ except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 from .config import PluginSettings
+from .platforms.base import SiteProfile
+from .platforms.goofish import GOOFISH_PROFILE
+from .platforms.registry import (
+    extract_item_id_from_url as _extract_item_id_from_url,
+    normalize_url as _normalize_url,
+)
 from .provider import ProviderConfigurationError
 from .provider_agent import (
     extract_items_via_llm,
@@ -42,20 +48,19 @@ from .types import (
 )
 
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
-_DETAIL_FAVORITE_BUTTON_SELECTOR = "div[class*='buttons--'] div[class*='right--']"
-_FAVORITE_HINT_TEXT = "收藏"
-_FAVORITED_HINT_TEXT = "已收藏"
-_EMBEDDED_LOGIN_MARKERS = (
-    "passport.goofish.com/mini_login.htm",
-    "alibaba-login-box",
-)
 
 
 class PlaywrightSearchProvider:
-    BASE_URL = "https://www.goofish.com"
-
-    def __init__(self, settings: PluginSettings, *, llm_call=None) -> None:
+    def __init__(
+        self,
+        settings: PluginSettings,
+        *,
+        llm_call=None,
+        profile: SiteProfile | None = None,
+    ) -> None:
         self.settings = settings
+        # 平台站点档案：缺省为闲鱼档案，未来新平台经此注入，引擎零改动。
+        self._profile = profile or GOOFISH_PROFILE
         # Optional: async callable(prompt: str, system_prompt: str) -> str
         # Injected by the plugin main to enable AX-tree-based LLM fallback
         # when CSS selectors break after a Goofish frontend update.
@@ -575,7 +580,7 @@ class PlaywrightSearchProvider:
                           return text.includes("已收藏");
                         }
                         """,
-                        arg=_DETAIL_FAVORITE_BUTTON_SELECTOR,
+                        arg=self._profile.favorite_button_selector,
                         timeout=max(2500, min(timeout_ms, 8_000)),
                     )
                 except TimeoutError as exc:
@@ -860,7 +865,7 @@ class PlaywrightSearchProvider:
             if not items and "rate_limited" in error_flags:
                 raise ProviderError(
                     ProviderErrorCode.RATE_LIMITED,
-                    "goofish rate limited current request",
+                    f"{self._profile.display_name} rate limited current request",
                     retry_after_sec=60,
                 )
 
@@ -970,14 +975,14 @@ class PlaywrightSearchProvider:
                 return False
 
         if filters.new_publish_option:
-            if await _click_text("新发布"):
+            if await _click_text(self._profile.filter_label_new_publish):
                 await _click_text(filters.new_publish_option, exact=False)
 
         if filters.personal_only:
-            await _click_text("个人闲置")
+            await _click_text(self._profile.filter_label_personal_only)
 
         if filters.free_shipping:
-            await _click_text("包邮")
+            await _click_text(self._profile.filter_label_free_shipping)
 
         if filters.region:
             await self._apply_region_filter(page, filters.region, captured_payloads, timeout)
@@ -995,7 +1000,7 @@ class PlaywrightSearchProvider:
         if not parts:
             return
         try:
-            trigger = page.get_by_text("区域", exact=True).first
+            trigger = page.get_by_text(self._profile.filter_label_region, exact=True).first
             if await trigger.count() <= 0:
                 return
             await trigger.click(timeout=timeout_ms)
@@ -1099,10 +1104,10 @@ class PlaywrightSearchProvider:
         wait_timeout_ms = max(2500, min(timeout_ms, 10_000))
         try:
             await page.wait_for_selector(
-                _DETAIL_FAVORITE_BUTTON_SELECTOR,
+                self._profile.favorite_button_selector,
                 timeout=wait_timeout_ms,
             )
-            return page.locator(_DETAIL_FAVORITE_BUTTON_SELECTOR).first
+            return page.locator(self._profile.favorite_button_selector).first
         except TimeoutError:
             # ── Agent fallback: CSS class-based selector timed out (likely a
             # frontend update changed the class names).  Ask the LLM to find
@@ -1181,7 +1186,7 @@ class PlaywrightSearchProvider:
             self._attach_page_state_watchers(page, error_flags)
 
             await page.goto(
-                self.BASE_URL,
+                self._profile.base_url,
                 wait_until="domcontentloaded",
                 timeout=timeout_ms,
             )
@@ -1219,12 +1224,8 @@ class PlaywrightSearchProvider:
         price_lower: float | None = None,
         price_upper: float | None = None,
     ) -> str:
-        url = f"{self.BASE_URL}/search?q={quote(keyword)}"
-        if price_lower is not None and price_lower > 0:
-            url += f"&priceLower={int(price_lower)}"
-        if price_upper is not None and price_upper > 0:
-            url += f"&priceUpper={int(price_upper)}"
-        return url
+        # 实现已逐字搬至平台档案（app/platforms/goofish.py），此处仅委托。
+        return self._profile.build_search_url(keyword, price_lower, price_upper)
 
     async def _navigate_to_page_index(
         self,
@@ -1237,13 +1238,13 @@ class PlaywrightSearchProvider:
         await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
         await page.wait_for_timeout(600)
         await page.wait_for_selector(
-            "div[class*='search-pagination-page-box'], "
-            "input[class*='search-pagination-to-page-input']",
+            f"{self._profile.pagination_box_selector}, "
+            f"{self._profile.pagination_input_selector}",
             timeout=pager_timeout_ms,
         )
 
         target_text = str(page_index)
-        page_boxes = page.locator("div[class*='search-pagination-page-box']")
+        page_boxes = page.locator(self._profile.pagination_box_selector)
         target = None
         for idx in range(await page_boxes.count()):
             candidate = page_boxes.nth(idx)
@@ -1261,22 +1262,22 @@ class PlaywrightSearchProvider:
             if available_pages and max(available_pages) < page_index:
                 return False
             page_input = page.locator(
-                "input[class*='search-pagination-to-page-input']"
+                self._profile.pagination_input_selector
             ).first
             confirm_button = page.locator(
-                "button[class*='search-pagination-to-page-confirm-button']"
+                self._profile.pagination_confirm_selector
             ).first
             await page_input.fill(target_text, timeout=pager_timeout_ms)
             await confirm_button.click(timeout=pager_timeout_ms)
 
         await page.wait_for_function(
-            """
-            (pageIndex) => {
+            f"""
+            (pageIndex) => {{
               const active = document.querySelector(
-                "div[class*='search-pagination-page-box-active']"
+                "{self._profile.pagination_active_selector}"
               );
               return active && active.innerText.trim() === String(pageIndex);
-            }
+            }}
             """,
             arg=page_index,
             timeout=pager_timeout_ms,
@@ -1297,11 +1298,7 @@ class PlaywrightSearchProvider:
             values.append(int(text))
         return values
 
-    async def _extract_items_from_dom(self, page) -> list[NormalizedItem]:
-        try:
-            cards = await page.eval_on_selector_all(
-                "a[href*='item']",
-                """
+    _DEFAULT_DOM_CARD_EXTRACTOR_JS = """
                 (nodes) => {
                   return nodes.slice(0, 80).map((node) => {
                     const href = node.href || node.getAttribute('href') || '';
@@ -1314,17 +1311,36 @@ class PlaywrightSearchProvider:
                     };
                   });
                 }
-                """,
+                """
+
+    async def _extract_items_from_dom(self, page) -> list[NormalizedItem]:
+        extractor_js = self._profile.dom_card_extractor_js or self._DEFAULT_DOM_CARD_EXTRACTOR_JS
+        try:
+            cards = await page.eval_on_selector_all(
+                self._profile.dom_card_link_selector,
+                extractor_js,
             )
         except Exception:
             return []
 
         items: list[NormalizedItem] = []
         seen: set[str] = set()
+        parse_dom_card = self._profile.parse_dom_card
         for card in cards:
             if not isinstance(card, dict):
                 continue
-            url = _normalize_url(card.get("href"), self.BASE_URL)
+            if parse_dom_card is not None:
+                # 平台定制解析（含广告过滤、ID 前缀化），失败/过滤返回 None
+                try:
+                    item = parse_dom_card(card, self._profile.base_url)
+                except Exception:
+                    continue
+                if item is None or item.item_id in seen:
+                    continue
+                seen.add(item.item_id)
+                items.append(item)
+                continue
+            url = _normalize_url(card.get("href"), self._profile.base_url)
             if not url:
                 continue
             item_id = _extract_item_id_from_url(url)
@@ -1447,12 +1463,12 @@ class PlaywrightSearchProvider:
         if error_flags and "auth" in error_flags:
             return ProviderError(
                 ProviderErrorCode.AUTH_REQUIRED,
-                "goofish showed embedded login prompt",
+                f"{self._profile.display_name} showed embedded login prompt",
             )
         if error_flags and "captcha" in error_flags:
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
-                "captcha detected on goofish page",
+                f"captcha detected on {self._profile.display_name} page",
             )
         try:
             current_url = str(getattr(page, "url", "") or "").lower()
@@ -1461,12 +1477,12 @@ class PlaywrightSearchProvider:
         if _is_auth_url(current_url):
             return ProviderError(
                 ProviderErrorCode.AUTH_REQUIRED,
-                "goofish redirected to login page",
+                f"{self._profile.display_name} redirected to login page",
             )
         if _is_captcha_url(current_url):
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
-                "captcha detected on goofish page",
+                f"captcha detected on {self._profile.display_name} page",
             )
 
         try:
@@ -1481,12 +1497,12 @@ class PlaywrightSearchProvider:
             if _is_auth_url(frame_url):
                 return ProviderError(
                     ProviderErrorCode.AUTH_REQUIRED,
-                    "goofish showed embedded login prompt",
+                    f"{self._profile.display_name} showed embedded login prompt",
                 )
             if _is_captcha_url(frame_url):
                 return ProviderError(
                     ProviderErrorCode.CAPTCHA,
-                    "captcha detected on goofish page",
+                    f"captcha detected on {self._profile.display_name} page",
                 )
 
         try:
@@ -1494,10 +1510,10 @@ class PlaywrightSearchProvider:
         except Exception:
             html = ""
         lowered = html.lower()
-        if any(marker in lowered for marker in _EMBEDDED_LOGIN_MARKERS):
+        if any(marker in lowered for marker in self._profile.embedded_login_markers):
             return ProviderError(
                 ProviderErrorCode.AUTH_REQUIRED,
-                "goofish showed embedded login prompt",
+                f"{self._profile.display_name} showed embedded login prompt",
             )
         if (
             "验证码" in html
@@ -1509,7 +1525,7 @@ class PlaywrightSearchProvider:
         ):
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
-                "captcha detected on goofish page",
+                f"captcha detected on {self._profile.display_name} page",
             )
 
         # ── Agent fallback: heuristic rules found nothing suspicious.
@@ -1528,7 +1544,7 @@ class PlaywrightSearchProvider:
                 )
                 return ProviderError(
                     ProviderErrorCode.AUTH_REQUIRED,
-                    "goofish login wall detected by LLM (heuristics missed)",
+                    f"{self._profile.display_name} login wall detected by LLM (heuristics missed)",
                 )
 
         return None
@@ -1645,7 +1661,7 @@ class PlaywrightSearchProvider:
 
         url = _normalize_url(
             _pick_first_text(data, ("url", "item_url", "detail_url", "jumpUrl")),
-            self.BASE_URL,
+            self._profile.base_url,
         )
 
         item_id = _pick_first_text(
@@ -1662,7 +1678,7 @@ class PlaywrightSearchProvider:
             return None
 
         if not url:
-            url = f"{self.BASE_URL}/item?id={item_id}"
+            url = f"{self._profile.base_url}/item?id={item_id}"
 
         publish_time = _extract_publish_time(data)
         return NormalizedItem(
@@ -2159,34 +2175,14 @@ def _safe_jsonable(value: Any) -> Any:
 
 
 def _is_auth_url(url: str) -> bool:
-    lowered = str(url or "").lower()
-    if not lowered:
-        return False
-    parsed = urlparse(lowered)
-    host = parsed.netloc
-    path = parsed.path or ""
-    if "passport.goofish.com" in host and (
-        "mini_login.htm" in path or path == "/login" or path.startswith("/login/")
-    ):
-        return True
-    if "goofish.com" in host and "mini_login.htm" in path:
-        return True
-    if "goofish.com" in host and "member/login" in path:
-        return True
-    return False
+    # 兼容委托：实现已逐字搬至 GOOFISH_PROFILE.is_auth_url
+    # （app/platforms/goofish.py）；保留函数名，既有 import 不受影响。
+    return GOOFISH_PROFILE.is_auth_url(url)
 
 
 def _is_captcha_url(url: str) -> bool:
-    lowered = str(url or "").lower()
-    if not lowered:
-        return False
-    parsed = urlparse(lowered)
-    host = parsed.netloc
-    path = parsed.path or ""
-    return bool(
-        ("cf.aliyun.com" in host and "nocaptcha" in path)
-        or "captcha" in path
-    )
+    # 兼容委托：实现已逐字搬至 GOOFISH_PROFILE.is_captcha_url。
+    return GOOFISH_PROFILE.is_captcha_url(url)
 
 
 def _payload_requires_login(payload: dict[str, Any]) -> bool:
@@ -2231,17 +2227,12 @@ def _payload_ret_summary(payload: dict[str, Any]) -> str:
 
 
 def _should_log_response_url(url: str) -> bool:
+    # 模块级函数（无 self），暂直读 GOOFISH_PROFILE；
+    # 未来多平台时改为按 provider 的 profile 传入。
     lowered = str(url or "").lower()
     return any(
         marker in lowered
-        for marker in (
-            "mtop.taobao.idle.pc.detail",
-            "mtop.taobao.idlemessage.pc.loginuser.get",
-            "mtop.taobao.idle.collect.item",
-            "com.taobao.idle.unfavor.item",
-            "passport.goofish.com/mini_login.htm",
-            "mtop.idle.web.user.page.nav",
-        )
+        for marker in GOOFISH_PROFILE.log_response_url_markers
     )
 
 
@@ -2281,52 +2272,24 @@ def _pick_first_text(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return None
 
 
-def _normalize_url(url: Any, base_url: str) -> str | None:
-    if url is None:
-        return None
-    text = str(url).strip()
-    if not text:
-        return None
-    if text.startswith("//"):
-        return "https:" + text
-    if text.startswith("/"):
-        return base_url + text
-    return text
-
-
-def _extract_item_id_from_url(url: str) -> str | None:
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query)
-    for key in ("id", "item_id", "itemId", "auctionId"):
-        values = query.get(key)
-        if not values:
-            continue
-        value = str(values[0]).strip()
-        if value:
-            return value
-
-    match = re.search(r"item(?:_id)?[=/](\d+)", url)
-    if match:
-        return match.group(1)
-    return None
+# _normalize_url / _extract_item_id_from_url 已下沉到 app/platforms/registry.py，
+# 顶部以别名形式引入，本文件及 app/reply_favorite.py 的既有 import 路径不受影响。
 
 
 def _classify_favorite_button_text(text: str) -> str:
+    # 模块级函数（无 self），暂直读 GOOFISH_PROFILE；
+    # 未来多平台时改为按 provider 的 profile 传入。
     normalized = str(text or "").strip()
-    if _FAVORITED_HINT_TEXT in normalized:
+    if GOOFISH_PROFILE.favorited_hint_text in normalized:
         return "already_favorited"
-    if _FAVORITE_HINT_TEXT in normalized:
+    if GOOFISH_PROFILE.favorite_hint_text in normalized:
         return "favoritable"
     return "unknown"
 
 
 def _normalize_item_page_title(title: str) -> str:
-    text = str(title or "").strip()
-    if text.endswith("_闲鱼"):
-        text = text[: -len("_闲鱼")].strip()
-    if text.endswith(" - 闲不住？上闲鱼！"):
-        text = ""
-    return text
+    # 兼容委托：实现已逐字搬至 GOOFISH_PROFILE.normalize_item_page_title。
+    return GOOFISH_PROFILE.normalize_item_page_title(title)
 
 
 def _extract_price(data: dict[str, Any]) -> float | None:

@@ -49,6 +49,7 @@ from .app.reply_favorite import (
     _extract_item_id_from_url,
 )
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator, AUTH_PAUSE_REASONS, AUTO_LOGIN_DONE_SENTINEL
+from .app.platforms import build_item_url
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
 from .app.storage import SubscriptionStorage
@@ -1677,7 +1678,7 @@ class GoofishCatcherPlugin(Star):
         summary = await self.storage.get_item_summary(resolved_id)
         resolved_url = (url or "").strip() or (summary.url if summary else "")
         if not resolved_url:
-            resolved_url = f"https://www.goofish.com/item?id={resolved_id}"
+            resolved_url = build_item_url(resolved_id)
         resolved_title = (title or "").strip() or (summary.title if summary else "") or f"闲鱼商品 {resolved_id}"
         resolved_price = float(price) if price and price > 0 else (
             float(summary.price) if summary else 0.0

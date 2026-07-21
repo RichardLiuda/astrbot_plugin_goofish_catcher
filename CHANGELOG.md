@@ -10,6 +10,26 @@
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- 多平台改造阶段 0.1（数据层平台维度）：`subscriptions` 表新增 `platform` 列（默认 `goofish`），唯一键由 `(umo, keyword)` 重建为 `(umo, platform, keyword)`；`market_price` 表主键重建为 `(platform, keyword)`，老数据自动归入 `goofish`（数据库迁移 v7，老库平滑升级，无需人工干预）。
+- `Subscription` / `NormalizedItem` / `MarketPrice` 数据类新增 `platform` 字段；存储层订阅与市场均价接口支持按平台读写，现有调用方（`/闲鱼` 命令、llm_tool、Admin WebUI）行为不变。
+- 多平台改造阶段 0.2（item_id 前缀化）：`goofish_analyze_item_detail` 等处的商品 URL 构建收口到平台注册表 `build_item_url()`，闲鱼 URL 输出不变。
+- 多平台改造阶段 0.3a（引擎/档案拆分）：`provider_playwright.py` 的平台特数据（搜索 URL 构建、登录/验证码判定、收藏按钮与分页选择器、过滤文案、日志白名单）全部改读 `GOOFISH_PROFILE`；`PlaywrightSearchProvider` 新增可选 `profile` 注入参数（默认闲鱼档案，现有调用方零改动）；`login_session.py` 的重复常量收敛为档案别名。行为保持型重构，运行时行为零变化。
+- 多平台改造阶段 1.1（淘宝搜索适配）：`app/platforms/taobao.py` 淘宝档案落地——`SiteProfile` 新增 `parse_dom_card` / `dom_card_extractor_js` 可选钩子，淘宝 SSR 搜索页走 DOM 定制提取（title 属性取标题、priceInt+priceFloat 拼价格、店铺名/销量进 `raw`），`click.simba.taobao.com` 广告链接在选择器层与解析层双重过滤；`extract_item_id_from_url` / `normalize_url` 下沉至 `platforms/registry.py` 共享；错误消息按 `profile.display_name` 参数化（不再硬编码 "goofish"）。本地实测淘宝搜索返回正确结果（访客态，滑块手动过后）。淘宝商品 ID 带 `taobao:` 前缀，与闲鱼 ID 空间隔离。已知边界：分页与价格 URL 参数未实测（单页搜索 + 内存过滤兜底）；列表价为 SKU 区间最低价。
+
+### Added
+
+- 新增 `test_storage_platform.py`：覆盖 v7 schema、同关键词跨平台订阅、市场均价按平台隔离、v6 老库迁移升级。
+- 新增 `app/platforms/registry.py`（阶段 0.2）：item_id 平台归属规则（裸 ID 视为 goofish 以兼容存量，新平台必须带 `{platform}:` 前缀）与商品 URL 构建的唯一收口；`make_item_id` / `split_item_id` / `build_item_url` / `platform_display_name`。配套 `test_platform_registry.py`。
+- 新增 `app/platforms/base.py` 与 `app/platforms/goofish.py`（阶段 0.3a）：`SiteProfile` 站点档案数据类（21 个数据字段 + 4 个钩子函数）与闲鱼档案实例，为未来淘宝等档案的接入点。
+- 新增 `app/platforms/taobao.py`（阶段 1.1）：淘宝档案与 DOM 提取钩子；配套 `test_taobao_profile.py`；`scripts/local_lab.py` 新增 `search-taobao` 命令与 sso 探针自动轮询过验证能力。
+- 新增 `.kimi/` 项目知识库（架构与数据流、开发注意事项、改造 roadmap）与 `scripts/local_lab.py` 本地实验台（登录/搜索/SSO 探针）。
+
+---
+
 ## [3.6.0] - 2026-07-11
 
 ### Added
