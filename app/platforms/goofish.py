@@ -118,4 +118,6 @@ GOOFISH_PROFILE = SiteProfile(
     is_auth_url=_is_auth_url,
     is_captcha_url=_is_captcha_url,
     normalize_item_page_title=_normalize_item_page_title,
+    supports_item_detail=True,
+    quick_login_enabled=True,
 )

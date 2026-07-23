@@ -16,8 +16,8 @@ AstrBot 插件「闲鱼蹲蹲助手」：LLM 工具调用 + 关键词订阅监�
 
 | 文件 | 功能 | 数据进 → 出 |
 |---|---|---|
-| `provider.py` | `SearchProvider` Protocol + `build_provider` 工厂 | settings → provider 实例（search/analyze_item_detail/favorite_item/close） |
-| `provider_playwright.py` | 核心抓取（2457 行）：真实 Chromium 渲染 + XHR 嗅探 | keyword → `list[NormalizedItem]`；cookie 从 storage_state.json/browser_profile 进，操作后回写 |
+| `provider.py` | `SearchProvider` Protocol + `build_provider`（单平台，兼容保留）+ `build_providers`（平台路由表 dict，1.5b 起：淘宝独立会话目录，远程模式跳过） | settings → dict[platform, provider] |
+| `provider_playwright.py` | 核心抓取引擎：真实 Chromium 渲染 + XHR 嗅探；平台特数据全部读 `self._profile`（0.3a 起）；`analyze_item_detail` 对 `supports_item_detail=False` 的平台短路（1.5b 起） | keyword → `list[NormalizedItem]`；cookie 从 storage_state.json/browser_profile 进，操作后回写 |
 | `provider_remote.py` | 远程模式的 HTTP 客户端 | SearchProvider 调用 → REST `/v1/*` |
 | `provider_retry.py` | 仅 CAPTCHA 重试（≤2 次，间隔 1s） | — |
 | `provider_agent.py` | LLM 兜底提取（AX 树→商品/登录态/收藏按钮） | AX 文本 + llm_call → JSON |
@@ -26,12 +26,12 @@ AstrBot 插件「闲鱼蹲蹲助手」：LLM 工具调用 + 关键词订阅监�
 | `platforms/` | 多平台适配层：`registry.py`=item_id 归属+商品 URL+URL 工具收口；`base.py`=`SiteProfile`（21 数据字段+6 钩子，含可选 `parse_dom_card`/`dom_card_extractor_js`）；`goofish.py`=闲鱼档案；`taobao.py`=淘宝档案（SSR→DOM 定制提取，1.1 已验证） | provider_playwright 经 profile 读平台特数据，新平台只加档案 |
 | `config.py` | `PluginSettings` 加载（AstrBot config + admin_runtime_config.json overlay，overlay 永远赢） | dict → 强类型 settings |
 | `storage.py` | `SubscriptionStorage`（aiosqlite + WAL + 写锁 + user_version 迁移） | 见下方 DB schema |
-| `scheduler.py` | `MonitoringScheduler`：自研 asyncio 队列轮询订阅 | 到期订阅 → 搜索 → 检测 → 推荐 → 通知；写 items/price_history/market_price/notifications |
+| `scheduler.py` | `MonitoringScheduler`：自研 asyncio 队列轮询订阅；**按 `sub.platform` 路由 provider**（dict 注入，1.5b 起；无 provider 时 PLATFORM_UNAVAILABLE 暂停+告警）；深度分析按 item_id 前缀路由 | 到期订阅 → 搜索 → 检测 → 推荐 → 通知；写 items/price_history/market_price/notifications |
 | `detector.py` | 上新/降价判定纯函数 | 价格序列 → NEW/PRICE_DROP 决策 |
 | `recommender.py` | `GoofishRecommender`：LLM 预筛 + LLM 排序（启发式兜底） | 候选 → RecommendationResult |
 | `notifier.py` | 出站消息（`context.send_message(umo)` + webhook） | RecommendationResult → MessageChain |
-| `auth_session.py` / `login_session.py` | 扫码登录编排 / `GoofishLoginSession`（login_url 可注入） | 二维码截图 ↔ storage_state.json |
-| `remote_auth_recovery.py` | 会话级登录恢复状态机（AUTH_REQUIRED/CAPTCHA → 推二维码 → 恢复订阅） | ProviderError → 用户消息 → confirm |
+| `auth_session.py` / `login_session.py` | 扫码登录编排 / 登录会话（**均按平台注入 SiteProfile**，P0 起）：taobao 用 login.taobao.com 落地页 + mtop.user.getusersimple 校验 | 二维码截图 ↔ storage_state.{platform}.json + browser_profile_{platform}/ |
+| `remote_auth_recovery.py` | 会话级登录恢复状态机（**按平台分 flow**，P0 起：淘宝订阅暂停→推淘宝二维码→只恢复淘宝订阅） | ProviderError + platform → 用户消息 → confirm |
 | `admin_service.py` / `admin_server.py` / `admin_types.py` | Admin WebUI facade + FastAPI（8790） | storage/scheduler → REST → Preact 前端 |
 | `activity_monitor.py` | 内存态任务看板（admin 展示用） | — |
 | `main.py` | **全部 17 个 llm_tool 必须在此**（AstrBot 校验 handler.__module__）+ 11 个 /闲鱼 子命令 + 引用收藏 | 用户消息 ↔ 上述全部组件 |

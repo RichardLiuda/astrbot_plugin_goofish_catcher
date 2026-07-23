@@ -30,7 +30,7 @@ from .app.provider import (
     ProviderConfigurationError,
     ProviderDependencyError,
     SearchProvider,
-    build_provider,
+    build_providers,
 )
 from .app.provider_retry import (
     estimate_captcha_retry_timeout_sec,
@@ -49,7 +49,8 @@ from .app.reply_favorite import (
     _extract_item_id_from_url,
 )
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator, AUTH_PAUSE_REASONS, AUTO_LOGIN_DONE_SENTINEL
-from .app.platforms import build_item_url
+from .app.platforms import build_item_url, platform_display_name, split_item_id
+from .app.platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
 from .app.storage import SubscriptionStorage
@@ -78,6 +79,7 @@ class GoofishCatcherPlugin(Star):
 
         self.storage: SubscriptionStorage | None = None
         self.provider: SearchProvider | None = None
+        self.providers: dict[str, SearchProvider] = {}
         self.notifier: Notifier | None = None
         self.recommender: GoofishRecommender | None = None
         self.scheduler: MonitoringScheduler | None = None
@@ -219,6 +221,7 @@ class GoofishCatcherPlugin(Star):
         self._provider_health = None
         self._provider_health_checked_at = None
         self.provider = None
+        self.providers = {}
         self.scheduler = None
         self.remote_auth_coordinator = None
         self.notifier = Notifier(
@@ -231,10 +234,12 @@ class GoofishCatcherPlugin(Star):
             settings=self.settings,
         )
         try:
-            self.provider = build_provider(
+            self.providers = build_providers(
                 self.settings,
                 llm_call=self._make_llm_call() if self.settings.llm_enabled else None,
             )
+            # 闲鱼 provider 保持原有单例路径，全部现有逻辑（搜索/收藏/登录等）不变
+            self.provider = self.providers["goofish"]
             (
                 self._provider_health,
                 self._provider_health_checked_at,
@@ -244,9 +249,7 @@ class GoofishCatcherPlugin(Star):
             )
         except (ProviderDependencyError, ProviderConfigurationError, ProviderError) as exc:
             self._provider_error = str(exc)
-            if self.provider is not None:
-                await self._safe_close("provider", self.provider.close)
-                self.provider = None
+            await self._close_providers()
             self._ready = True
             logger.error(
                 "[goofish_catcher] provider initialization failed: %s",
@@ -255,9 +258,7 @@ class GoofishCatcherPlugin(Star):
             return
         except Exception as exc:
             self._provider_error = str(exc)
-            if self.provider is not None:
-                await self._safe_close("provider", self.provider.close)
-                self.provider = None
+            await self._close_providers()
             self._ready = True
             logger.error(
                 "[goofish_catcher] unexpected provider initialization failure: %s",
@@ -283,11 +284,33 @@ class GoofishCatcherPlugin(Star):
             settings=self.settings,
             auth_controller=auth_controller,
         )
+        if (
+            self.settings.provider_mode == PROVIDER_MODE_PLAYWRIGHT_LOCAL
+            and "taobao" in self.providers
+        ):
+            # 淘宝登录会话独立成 controller（TAOBAO_PROFILE +
+            # storage_state.taobao.json + browser_profile_taobao，由
+            # LocalAuthSessionController(platform="taobao") 内部处理）。
+            # 远程模式不支持淘宝登录，沿用 goofish controller 即可。
+            taobao_auth_controller = LocalAuthSessionController(
+                self.settings,
+                auth_timeout_sec=self.settings.auth_timeout_sec,
+                on_before_start=lambda: self._recycle_local_provider_browser(
+                    platform="taobao"
+                ),
+                on_after_confirm=lambda session: self._adopt_local_login_session(
+                    session, platform="taobao"
+                ),
+                platform="taobao",
+            )
+            self.remote_auth_coordinator.set_auth_controller(
+                "taobao", taobao_auth_controller
+            )
         self.scheduler = MonitoringScheduler(
             context=self.context,
             settings=self.settings,
             storage=self.storage,
-            provider=self.provider,
+            provider=self.providers,
             notifier=self.notifier,
             recommender=self.recommender,
             activity_monitor=self.activity_monitor,
@@ -307,6 +330,20 @@ class GoofishCatcherPlugin(Star):
             await self._ensure_scheduler_started()
             self._ensure_heartbeat_started()
 
+    async def _close_providers(self) -> None:
+        """关闭 providers dict 中所有去重后的 provider；remote 模式 dict 只有
+        一个元素时行为与原单 provider close 一致。"""
+        seen: set[int] = set()
+        for name, provider in self.providers.items():
+            if provider is None or id(provider) in seen:
+                continue
+            seen.add(id(provider))
+            await self._safe_close(f"provider[{name}]", provider.close)
+        if self.provider is not None and id(self.provider) not in seen:
+            await self._safe_close("provider", self.provider.close)
+        self.providers = {}
+        self.provider = None
+
     async def _close_runtime(self, *, close_storage: bool) -> None:
         self._cancel_heartbeat()
         if self.scheduler is not None:
@@ -315,14 +352,12 @@ class GoofishCatcherPlugin(Star):
             await self._safe_close("auth_recovery", self.remote_auth_coordinator.close)
         if self.notifier is not None:
             await self._safe_close("notifier", self.notifier.close)
-        if self.provider is not None:
-            await self._safe_close("provider", self.provider.close)
+        await self._close_providers()
         if close_storage and self.storage is not None:
             await self._safe_close("storage", self.storage.close)
             self.storage = None
         self.scheduler = None
         self.notifier = None
-        self.provider = None
         self.recommender = None
         self.remote_auth_coordinator = None
         self._ready = False
@@ -589,8 +624,8 @@ class GoofishCatcherPlugin(Star):
                         "[goofish_catcher] heartbeat: broadcast_alert failed: %s", exc
                     )
 
-    async def _recycle_local_provider_browser(self) -> None:
-        provider = self.provider
+    async def _recycle_local_provider_browser(self, platform: str = "goofish") -> None:
+        provider = self.providers.get(platform) or self.provider
         if provider is None:
             return
         closer = getattr(provider, "close", None)
@@ -598,28 +633,36 @@ class GoofishCatcherPlugin(Star):
             return
         try:
             await closer()
-            logger.info("[goofish_catcher] recycled local playwright browser session")
+            logger.info(
+                "[goofish_catcher] recycled local playwright browser session"
+                " (platform=%s)",
+                platform,
+            )
         except Exception as exc:
             logger.warning(
-                "[goofish_catcher] failed to recycle local playwright browser session: %s",
+                "[goofish_catcher] failed to recycle local playwright browser session"
+                " (platform=%s): %s",
+                platform,
                 exc,
                 exc_info=True,
             )
 
-    async def _adopt_local_login_session(self, session) -> bool:
-        provider = self.provider
+    async def _adopt_local_login_session(self, session, platform: str = "goofish") -> bool:
+        provider = self.providers.get(platform) or self.provider
         if provider is None:
             return False
         adopter = getattr(provider, "adopt_login_session", None)
         if not callable(adopter):
-            await self._recycle_local_provider_browser()
+            await self._recycle_local_provider_browser(platform=platform)
             return False
         try:
             await adopter(session)
             return True
         except Exception as exc:
             logger.warning(
-                "[goofish_catcher] failed to adopt local login session: %s",
+                "[goofish_catcher] failed to adopt local login session"
+                " (platform=%s): %s",
+                platform,
                 exc,
                 exc_info=True,
             )
@@ -873,6 +916,17 @@ class GoofishCatcherPlugin(Star):
         interrupted = False
         for item in selected_items:
             title = item.title
+            item_id = item.item_id or _extract_item_id_from_url(item.url) or ""
+            platform, _ = split_item_id(item_id)
+            if platform == PLATFORM_GOOFISH and PLATFORM_TAOBAO + ".com" in (item.url or ""):
+                # 引用消息里的链接只带裸数字 ID，需按 URL 域名兜底识别淘宝商品
+                platform = PLATFORM_TAOBAO
+            if platform != PLATFORM_GOOFISH:
+                display = platform_display_name(platform)
+                lines.append(
+                    f"{item.index}. 【{display}】{title}：该平台收藏暂不支持，已跳过"
+                )
+                continue
             try:
                 result = await self.provider.favorite_item(
                     url=item.url,
@@ -1370,8 +1424,9 @@ class GoofishCatcherPlugin(Star):
         free_shipping: bool = False,
         new_publish_option: str = "",
         region: str = "",
+        platform: str = "goofish",
     ) -> str:
-        """创建一个新的闲鱼关键词监控订阅，系统会定时搜索并推送新商品或降价通知。
+        """创建一个新的关键词监控订阅（支持闲鱼，也支持淘宝），系统会定时搜索并推送新商品或降价通知。
 
         Args:
             keyword(string): 要监控的搜索关键词
@@ -1384,6 +1439,7 @@ class GoofishCatcherPlugin(Star):
             free_shipping(boolean): 是否只看包邮
             new_publish_option(string): 新发布范围，如 24小时内/7天内/14天内，空表示不限
             region(string): 地区筛选，如 江苏/南京/全南京，空表示不限
+            platform(string): 订阅平台：goofish=闲鱼（默认）、taobao=淘宝
         """
         if err := self._llm_tools_guard():
             return err
@@ -1391,6 +1447,7 @@ class GoofishCatcherPlugin(Star):
         payload: dict[str, Any] = {
             "keyword": keyword,
             "umo": event.unified_msg_origin,
+            "platform": platform or "goofish",
         }
         if interval_sec > 0:
             payload["interval_sec"] = interval_sec
@@ -1786,36 +1843,60 @@ class GoofishCatcherPlugin(Star):
         return text[:4000] if len(text) > 4000 else text
 
     @llm_tool(name="goofish_check_login")
-    async def goofish_check_login(self, event: AstrMessageEvent) -> str:
-        """检查闲鱼账号的当前登录状态。用于判断是否需要重新登录。"""
+    async def goofish_check_login(self, event: AstrMessageEvent, platform: str = "goofish") -> str:
+        """检查闲鱼账号的当前登录状态。用于判断是否需要重新登录。
+
+        Args:
+            platform(string): 登录平台：goofish=闲鱼（默认）、taobao=淘宝
+        """
         if err := self._llm_tools_guard():
             return err
-        provider = self.provider
+        if platform == "goofish":
+            provider = self.provider
+        else:
+            provider = self.providers.get(platform)
+            if provider is None:
+                return (
+                    f"{platform_display_name(platform)}平台未启用，"
+                    "请在配置中开启 taobao_enabled。"
+                )
         check_fn = getattr(provider, "check_login_state", None) if provider else None
         if not callable(check_fn):
             return "当前 provider 不支持登录状态检测。"
         state = await check_fn(timeout_sec=15)
-        return {
+        message = {
             "ok": "当前登录状态正常，无需操作。",
             "auth_required": "登录态已过期，需要重新登录。请调用 goofish_start_login 发起登录流程。",
             "captcha": "当前被验证码/风控拦截，需要手动处理后再重试。",
             "error": "检测失败（浏览器未初始化或网络错误），请稍后重试。",
         }.get(state, f"未知登录状态：{state}")
+        if platform != "goofish":
+            message = f"[{platform_display_name(platform)}] {message}"
+        return message
 
     @llm_tool(name="goofish_start_login")
-    async def goofish_start_login(self, event: AstrMessageEvent) -> str:
+    async def goofish_start_login(self, event: AstrMessageEvent, platform: str = "goofish") -> str:
         """发起闲鱼登录流程。会优先尝试自动快速登录；若页面显示的是二维码且必须扫码，
         则将二维码截图发送到当前对话，用户扫码后回复任意消息即可完成登录。
 
         仅在 check_login 返回 auth_required 时才需要调用此工具。
+
+        Args:
+            platform(string): 登录平台：goofish=闲鱼（默认）、taobao=淘宝
         """
         if err := self._llm_tools_guard():
             return err
         if self.remote_auth_coordinator is None:
             return "当前 provider 未启用登录恢复流程。"
+        if platform not in self.providers:
+            return (
+                f"{platform_display_name(platform)}平台未启用，"
+                "请在配置中开启 taobao_enabled。"
+            )
         try:
             result = await self.remote_auth_coordinator.start_login(
-                umo=event.unified_msg_origin
+                umo=event.unified_msg_origin,
+                platform=platform,
             )
             if result == AUTO_LOGIN_DONE_SENTINEL:
                 return await self._resume_subs_after_auto_login()
@@ -1941,8 +2022,9 @@ class GoofishCatcherPlugin(Star):
         for sub in subscriptions:
             status = "启用" if sub.enabled else f"暂停({sub.paused_reason or 'manual'})"
             next_run = _format_ts(sub.next_run_at)
+            platform_label = platform_display_name(getattr(sub, "platform", None) or "goofish")
             lines.append(
-                f"- {sub.keyword} | {status} | 每{sub.interval_sec}s | pages={sub.pages} | "
+                f"- [{platform_label}] {sub.keyword} | {status} | 每{sub.interval_sec}s | pages={sub.pages} | "
                 f"推荐价≤{f'￥{sub.recommend_max_price:.2f}' if sub.recommend_max_price is not None else '不限'} | "
                 f"下次={next_run}"
             )

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .platforms.base import SiteProfile
 from .platforms.goofish import GOOFISH_PROFILE
 
 try:
@@ -126,7 +127,8 @@ class GoofishLoginSession:
         user_data_dir: Path | str | None = None,
         force_direct: bool = False,
         proxy: str | None = None,
-        login_url: str = DEFAULT_LOGIN_URL,
+        login_url: str | None = None,
+        profile: SiteProfile | None = None,
     ) -> None:
         self.executable_path = normalize_executable_path(executable_path)
         self.user_data_dir = (
@@ -136,7 +138,10 @@ class GoofishLoginSession:
         )
         self.force_direct = force_direct
         self.proxy = proxy
-        self.login_url = login_url
+        # 站点档案：缺省闲鱼；login_url 显式传入时优先于 profile.login_url
+        # （旧调用方不传 login_url 时行为与旧的 DEFAULT_LOGIN_URL 默认值一致）。
+        self._profile = profile or GOOFISH_PROFILE
+        self.login_url = login_url if login_url is not None else self._profile.login_url
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._context: Any | None = None
@@ -249,6 +254,13 @@ class GoofishLoginSession:
             page = await self._context.new_page()
             self._page = page
 
+        # 平台判定钩子与标记全部取自站点档案（模块级别名仍保留给其他 import 方）。
+        profile = self._profile
+        is_auth_url = profile.is_auth_url
+        is_captcha_url = profile.is_captcha_url
+        login_status_api_markers = profile.login_status_api_markers
+        embedded_login_markers = profile.embedded_login_markers
+
         auth_flags: set[str] = set()
         captcha_flags: set[str] = set()
         payload_rets: dict[str, str] = {}
@@ -256,20 +268,20 @@ class GoofishLoginSession:
 
         def _on_frame_navigated(frame) -> None:
             frame_url = str(getattr(frame, "url", "") or "")
-            if _is_auth_url(frame_url):
+            if is_auth_url(frame_url):
                 auth_flags.add(frame_url)
-            if _is_captcha_url(frame_url):
+            if is_captcha_url(frame_url):
                 captcha_flags.add(frame_url)
 
         async def _on_response(response) -> None:
             url = str(getattr(response, "url", "") or "")
-            if _is_auth_url(url):
+            if is_auth_url(url):
                 auth_flags.add(url)
-            if _is_captcha_url(url):
+            if is_captcha_url(url):
                 captcha_flags.add(url)
 
             lowered = url.lower()
-            if not any(marker in lowered for marker in _LOGIN_STATUS_API_MARKERS):
+            if not any(marker.lower() in lowered for marker in login_status_api_markers):
                 return
 
             try:
@@ -279,7 +291,7 @@ class GoofishLoginSession:
             if not isinstance(payload, dict):
                 return
             payload_rets[url] = _payload_ret_summary(payload)
-            matched_marker = _match_login_status_api(url)
+            matched_marker = _match_login_status_api(url, login_status_api_markers)
             if matched_marker is not None:
                 payload_hits.add(matched_marker)
             if _payload_requires_login(payload):
@@ -293,7 +305,7 @@ class GoofishLoginSession:
             on("response", _on_response)
 
         await page.goto(
-            self.login_url,
+            self._profile.validate_probe_url or self.login_url,
             wait_until="domcontentloaded",
             timeout=30_000,
         )
@@ -317,9 +329,9 @@ class GoofishLoginSession:
             payload_rets,
         )
 
-        if auth_flags or _is_auth_url(current_url) or any(
-            _is_auth_url(frame_url) for frame_url in frame_urls
-        ) or any(marker in lowered_html for marker in _EMBEDDED_LOGIN_MARKERS):
+        if auth_flags or is_auth_url(current_url) or any(
+            is_auth_url(frame_url) for frame_url in frame_urls
+        ) or any(marker in lowered_html for marker in embedded_login_markers):
             return {
                 "ok": False,
                 "code": "AUTH_REQUIRED",
@@ -329,7 +341,7 @@ class GoofishLoginSession:
                 "payload_rets": payload_rets,
             }
 
-        if captcha_flags or _is_captcha_url(current_url) or (
+        if captcha_flags or is_captcha_url(current_url) or (
             "验证码" in html or "滑块" in html or "captcha" in lowered_html
         ):
             return {
@@ -342,7 +354,7 @@ class GoofishLoginSession:
             }
 
         missing_hits = [
-            marker for marker in _LOGIN_STATUS_API_MARKERS if marker not in payload_hits
+            marker for marker in login_status_api_markers if marker not in payload_hits
         ]
         if missing_hits:
             return {
@@ -415,6 +427,9 @@ class GoofishLoginSession:
         Should be called after start_login_session(); if it returns True the
         caller must re-validate with validate_login() to confirm success.
         """
+        # 档案禁用 quick-login 捷径的平台（如淘宝）直接放弃，避免访客态误判。
+        if not self._profile.quick_login_enabled:
+            return False
         if self._page is None:
             return False
         for text in _QUICK_LOGIN_TEXTS:
@@ -483,9 +498,14 @@ def _collect_frame_urls(page) -> list[str]:
     return urls
 
 
-def _match_login_status_api(url: str) -> str | None:
+def _match_login_status_api(
+    url: str,
+    markers: tuple[str, ...] = _LOGIN_STATUS_API_MARKERS,
+) -> str | None:
+    # URL 里的 api 名可能是驼峰（如 api=mtop.user.getUserSimple），
+    # 匹配前对 URL 与标记统一 lower()。
     lowered = str(url or "").lower()
-    for marker in _LOGIN_STATUS_API_MARKERS:
-        if marker in lowered:
+    for marker in markers:
+        if marker.lower() in lowered:
             return marker
     return None

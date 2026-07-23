@@ -377,6 +377,21 @@ class PlaywrightSearchProvider:
         item: NormalizedItem,
         timeout_sec: int,
     ) -> DeepAnalysisResult:
+        # 平台不支持详情深度分析时直接短路返回保守结果，不启动浏览器。
+        # seller_name 置占位值：避免被 scheduler._deep_analysis_incomplete
+        # 判定为不完整（seller_name 为空会触发 10 分钟级无意义重试）。
+        if not self._profile.supports_item_detail:
+            return DeepAnalysisResult(
+                item_id=item.item_id,
+                analyzed_at=int(time.time()),
+                status="ok",
+                credit_status="unknown",
+                credit_reason="该平台暂未支持深度分析",
+                summary=f"{self._profile.display_name}商品详情深度分析将在后续版本提供",
+                risk="",
+                image_urls=[],
+                seller_name="未知",
+            )
         async with self._operation_lock:
             timeout_ms = max(5, timeout_sec) * 1000
             context, should_close_context = await self._open_operation_context()
@@ -1031,6 +1046,10 @@ class PlaywrightSearchProvider:
         2. 浏览器凭已有 cookie 自动通过 iframe 完成认证，按钮未出现但
            mini_login iframe 已经自行消失（无需点击）。
         """
+        # 档案禁用 quick-login 捷径的平台（如淘宝）：访客态下 iframe-gone
+        # 启发式会误判成功，直接返回 False 走手动登录流程。
+        if not self._profile.quick_login_enabled:
+            return False
         # 分支 1：等待「快速进入」按钮出现并点击
         try:
             btn = page.get_by_role("button", name="快速进入").first
@@ -1167,9 +1186,8 @@ class PlaywrightSearchProvider:
         checks URL / HTML markers (no CSS selectors, no LLM), and closes the
         page immediately.  Safe to call from a periodic heartbeat task.
         """
-        if self._persistent_context is None and self._browser is None:
-            return "error"
-
+        # 不再在浏览器未初始化时直接报 error：_open_operation_context 会顺带
+        # 初始化浏览器/持久 profile，首次调用或浏览器被回收后也能真实探测。
         timeout_ms = max(5, timeout_sec) * 1000
         try:
             context, should_close = await self._open_operation_context()

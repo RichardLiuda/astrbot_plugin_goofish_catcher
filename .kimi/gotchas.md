@@ -4,7 +4,7 @@
 
 - **headless 连续快跑会被闲鱼限流**（约 3 次请求后 ERR_CONNECTION_RESET 或 0 结果）。本地实证：5 次 headless 页面加载后搜索返回 0 条，换有头立即恢复 30 条。**生产配置硬编码有头**（config.py:353 playwright_headless=False）。测试间隔 30-60s。
 - `check_login_state()` 在浏览器/context 未打开时直接返回 'error'——必须先开 context（driver 模式）。
-- `playwright_storage_state_path` 与 `playwright_user_data_dir` **互斥**：前者=每次新建 context 注入 cookie；后者=持久 profile（生产默认，指纹持续累积，更抗风控）。
+- `playwright_storage_state_path` 与 `playwright_user_data_dir` **互斥**：前者=每次新建 context 注入 cookie；后者=持久 profile（生产默认，指纹持续累积，更抗风控）。**两者同时设置时持久 profile 优先**——2026-07-22 AstrBot 实测踩坑：往 plugin_data 复制 storage_state.taobao.json 完全无效，因为空的 browser_profile_taobao/ 已存在且优先。给某平台"导入会话"要么删掉对应 profile 目录，要么在插件内重新扫码。
 - 搜索页 0 items + payloads=3 → 会话过期（那 3 个 payload 是问卷配置）。
 - mtop 接口常常**滚动页面后才触发**，裸 goto + wait 可能拿不到 payload。
 - `playwright_block_assets=True` 理论上可能误拦懒加载内容，排查 0 结果时先关掉试。
@@ -12,6 +12,8 @@
 - **`payloads=3 + 0 items` 有两种病因**（实证）：①会话过期；②headless 被限流导致搜索 XHR 根本没发出（此时 check 仍可能 ok——首页不要求登录）。鉴别：跑 check + 有头 search。
 - 闲鱼会话寿命观察：扫码登录后约 29 小时过期（期间有多次 headless 限流运行，可能加速）。
 - `_payload_indicates_captcha` 存在**两个版本**（0.3b 待统一）：provider 版 8 个标记（含 rgv587/punish/baxia），login_session 版 3 个标记——行为差异是有意保留的，统一前不要只改一边。
+- quick-login 的"iframe 消失=登录成功"启发式在**访客态平台会误判**（淘宝实测：什么都没发生却记了"succeeded"）。非闲鱼平台必须 `quick_login_enabled=False`（P0 已落地）。
+- 测试套件有一处**既有 stub 顺序污染**：unittest discover 按字母序加载，test_recommend_price_threshold 会把 `astrbot.api.message_components` 覆盖成 `Plain=object`，导致 test_reply_favorite 1 个 error（test_platform_auth_flow 的 functional stub 顺带修好了 test_remote_auth_flow 的 3 个）。要根除需改 test_recommend_price_threshold.py 的 stub 写法。
 
 ## 淘宝实验结论（2026-07-20 本地实证，产物在 local_data/）
 
@@ -26,6 +28,8 @@
 - 淘宝访客/半登录态页面常驻阿里登录组件：embedded_login_markers 含 "alibaba-login-box" 会**误报 AUTH_REQUIRED**（且先于 captcha 检查执行），TAOBAO_PROFILE 该字段必须为空，只认 login.taobao.com 重定向。
 - "滑块/验证码"等 HTML 标记在**验证通过后仍残留在页面源码里**——判断验证是否已通过不能用 HTML 标记，要用"能否提取到 ≥3 条商品"（sso 探针的轮询逻辑就是这么做的）。
 - 淘宝风控惩罚页走 `cf.aliyun.com/nocaptcha/initialize.jsonp`，被惩罚的 mtop 接口是 `mtop.alibaba.fc.api.maoxland.*`——说明淘宝搜索**也会发 mtop XHR**，未惩罚时 payload 层可能有货（后续可研究）。
+- **登录落地页 ≠ 登录态探测页**（P0 实测踩坑）：淘宝登录页是纯登录页，`validate_login` 若 goto 它会把已登录用户拖回去、且校验接口（getusersimple 只在内容页触发）永远不命中。故 `SiteProfile.validate_probe_url`：落地页展示二维码、探测页验证登录态；闲鱼两者同一页（搜索页）无需设置。等待循环里兜底校验前要先判"当前是否仍在登录页"，否则会把二维码从用户屏幕上拖走。
+- 淘宝**真实登录态下搜索有头即通、无滑块**（cookie2/unb/_tb_token_ 齐全时）；但 **headless 即使有真实会话也必弹滑块**——淘宝风控认浏览器指纹胜过认 cookie，生产必须保持有头（与闲鱼同）。
 - 淘宝列表价是 SKU 区间最低价，存在低价引流（如 ¥2768 的"5090D"实为 5070Ti 档位）——列表价≠真实到手价，聚合/比价层必须知道这一点。
 - `sso` 探针命令的 provider 用的是**闲鱼档案**（历史原因），其提取结果不代表 TaobaoProfile；淘宝提取以 `search-taobao` 为准。
 

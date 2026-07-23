@@ -657,6 +657,7 @@ class SubscriptionStorage:
         reasons: list[str] | tuple[str, ...],
         *,
         now_ts: int,
+        platform: str | None = None,
     ) -> list[Subscription]:
         normalized = [str(reason).strip() for reason in reasons if str(reason).strip()]
         if not normalized:
@@ -664,15 +665,21 @@ class SubscriptionStorage:
 
         conn = self._conn_or_raise()
         placeholders = ", ".join("?" for _ in normalized)
+        # 可选平台过滤：登录恢复只唤醒同平台订阅；缺省 None = 不过滤，保持原行为。
+        platform_clause = ""
+        filter_params = list(normalized)
+        if platform is not None and str(platform).strip():
+            platform_clause = " AND platform = ?"
+            filter_params.append(str(platform).strip())
         async with self._write_lock:
             rows = await (
                 await conn.execute(
                     f"""
                     SELECT * FROM subscriptions
-                    WHERE paused_reason IN ({placeholders})
+                    WHERE paused_reason IN ({placeholders}){platform_clause}
                     ORDER BY id ASC
                     """,
-                    tuple(normalized),
+                    tuple(filter_params),
                 )
             ).fetchall()
             if not rows:
@@ -686,9 +693,9 @@ class SubscriptionStorage:
                     consecutive_failures = 0,
                     next_run_at = ?,
                     updated_at = ?
-                WHERE paused_reason IN ({placeholders})
+                WHERE paused_reason IN ({placeholders}){platform_clause}
                 """,
-                (now_ts, now_ts, *normalized),
+                (now_ts, now_ts, *filter_params),
             )
             await conn.commit()
 
@@ -700,6 +707,7 @@ class SubscriptionStorage:
                     id=sub.id,
                     umo=sub.umo,
                     keyword=sub.keyword,
+                    platform=sub.platform,
                     interval_sec=sub.interval_sec,
                     pages=sub.pages,
                     recommend_max_price=sub.recommend_max_price,

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from .config import PluginSettings
@@ -14,8 +15,11 @@ from .login_session import (
     PLUGIN_NAME,
     GoofishLoginSession,
     get_astrbot_root,
-    _is_auth_url,
 )
+from .platforms.base import SiteProfile
+from .platforms.goofish import GOOFISH_PROFILE
+from .platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
+from .platforms.taobao import TAOBAO_PROFILE
 from .types import ProviderError, ProviderErrorCode
 
 try:
@@ -65,11 +69,6 @@ def resolve_local_storage_state_path() -> Path:
     return plugin_data_dir / "storage_state.json"
 
 
-def _looks_like_logged_in_probe_url(url: str) -> bool:
-    text = str(url or "").strip().lower()
-    return "www.goofish.com" in text and not _is_auth_url(text)
-
-
 async def save_login_session_state(
     session: GoofishLoginSession,
     *,
@@ -83,6 +82,15 @@ async def save_login_session_state(
     }
 
 
+def _resolve_platform_profile(platform: str) -> SiteProfile:
+    """按平台名取站点档案；未知平台抛 ValueError。"""
+    if platform == PLATFORM_GOOFISH:
+        return GOOFISH_PROFILE
+    if platform == PLATFORM_TAOBAO:
+        return TAOBAO_PROFILE
+    raise ValueError(f"unknown auth platform: {platform}")
+
+
 class LocalAuthSessionController:
     def __init__(
         self,
@@ -91,13 +99,40 @@ class LocalAuthSessionController:
         auth_timeout_sec: float = AUTH_SESSION_TIMEOUT_SEC,
         on_before_start: Any | None = None,
         on_after_confirm: Any | None = None,
+        platform: str = "goofish",
+        profile: SiteProfile | None = None,
     ) -> None:
         self.settings = settings
         self.auth_timeout_sec = max(1.0, float(auth_timeout_sec))
         self.on_before_start = on_before_start
         self.on_after_confirm = on_after_confirm
+        self.platform = str(platform or "").strip() or PLATFORM_GOOFISH
+        self._profile = profile or _resolve_platform_profile(self.platform)
         self._lock = asyncio.Lock()
         self._active_session: LocalAuthSession | None = None
+
+    def _resolve_storage_state_path(self) -> Path:
+        # goofish 维持既有固定文件名；其他平台按平台名区分，互不覆盖。
+        if self.platform == PLATFORM_GOOFISH:
+            return self.settings.plugin_data_dir / "storage_state.json"
+        return self.settings.plugin_data_dir / f"storage_state.{self.platform}.json"
+
+    def _resolve_stable_profile_dir(self) -> Path | None:
+        # 登录态浏览器 profile 的稳定落地目录；goofish 沿用 settings 配置
+        # （可能为 None = 仅用 storage_state），其他平台固定在 plugin_data_dir 下。
+        if self.platform == PLATFORM_GOOFISH:
+            return self.settings.playwright_user_data_dir
+        return self.settings.plugin_data_dir / f"browser_profile_{self.platform}"
+
+    def _looks_like_logged_in_probe_url(self, url: str) -> bool:
+        # 按档案 base_url 的 host 判定（goofish: www.goofish.com，行为不变）。
+        text = str(url or "").strip().lower()
+        base_host = urlparse(self._profile.base_url).netloc.lower()
+        return (
+            bool(base_host)
+            and base_host in text
+            and not self._profile.is_auth_url(text)
+        )
 
     async def start_auth_session(self, *, force_restart: bool = False) -> dict[str, Any]:
         async with self._lock:
@@ -121,6 +156,7 @@ class LocalAuthSessionController:
                 executable_path=self.settings.playwright_executable_path,
                 user_data_dir=profile_dir,
                 force_direct=self.settings.playwright_force_direct,
+                profile=self._profile,
             )
             try:
                 snapshot = await session.start_login_session()
@@ -129,7 +165,7 @@ class LocalAuthSessionController:
                 # Goofish auto-refreshes remembered cookies).  In that state the
                 # screenshot is a normal search page, not a QR/login page.  Do a
                 # validation pass before sending a needless QR prompt.
-                if _looks_like_logged_in_probe_url(
+                if self._looks_like_logged_in_probe_url(
                     str(getattr(snapshot, "page_url", "") or "")
                 ):
                     try:
@@ -192,7 +228,7 @@ class LocalAuthSessionController:
     ) -> dict[str, Any]:
         save_result = await save_login_session_state(
             session,
-            stable_path=self.settings.plugin_data_dir / "storage_state.json",
+            stable_path=self._resolve_storage_state_path(),
         )
         session_transferred = False
         if callable(self.on_after_confirm):
@@ -230,13 +266,14 @@ class LocalAuthSessionController:
             try:
                 result = await save_login_session_state(
                     active_session.session,
-                    stable_path=self.settings.plugin_data_dir / "storage_state.json",
+                    stable_path=self._resolve_storage_state_path(),
                 )
             except Exception as exc:
                 raise _to_provider_error(exc, action="save local login state") from exc
 
             saved_at = int(time.time())
             profile_dir = active_session.profile_dir
+            stable_profile_dir = self._resolve_stable_profile_dir()
             session_transferred = False
             mirrored_paths: list[str] = []
             if callable(self.on_after_confirm):
@@ -247,12 +284,12 @@ class LocalAuthSessionController:
                 if (
                     active_session.cleanup_profile_dir
                     and profile_dir is not None
-                    and self.settings.playwright_user_data_dir is not None
+                    and stable_profile_dir is not None
                 ):
                     try:
                         mirrored_dir = _mirror_profile_dir(
                             profile_dir,
-                            self.settings.playwright_user_data_dir,
+                            stable_profile_dir,
                         )
                         mirrored_paths.append(str(mirrored_dir))
                     finally:
@@ -367,8 +404,11 @@ class LocalAuthSessionController:
         }
 
     def _build_session_profile_dir(self) -> tuple[Path, bool]:
-        if self.settings.playwright_user_data_dir is not None:
-            return self.settings.playwright_user_data_dir, False
+        # 有稳定 profile 目录时登录会话直接运行其中（confirm 后无需镜像）；
+        # 否则用一次性临时目录。goofish 行为不变（= settings.playwright_user_data_dir）。
+        stable_profile_dir = self._resolve_stable_profile_dir()
+        if stable_profile_dir is not None:
+            return stable_profile_dir, False
         return (
             self.settings.plugin_data_dir
             / "login_profiles"
@@ -377,7 +417,7 @@ class LocalAuthSessionController:
         )
 
     async def _validate_saved_login_state(self) -> dict[str, Any]:
-        stable_profile_dir = self.settings.playwright_user_data_dir
+        stable_profile_dir = self._resolve_stable_profile_dir()
         if stable_profile_dir is None:
             return {
                 "ok": True,
@@ -388,6 +428,7 @@ class LocalAuthSessionController:
             executable_path=self.settings.playwright_executable_path,
             user_data_dir=stable_profile_dir,
             force_direct=self.settings.playwright_force_direct,
+            profile=self._profile,
         )
         try:
             await session.start_login_session()
@@ -412,7 +453,7 @@ class LocalAuthSessionController:
             await session.close()
 
     async def _clear_saved_login_state(self) -> None:
-        storage_state = self.settings.plugin_data_dir / "storage_state.json"
+        storage_state = self._resolve_storage_state_path()
         try:
             storage_state.unlink(missing_ok=True)
         except Exception as exc:
@@ -421,7 +462,7 @@ class LocalAuthSessionController:
                 storage_state,
                 exc,
             )
-        stable_profile_dir = self.settings.playwright_user_data_dir
+        stable_profile_dir = self._resolve_stable_profile_dir()
         if stable_profile_dir is not None:
             await _cleanup_profile_dir(stable_profile_dir)
 

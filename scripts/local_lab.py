@@ -7,9 +7,11 @@
 
 用法（在仓库根目录执行）：
   .venv/Scripts/python.exe scripts/local_lab.py login              # 扫码登录，保存会话
+  .venv/Scripts/python.exe scripts/local_lab.py login-taobao       # 手机淘宝扫码登录，保存淘宝独立会话
   .venv/Scripts/python.exe scripts/local_lab.py check              # 探测已存会话是否有效
   .venv/Scripts/python.exe scripts/local_lab.py search "RTX 5090" [pages] [--headless]
   .venv/Scripts/python.exe scripts/local_lab.py search-taobao "RTX 5090" [pages] [--headless]
+  .venv/Scripts/python.exe scripts/local_lab.py watch-taobao "RTX 5090" [--interval=600] [--cycles=N] [--headless]
   .venv/Scripts/python.exe scripts/local_lab.py sso ["RTX 5090"] [--headless]
 
 产物都写在 local_data/ 下（storage_state.json、qr.jpg、sso 探针截图/HTML），
@@ -23,15 +25,16 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-# Windows GBK 控制台无法编码 "¥" 等字符，替换显示而不是崩溃
-sys.stdout.reconfigure(errors="replace")
-sys.stderr.reconfigure(errors="replace")
+# Windows GBK 控制台无法编码 "¥" 等字符，替换显示而不是崩溃；行缓冲便于后台任务实时看输出
+sys.stdout.reconfigure(errors="replace", line_buffering=True)
+sys.stderr.reconfigure(errors="replace", line_buffering=True)
 
 LOCAL_DATA = REPO_ROOT / "local_data"
 STORAGE_STATE = LOCAL_DATA / "storage_state.json"
@@ -39,9 +42,11 @@ TAOBAO_STORAGE_STATE = LOCAL_DATA / "storage_state.taobao.json"
 TAOBAO_SEARCH_URL = "https://s.taobao.com/search?q={kw}"
 
 from app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
+from app.detector import evaluate_price_drop
 from app.login_session import GoofishLoginSession
 from app.platforms import TAOBAO_PROFILE
 from app.provider_playwright import PlaywrightSearchProvider
+from app.storage import SubscriptionStorage
 from app.types import ProviderError, ProviderErrorCode
 
 logging.basicConfig(
@@ -91,8 +96,8 @@ def _make_settings(*, headless: bool, block_assets: bool = True) -> PluginSettin
     )
 
 
-def _cookie_domains() -> dict[str, list[str]]:
-    payload = json.loads(STORAGE_STATE.read_text(encoding="utf-8"))
+def _cookie_domains(state_path: Path = STORAGE_STATE) -> dict[str, list[str]]:
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
     domains: dict[str, list[str]] = {}
     for cookie in payload.get("cookies", []):
         domains.setdefault(str(cookie.get("domain", "")), []).append(
@@ -101,40 +106,71 @@ def _cookie_domains() -> dict[str, list[str]]:
     return domains
 
 
-def _print_cookie_summary() -> None:
-    domains = _cookie_domains()
+def _print_cookie_summary(state_path: Path = STORAGE_STATE) -> None:
+    domains = _cookie_domains(state_path)
     total = sum(len(v) for v in domains.values())
     print(f"[COOKIE] 共 {total} 个 cookie，按域分布：")
     for domain, names in sorted(domains.items()):
         print(f"  {domain:<28} {len(names):>3} 个: {', '.join(sorted(set(names))[:10])}")
 
 
-async def cmd_login() -> int:
+async def cmd_login(platform: str = "goofish") -> int:
     LOCAL_DATA.mkdir(parents=True, exist_ok=True)
+    is_taobao = platform == "taobao"
+    storage_path = TAOBAO_STORAGE_STATE if is_taobao else STORAGE_STATE
+    app_name = "淘宝" if is_taobao else "闲鱼"
     session = GoofishLoginSession(
-        force_direct=os.environ.get("LAB_FORCE_DIRECT", "") == "1"
+        force_direct=os.environ.get("LAB_FORCE_DIRECT", "") == "1",
+        profile=TAOBAO_PROFILE if is_taobao else None,
     )
     try:
         snapshot = await session.start_login_session()
         print(f"[LOGIN] 浏览器已打开: {snapshot.page_url}")
-        print("[LOGIN] 请用手机闲鱼 App 扫码（浏览器窗口里的二维码；"
-              "local_data/qr.jpg 里也有同步截图）")
-        for attempt in range(40):
+        try:
+            img = await session.capture_screenshot_base64()
+            (LOCAL_DATA / "qr.jpg").write_bytes(base64.b64decode(img))
+        except Exception:
+            pass
+        print(f"[LOGIN] 请用手机{app_name} App 扫**浏览器窗口里**的二维码，并在手机上点确认")
+        print("      （qr.jpg 有备份截图；确认后页面会自动跳转，脚本检测到即自动保存，")
+        print("       二维码在扫码前不会被刷新，可以慢慢扫）")
+
+        page = session._page  # lab 脚本内省自己的会话对象
+        reloaded = asyncio.Event()
+
+        def _on_nav(frame) -> None:
             try:
-                img = await session.capture_screenshot_base64()
-                (LOCAL_DATA / "qr.jpg").write_bytes(base64.b64decode(img))
+                if frame == page.main_frame:
+                    reloaded.set()
             except Exception:
                 pass
+
+        page.on("framenavigated", _on_nav)
+        # 关键：不主动轮询 validate_login——它会 goto 重载页面、把二维码刷掉。
+        # 改为监听主框架导航：用户扫码确认后闲鱼会自动跳转，此时再 validate。
+        # 每 ~30s 兜底 validate 一次（防止导航事件漏接）。
+        for attempt in range(60):  # 最长约 6 分钟
+            try:
+                await asyncio.wait_for(reloaded.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                if attempt % 6 != 5:
+                    continue
+                # 仍停留在登录页时不要 validate——goto 探测页会把二维码从屏幕上拖走
+                try:
+                    current = str(getattr(page, "url", "") or "")
+                    if session._profile.is_auth_url(current):
+                        continue
+                except Exception:
+                    pass
             result = await session.validate_login()
+            await asyncio.sleep(1)
+            reloaded.clear()  # validate 自身的 goto 也会触发导航事件，清掉避免空转
             if result.get("ok"):
-                path = await session.save_storage_state(STORAGE_STATE)
+                path = await session.save_storage_state(storage_path)
                 print(f"[LOGIN] 登录成功，会话已保存: {path}")
-                _print_cookie_summary()
+                _print_cookie_summary(storage_path)
                 return 0
-            if attempt % 3 == 0:
-                reason = str(result.get("reason", ""))[:70]
-                print(f"[LOGIN] 等待扫码... ({result.get('code')}: {reason})")
-            await asyncio.sleep(4)
+            print(f"[LOGIN] 等待扫码... ({result.get('code')}: {str(result.get('reason', ''))[:60]})")
         print("[LOGIN] 等待超时。二维码可能已过期，请重新运行 login。")
         return 1
     finally:
@@ -223,6 +259,107 @@ async def cmd_search_taobao(keyword: str, pages: int, headless: bool) -> int:
         return 1
     finally:
         await provider.close()
+
+
+async def cmd_watch_taobao(keyword: str, interval: int, max_cycles: int, headless: bool) -> int:
+    """淘宝轮询监控实验（阶段 1.5a）。
+
+    双重目的：①实证淘宝对自动轮询的风控容忍度（多少次/什么频率触发 punish）；
+    ②走通平台化存储链路——订阅/商品/价格历史/市场 EMA 全部带 platform=taobao 落库。
+    """
+    state = TAOBAO_STORAGE_STATE if TAOBAO_STORAGE_STATE.exists() else None
+    settings = _make_settings(headless=headless)
+    settings.playwright_storage_state_path = state
+    provider = PlaywrightSearchProvider(settings, profile=TAOBAO_PROFILE)
+    storage = SubscriptionStorage(LOCAL_DATA / "goofish.db")
+    await storage.initialize()
+    sub, created = await storage.upsert_subscription(
+        umo="local_lab:cli",
+        keyword=keyword,
+        platform="taobao",
+        interval_sec=interval,
+        pages=1,
+        recommend_max_price=None,
+        drop_abs=50.0,
+        drop_pct=0.05,
+        new_window_sec=86400,
+        cooldown_sec=0,
+    )
+    print(f"[WATCH] 订阅 #{sub.id}（{'新建' if created else '复用'}，platform={sub.platform}）"
+          f" keyword={keyword!r} interval={interval}s cycles={'∞' if max_cycles <= 0 else max_cycles}")
+    captcha_streak = 0
+    cycle = 0
+    try:
+        while max_cycles <= 0 or cycle < max_cycles:
+            cycle += 1
+            started_at = int(time.time())
+            run_id = await storage.create_fetch_run(sub.id, started_at)
+            try:
+                items = await provider.search(keyword=keyword, pages=1, timeout_sec=60)
+            except ProviderError as exc:
+                await storage.finish_fetch_run(
+                    run_id, finished_at=int(time.time()), status="failed",
+                    err_type=exc.code.value, err_msg=str(exc)[:200],
+                )
+                await storage.update_schedule_failure(sub.id, int(time.time()), 60)
+                if exc.code == ProviderErrorCode.CAPTCHA:
+                    captcha_streak += 1
+                    print(f"[WATCH] #{cycle} ⛔ 风控（连续 {captcha_streak} 次）: {exc.message}")
+                    if captcha_streak >= 3:
+                        print("[WATCH] 连续 3 次风控，判定此频率不可用。"
+                              "请重跑 sso 刷新会话后加大 --interval 再试。")
+                        break
+                else:
+                    print(f"[WATCH] #{cycle} ❌ {exc.code.value}: {exc.message}")
+                await asyncio.sleep(interval)
+                continue
+            captcha_streak = 0
+            now_ts = int(time.time())
+            new_items: list = []
+            drops: list = []
+            price_rows: list[tuple[int, str, float, int, str]] = []
+            for item in items:
+                existing = await storage.get_item(sub.id, item.item_id)
+                if existing is None:
+                    new_items.append(item)
+                    price_rows.append((sub.id, item.item_id, item.price, now_ts, "watch_taobao"))
+                else:
+                    decision = evaluate_price_drop(
+                        existing.last_price, item.price, sub.drop_abs, sub.drop_pct
+                    )
+                    if decision.triggered:
+                        drops.append((item, existing.last_price, decision))
+                    if existing.last_price != item.price:
+                        price_rows.append(
+                            (sub.id, item.item_id, item.price, now_ts, "watch_taobao")
+                        )
+            await storage.upsert_items_bulk(sub.id, items, now_ts)
+            await storage.insert_price_history_bulk(price_rows)
+            ema_text = ""
+            prices = [i.price for i in items if i.price > 0]
+            if prices:
+                mp = await storage.upsert_market_price(
+                    sub.keyword, prices, now_ts, platform=sub.platform
+                )
+                ema_text = f" EMA={mp.ema_price:.0f}(n={mp.sample_count})"
+            await storage.finish_fetch_run(
+                run_id, finished_at=now_ts, status="success", items_count=len(items)
+            )
+            await storage.update_schedule_success(sub.id, now_ts, interval)
+            print(f"[WATCH] #{cycle} ✅ {len(items)} 条（新 {len(new_items)} / 降价 {len(drops)}）{ema_text}")
+            for item in new_items[:3]:
+                print(f"  🆕 [{item.item_id}] ¥{item.price:.2f} {item.title[:36]!r}")
+            for item, last, dec in drops[:3]:
+                print(f"  📉 [{item.item_id}] ¥{last:.2f} → ¥{item.price:.2f}"
+                      f"（-{dec.drop_pct:.1%}）{item.title[:30]!r}")
+            if max_cycles <= 0 or cycle < max_cycles:
+                await asyncio.sleep(interval)
+    finally:
+        await provider.close()
+        await storage.close()
+    print(f"[WATCH] 结束，共 {cycle} 轮。fetch_runs/items/price_history/market_price"
+          f" 已写入 local_data/goofish.db")
+    return 0
 
 
 async def cmd_sso(keyword: str, headless: bool) -> int:
@@ -387,6 +524,8 @@ def main() -> int:
 
     if cmd == "login":
         return asyncio.run(cmd_login())
+    if cmd == "login-taobao":
+        return asyncio.run(cmd_login(platform="taobao"))
     if cmd == "check":
         return asyncio.run(cmd_check())
     if cmd == "search":
@@ -400,6 +539,18 @@ def main() -> int:
         # 默认有头：淘宝新指纹常弹滑块，可见窗口便于手动过验证
         return asyncio.run(
             cmd_search_taobao(keyword, pages, headless="--headless" in rest)
+        )
+    if cmd == "watch-taobao":
+        keyword = positional[0] if positional else "RTX 5090"
+        interval = 600
+        cycles = 0
+        for a in rest:
+            if a.startswith("--interval="):
+                interval = int(a.split("=", 1)[1])
+            elif a.startswith("--cycles="):
+                cycles = int(a.split("=", 1)[1])
+        return asyncio.run(
+            cmd_watch_taobao(keyword, interval, cycles, headless="--headless" in rest)
         )
     if cmd == "sso":
         keyword = positional[0] if positional else "RTX 5090"

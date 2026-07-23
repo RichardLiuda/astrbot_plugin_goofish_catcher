@@ -35,3 +35,11 @@ class SiteProfile:
     # parse_dom_card：把卡片 dict 转成 NormalizedItem（含广告过滤、ID 前缀），失败返回 None。
     dom_card_extractor_js: str | None = None
     parse_dom_card: Callable[[dict, str], "NormalizedItem | None"] | None = None
+    # 是否支持商品详情页深度分析；False 时 analyze_item_detail 直接短路返回保守结果。
+    supports_item_detail: bool = True
+    # 是否允许「快速进入/一键登录」捷径（login_session.try_quick_login 与
+    # provider._try_quick_login）；淘宝访客态下 iframe-gone 启发式会误判成功，置 False。
+    quick_login_enabled: bool = True
+    # 登录态校验探测页（None = 用 login_url）。登录落地页是纯登录页的平台必须设置：
+    # validate_login 会 goto 该页检查登录态接口——若指回登录页，会把已登录用户拖回登录页。
+    validate_probe_url: str | None = None

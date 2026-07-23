@@ -10,7 +10,8 @@
 - 广告卡片的链接是 click.simba.taobao.com 跳转，选择器层已被 item.htm 排除，
   parse_dom_card 里再做一次 host 白名单兜底。
 - 闲鱼登录不会给 .taobao.com 播种 cookie；访客可搜索但新指纹必弹滑块。
-  login_status_api_markers 留空（pending：阶段 1.2 做淘宝登录态时补）。
+  淘宝登录链路（阶段 P0）：login_url 指向淘宝登录页，登录态校验接口为
+  mtop.user.getUserSimple（见下方 login_status_api_markers 注释）。
 """
 
 from __future__ import annotations
@@ -138,12 +139,16 @@ TAOBAO_PROFILE = SiteProfile(
     platform=PLATFORM_TAOBAO,
     display_name="淘宝",
     base_url=_BASE_URL,
-    login_url="https://www.taobao.com",  # pending：阶段 1.2 登录态落地时换真实登录落地页
+    login_url="https://login.taobao.com/member/login.jhtml",
     # 淘宝访客搜索合法，页面头部常驻阿里登录组件，"alibaba-login-box" 会误报；
     # 且该检查先于 captcha HTML 检查执行，会把滑块惩罚页误分类为 AUTH_REQUIRED。
     # 故留空：仅依赖 URL 级判定（login.taobao.com 重定向）。
     embedded_login_markers=(),
-    login_status_api_markers=(),  # pending：淘宝登录态校验接口（阶段 1.2）
+    # 登录态校验接口：来自 2026-07-22 AstrBot 实测日志，mtop.user.getUserSimple
+    # 未登录返回 FAIL_SYS_SESSION_EXPIRED，登录后应返回 SUCCESS。
+    # 注意 URL 里 api 名是驼峰（api=mtop.user.getUserSimple），login_session 的
+    # _match_login_status_api 匹配前会对 URL 与标记统一 lower()，此处保持小写即可。
+    login_status_api_markers=("mtop.user.getusersimple",),
     favorite_button_selector="div[class*='buttons--'] div[class*='right--']",  # pending：淘宝收藏 UI 未验证（阶段 1.3）
     favorite_hint_text="收藏",
     favorited_hint_text="已收藏",
@@ -166,4 +171,13 @@ TAOBAO_PROFILE = SiteProfile(
     normalize_item_page_title=_normalize_item_page_title,
     dom_card_extractor_js=_DOM_CARD_EXTRACTOR_JS,
     parse_dom_card=_parse_dom_card,
+    # 淘宝详情页解析未实测（阶段 1.3），深度分析短路为保守结果，不启动浏览器。
+    supports_item_detail=False,
+    # 淘宝访客态下 mini_login iframe 本就不存在，"iframe gone=成功"启发式会误判，
+    # 一键登录捷径整体禁用（login_session.try_quick_login 与 provider 侧同修）。
+    quick_login_enabled=False,
+    # 登录落地页是纯登录页，validate_login 不能回那里（会把已登录用户拖回登录页，
+    # 且 getusersimple 只在内容页触发）。探测页用搜索页——实测该页必发
+    # mtop.user.getusersimple，未登录 SESSION_EXPIRED、登录后 SUCCESS。
+    validate_probe_url="https://s.taobao.com/search?q=%E6%89%8B%E6%9C%BA",
 )
