@@ -22,6 +22,7 @@
 - 本地实验台新增 `watch-taobao` 轮询监控命令（复用存储与检测链路，用于实测淘宝风控容忍频率）。
 - 多平台改造 P0（登录认证链路平台化）：`GoofishLoginSession` / `LocalAuthSessionController` / `RemoteAuthRecoveryCoordinator` 全部按平台注入站点档案——淘宝订阅触发 AUTH_REQUIRED 时推送**淘宝**登录二维码（落地页 `login.taobao.com`，校验接口 `mtop.user.getusersimple`），扫码确认后**只恢复同平台订阅**；`goofish_start_login` / `goofish_check_login` 新增 `platform` 参数（默认 goofish）；淘宝会话独立存储于 `storage_state.taobao.json` 与 `browser_profile_taobao/`；修复 quick-login 在淘宝访客态的误判成功（`SiteProfile.quick_login_enabled`，淘宝关闭）；修复恢复订阅时丢失 `platform` 字段的既有 bug；新增 `test_platform_auth_flow.py`（15 用例），并顺带修复 3 个 test_remote_auth_flow 既有测试错误。闲鱼登录行为逐字节不变。
 - P0 实测修复：`SiteProfile` 新增 `validate_probe_url`（登录落地页与登录态探测页分离）——淘宝登录页是纯登录页，登录态校验改走搜索页（`mtop.user.getusersimple` 仅在内容页触发）；真实淘宝登录态下有头搜索验证通过（无滑块）。
+- P1 体验修复（AstrBot 实测反馈）：`check_subscription` 按平台路由 provider，重复触发返回友好提示而非报错；`check_login_state` 冷启动不再直接报 error；淘宝间隔下限改为可配置 `taobao_min_interval_sec`（创建/更新一致生效）；不支持详情分析的平台跳过节流 sleep 与占位缓存；浏览器被用户手动关闭后自动检测并重拉（不再连环 UNKNOWN 报错）。
 - 多平台改造阶段 1.1（淘宝搜索适配）：`app/platforms/taobao.py` 淘宝档案落地——`SiteProfile` 新增 `parse_dom_card` / `dom_card_extractor_js` 可选钩子，淘宝 SSR 搜索页走 DOM 定制提取（title 属性取标题、priceInt+priceFloat 拼价格、店铺名/销量进 `raw`），`click.simba.taobao.com` 广告链接在选择器层与解析层双重过滤；`extract_item_id_from_url` / `normalize_url` 下沉至 `platforms/registry.py` 共享；错误消息按 `profile.display_name` 参数化（不再硬编码 "goofish"）。本地实测淘宝搜索返回正确结果（访客态，滑块手动过后）。淘宝商品 ID 带 `taobao:` 前缀，与闲鱼 ID 空间隔离。已知边界：分页与价格 URL 参数未实测（单页搜索 + 内存过滤兜底）；列表价为 SKU 区间最低价。
 
 ### Added

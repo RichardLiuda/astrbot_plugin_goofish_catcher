@@ -186,9 +186,37 @@ class PlaywrightSearchProvider:
             "[goofish_catcher] adopted live login browser session into provider"
         )
 
+    @staticmethod
+    def _browser_alive(browser) -> bool:
+        try:
+            return browser is not None and bool(browser.is_connected())
+        except Exception:
+            return False
+
+    async def _reset_dead_browser_state(self) -> None:
+        """浏览器被用户手动关闭（或崩溃）后重置引用，下次操作时重新拉起。
+
+        用户直接关掉有头浏览器窗口是常见动作（登录后被收养的常驻浏览器
+        也会被关），不能因此让后续所有操作永久失败。
+        """
+        playwright = self._playwright
+        self._browser = None
+        self._persistent_context = None
+        self._playwright = None
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
+
     async def _ensure_persistent_context(self) -> BrowserContext:
         if self._persistent_context is not None:
-            return self._persistent_context
+            if self._browser_alive(self._persistent_context.browser):
+                return self._persistent_context
+            logger.warning(
+                "[goofish_catcher] persistent browser was closed, relaunching"
+            )
+            await self._reset_dead_browser_state()
 
         user_data_dir = self.settings.playwright_user_data_dir
         if user_data_dir is None:
@@ -196,7 +224,9 @@ class PlaywrightSearchProvider:
 
         async with self._init_lock:
             if self._persistent_context is not None:
-                return self._persistent_context
+                if self._browser_alive(self._persistent_context.browser):
+                    return self._persistent_context
+                await self._reset_dead_browser_state()
             playwright = await async_playwright().start()
             if playwright is None:
                 raise ProviderError(
@@ -253,11 +283,18 @@ class PlaywrightSearchProvider:
                 )
             return browser
         if self._browser is not None:
-            return self._browser
+            if self._browser_alive(self._browser):
+                return self._browser
+            logger.warning(
+                "[goofish_catcher] browser was closed, relaunching"
+            )
+            await self._reset_dead_browser_state()
 
         async with self._init_lock:
             if self._browser is not None:
-                return self._browser
+                if self._browser_alive(self._browser):
+                    return self._browser
+                await self._reset_dead_browser_state()
             playwright = await async_playwright().start()
             if playwright is None:
                 raise ProviderError(

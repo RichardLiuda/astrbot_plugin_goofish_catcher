@@ -13,6 +13,7 @@
 - 闲鱼会话寿命观察：扫码登录后约 29 小时过期（期间有多次 headless 限流运行，可能加速）。
 - `_payload_indicates_captcha` 存在**两个版本**（0.3b 待统一）：provider 版 8 个标记（含 rgv587/punish/baxia），login_session 版 3 个标记——行为差异是有意保留的，统一前不要只改一边。
 - quick-login 的"iframe 消失=登录成功"启发式在**访客态平台会误判**（淘宝实测：什么都没发生却记了"succeeded"）。非闲鱼平台必须 `quick_login_enabled=False`（P0 已落地）。
+- **用户手动关掉有头浏览器不会致命**（P1 已修）：provider 每次操作前检查 `browser.is_connected()`，发现被关就重置引用重新拉起（持久 profile 的 cookie 在磁盘上，新浏览器自动继承）。此前症状是连环 `UNKNOWN: Target page, context or browser has been closed`。
 - 测试套件有一处**既有 stub 顺序污染**：unittest discover 按字母序加载，test_recommend_price_threshold 会把 `astrbot.api.message_components` 覆盖成 `Plain=object`，导致 test_reply_favorite 1 个 error（test_platform_auth_flow 的 functional stub 顺带修好了 test_remote_auth_flow 的 3 个）。要根除需改 test_recommend_price_threshold.py 的 stub 写法。
 
 ## 淘宝实验结论（2026-07-20 本地实证，产物在 local_data/）
