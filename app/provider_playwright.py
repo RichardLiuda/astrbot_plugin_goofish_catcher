@@ -815,7 +815,10 @@ class PlaywrightSearchProvider:
                 return
 
             if isinstance(payload, dict):
-                if _payload_requires_login(payload):
+                if (
+                    self._profile.auth_on_payload_markers
+                    and _payload_requires_login(payload)
+                ):
                     error_flags.add("auth")
                 if _payload_indicates_captcha(payload):
                     error_flags.add("captcha")
@@ -1491,7 +1494,10 @@ class PlaywrightSearchProvider:
                         _payload_requires_login(payload),
                         _payload_indicates_captcha(payload),
                     )
-                if _payload_requires_login(payload):
+                if (
+                    self._profile.auth_on_payload_markers
+                    and _payload_requires_login(payload)
+                ):
                     error_flags.add("auth")
                     logger.info(
                         "[goofish_catcher] payload requires login: url=%s ret=%s",

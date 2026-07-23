@@ -180,4 +180,7 @@ TAOBAO_PROFILE = SiteProfile(
     # 且 getusersimple 只在内容页触发）。探测页用搜索页——实测该页必发
     # mtop.user.getusersimple，未登录 SESSION_EXPIRED、登录后 SUCCESS。
     validate_probe_url="https://s.taobao.com/search?q=%E6%89%8B%E6%9C%BA",
+    # 淘宝访客搜索合法：次要接口（getusersimple 等）的 SESSION_EXPIRED 不代表被墙，
+    # payload 登录标记不判 AUTH_REQUIRED，只认 login.taobao.com 重定向。
+    auth_on_payload_markers=False,
 )

@@ -36,6 +36,7 @@ from .app.provider_retry import (
     estimate_captcha_retry_timeout_sec,
     search_with_captcha_retry,
 )
+from .app.purchase import PurchaseDecisionService
 from .app.reply_favorite import (
     extract_non_reply_text,
     extract_reply_context_from_outline,
@@ -49,6 +50,7 @@ from .app.reply_favorite import (
     _extract_item_id_from_url,
 )
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator, AUTH_PAUSE_REASONS, AUTO_LOGIN_DONE_SENTINEL
+from .app.reporter.card import render_decision_card
 from .app.platforms import build_item_url, platform_display_name, split_item_id
 from .app.platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
 from .app.recommender import GoofishRecommender
@@ -1273,6 +1275,92 @@ class GoofishCatcherPlugin(Star):
             + f"，已展示前 {shown} 件{price_summary}。"
             "用户可引用上方消息并回复序号（如 1 或 1 3）来收藏商品，无需额外操作。"
         )
+
+    @llm_tool(name="buyagent_purchase_decision")
+    async def buyagent_purchase_decision(
+        self,
+        event: AstrMessageEvent,
+        requirement: str,
+        top_k: int = 5,
+    ) -> str:
+        """自然语言采购决策：拆解需求、多平台并发搜索比价、输出采购决策卡片。
+        当用户想买某个东西、比价、蹲好价、问“xxx 值得买吗/帮我看看 xxx”时使用。
+        支持模糊需求（颜色/预算/成色），精确匹配不到时自动降级并给出替代建议。
+
+        Args:
+            requirement(string): 采购需求原文，如“红色 RTX 5090 预算1万5”
+            top_k(number): 最多推荐条数，默认5
+        """
+        if err := self._llm_tools_guard():
+            return err
+        if not self.providers:
+            return "搜索组件未就绪，请稍后重试。"
+
+        top_k = max(1, min(int(top_k), 10))
+        service = PurchaseDecisionService(
+            providers=self.providers,
+            storage=self.storage,
+            llm_call=self._make_llm_call() if self.settings.llm_enabled else None,
+            top_k=top_k,
+        )
+        try:
+            report = await service.run(requirement)
+        except Exception as exc:
+            logger.warning(
+                "[goofish_catcher] buyagent_purchase_decision failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return f"采购决策出错：{exc}"
+
+        card = render_decision_card(report)
+        # 与 goofish_search_live 同款旁路发送：aiocqhttp 合并转发，其他平台纯文本
+        if event.get_platform_name() == "aiocqhttp":
+            nodes = Nodes([Node([Plain(card)])])
+            try:
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain([nodes]),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher] buyagent_purchase_decision send forward failed: %s", exc
+                )
+        else:
+            try:
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain().message(card),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[goofish_catcher] buyagent_purchase_decision send failed: %s", exc
+                )
+
+        platform_counts: dict[str, int] = {}
+        for decision_item in report.items:
+            platform = getattr(getattr(decision_item, "item", None), "platform", "") or ""
+            platform_counts[platform] = platform_counts.get(platform, 0) + 1
+        counts_text = "、".join(
+            f"{platform_display_name(name)} {count} 条"
+            for name, count in sorted(platform_counts.items())
+        ) or "无结果"
+        parts = [
+            f"采购决策完成（匹配等级 L{report.level_used}）：搜索到 {counts_text}，"
+            f"推荐 {len(report.items)} 条（top_k={top_k}）。"
+        ]
+        if report.level_note:
+            parts.append(f"降级说明：{report.level_note}。")
+        if report.level_hint:
+            parts.append(report.level_hint)
+        if report.errors:
+            err_text = "；".join(
+                f"{platform_display_name(name)}: {msg}"
+                for name, msg in report.errors.items()
+            )
+            parts.append(f"部分平台失败：{err_text}。")
+        parts.append("采购决策卡片已发送给用户，无需重复展示。")
+        return "".join(parts)
 
     @llm_tool(name="goofish_query_recommend")
     async def goofish_query_recommend(

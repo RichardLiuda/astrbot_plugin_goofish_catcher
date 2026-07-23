@@ -37,12 +37,12 @@
 - [ ] 0.3b 详情解析入档案：`_build_deep_analysis_result`/`_find_item_detail_payload`/`_classify_credit`/图片提取（~400 行）移入 profile 钩子，provider_playwright 留 re-export 兼容（test_provider_playwright_detail_analysis 护行为）；顺带统一 `_payload_indicates_captcha` 双版本差异（provider 8 标记 vs login_session 3 标记）
 - [x] 0.4 多 provider 容器（随 1.5b 完成）：build_providers() -> dict[str, SearchProvider]，scheduler 按 sub.platform 路由；单平台行为不变
 
-### 阶段 2：意图引擎 + 决策卡片（核心差异化）
-- [ ] 2.1 app/intent/：LLM 拆解（关键词/属性/预算/成色）+ 降级阶梯 Level 0-3（LLM 生成，失败回退整句当关键词）
-- [ ] 2.2 asyncio.gather 多平台并发，单平台 10s 超时、失败隔离
-- [ ] 2.3 聚合：平台内去重 + 风险标签（闲鱼二手风险词/淘宝 C 店谨慎/天猫旗舰售后优）+ 复用 recommender 排序
-- [ ] 2.4 Markdown 决策卡片渲染器，精确匹配为空时顶部 FallbackNotice；输出走现有 MessageChain/Nodes
-- [ ] 2.5 新 llm_tool（必须在 main.py）：buyagent_purchase_decision、buyagent_compare；薄 CLI 复用 driver 模式
+### 阶段 2：意图引擎 + 决策卡片（核心差异化，2026-07-23 完成）
+- [x] 2.1 `app/intent/engine.py`：LLM 拆解（关键词/属性/预算/成色/降级阶梯 L0-3，失败回退启发式：整句关键词+锚定预算正则）
+- [x] 2.2 并发聚合：`PurchaseDecisionService`（app/purchase.py）——asyncio.gather 打 providers 字典，单平台 20s 超时+异常隔离，空结果逐级降级重搜
+- [x] 2.3 `app/aggregator/aggregate.py`：平台内去重 + 风险标签（闲鱼二手词/淘宝旗舰 vs C店）+ LLM/启发式排序（宁缺毋滥）
+- [x] 2.4 `app/reporter/card.py`：Markdown 决策卡片，降级提示+💡替代建议+"N 条未进推荐"平台露面+失败平台节
+- [x] 2.5 `buyagent_purchase_decision` llm_tool（main.py，第 18 个工具）+ local_lab `decide` 命令（LAB_LLM_* 接任意 OpenAI 兼容 LLM，无配置走启发式）；test_purchase_decision.py 31 用例全绿；lab 实测双平台卡片（66 候选→top5 淘宝+闲鱼另有 30 条露面）
 
 ### 阶段 3（按需）
 慢慢买逆向 API + KV 缓存表（URL MD5，TTL 1h，仅服务新品链接）；京东适配器（非 mtop，独立引擎）；多平台订阅 UI；worker 协议加 platform 字段；Admin 平台状态面板；每平台速率限制。

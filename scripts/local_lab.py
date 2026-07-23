@@ -12,6 +12,7 @@
   .venv/Scripts/python.exe scripts/local_lab.py search "RTX 5090" [pages] [--headless]
   .venv/Scripts/python.exe scripts/local_lab.py search-taobao "RTX 5090" [pages] [--headless]
   .venv/Scripts/python.exe scripts/local_lab.py watch-taobao "RTX 5090" [--interval=600] [--cycles=N] [--headless]
+  .venv/Scripts/python.exe scripts/local_lab.py decide "红色 RTX 5090 预算1万5" [--top=5] [--headless]
   .venv/Scripts/python.exe scripts/local_lab.py sso ["RTX 5090"] [--headless]
 
 产物都写在 local_data/ 下（storage_state.json、qr.jpg、sso 探针截图/HTML），
@@ -28,6 +29,8 @@ import sys
 import time
 from pathlib import Path
 from urllib.parse import quote
+
+import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -94,6 +97,46 @@ def _make_settings(*, headless: bool, block_assets: bool = True) -> PluginSettin
         llm_provider_id=None,
         llm_prefilter_provider_id=None,
     )
+
+
+def _make_env_llm_call():
+    """从环境变量构造 llm_call，供 PurchaseDecisionService 的意图解析/排序使用。
+
+    LAB_LLM_BASE_URL（默认 https://api.openai.com/v1）、LAB_LLM_API_KEY、
+    LAB_LLM_MODEL（默认 gpt-4o-mini）。未配置 API_KEY 时返回 None，
+    调用方走启发式降级。任何异常返回空串，由调用方自行降级。
+    """
+    api_key = os.environ.get("LAB_LLM_API_KEY", "").strip()
+    if not api_key:
+        return None
+    base_url = os.environ.get(
+        "LAB_LLM_BASE_URL", "https://api.openai.com/v1"
+    ).rstrip("/")
+    model = os.environ.get("LAB_LLM_MODEL", "gpt-4o-mini")
+
+    async def _llm_call(prompt: str, system_prompt: str) -> str:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": model,
+                        "temperature": 0,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return (data["choices"][0]["message"]["content"] or "").strip()
+        except Exception as exc:
+            print(f"[LLM] 调用失败，按无 LLM 降级: {exc}")
+            return ""
+
+    return _llm_call
 
 
 def _cookie_domains(state_path: Path = STORAGE_STATE) -> dict[str, list[str]]:
@@ -514,6 +557,56 @@ async def cmd_sso(keyword: str, headless: bool) -> int:
         await provider.close()
 
 
+async def cmd_decide(requirement: str, top_k: int, headless: bool) -> int:
+    """采购决策实验（2.x 集成层）：意图拆解 -> 多平台并发搜索 -> 决策卡片。
+
+    走 build_providers 双平台路由（taobao_enabled=True；淘宝会话存在与否由
+    build_providers 按 plugin_data_dir/storage_state.taobao.json 自行处理）。
+    """
+    # 延迟 import：2.x 核心管线模块落地前，不影响 login/search 等既有命令
+    from app.provider import build_providers
+    from app.purchase import PurchaseDecisionService
+    from app.reporter.card import render_decision_card
+
+    settings = _make_settings(headless=headless)
+    settings.taobao_enabled = True  # slots dataclass 可直接赋值
+    providers = build_providers(settings)
+    # lab 的淘宝会话生命周期是 storage_state 文件（login-taobao 写入），
+    # 一律退回 storage_state 模式：build_providers 派的 browser_profile_taobao/
+    # 即使是空目录也会抢占优先级变成全新访客（profile 优先级坑，上次实测踩过）。
+    taobao_provider = providers.get("taobao")
+    if taobao_provider is not None:
+        taobao_provider.settings.playwright_user_data_dir = None
+    storage = SubscriptionStorage(LOCAL_DATA / "goofish.db")
+    await storage.initialize()
+    llm_call = _make_env_llm_call()
+    if llm_call is None:
+        print("[DECIDE] 未配置 LAB_LLM_API_KEY，走启发式降级（意图解析与排序不用 LLM）")
+    print(f"[DECIDE] requirement={requirement!r} top_k={top_k} platforms={sorted(providers)}")
+    try:
+        service = PurchaseDecisionService(
+            providers=providers,
+            storage=storage,
+            llm_call=llm_call,
+            top_k=top_k,
+            per_platform_timeout_sec=30,
+        )
+        report = await service.run(requirement)
+        print(render_decision_card(report))
+        if report.errors:
+            print(f"[DECIDE] 部分平台出错: {report.errors}")
+            return 1
+        return 0
+    finally:
+        seen: set[int] = set()
+        for provider in providers.values():
+            if id(provider) in seen:
+                continue
+            seen.add(id(provider))
+            await provider.close()
+        await storage.close()
+
+
 def main() -> int:
     args = sys.argv[1:]
     if not args:
@@ -551,6 +644,19 @@ def main() -> int:
                 cycles = int(a.split("=", 1)[1])
         return asyncio.run(
             cmd_watch_taobao(keyword, interval, cycles, headless="--headless" in rest)
+        )
+    if cmd == "decide":
+        requirement = positional[0] if positional else ""
+        if not requirement:
+            print('用法: decide "红色 RTX 5090 预算1万5" [--top=5] [--headless]')
+            return 2
+        top_k = 5
+        for a in rest:
+            if a.startswith("--top="):
+                top_k = int(a.split("=", 1)[1])
+        # 与 search-taobao 一致默认有头：淘宝新指纹常弹滑块，可见窗口便于手动过验证
+        return asyncio.run(
+            cmd_decide(requirement, top_k, headless="--headless" in rest)
         )
     if cmd == "sso":
         keyword = positional[0] if positional else "RTX 5090"

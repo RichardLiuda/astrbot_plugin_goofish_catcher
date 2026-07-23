@@ -43,3 +43,7 @@ class SiteProfile:
     # 登录态校验探测页（None = 用 login_url）。登录落地页是纯登录页的平台必须设置：
     # validate_login 会 goto 该页检查登录态接口——若指回登录页，会把已登录用户拖回登录页。
     validate_probe_url: str | None = None
+    # payload 里的登录失效标记（FAIL_SYS_SESSION_EXPIRED 等）是否判 AUTH_REQUIRED。
+    # 访客可用平台（淘宝）应关闭：次要接口的 SESSION_EXPIRED 不代表搜索被墙，
+    # 只认 login.* 重定向才是真登录墙。
+    auth_on_payload_markers: bool = True

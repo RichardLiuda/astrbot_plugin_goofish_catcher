@@ -20,6 +20,10 @@ AstrBot 插件「闲鱼蹲蹲助手」：LLM 工具调用 + 关键词订阅监�
 | `provider_playwright.py` | 核心抓取引擎：真实 Chromium 渲染 + XHR 嗅探；平台特数据全部读 `self._profile`（0.3a 起）；`analyze_item_detail` 对 `supports_item_detail=False` 的平台短路（1.5b 起） | keyword → `list[NormalizedItem]`；cookie 从 storage_state.json/browser_profile 进，操作后回写 |
 | `provider_remote.py` | 远程模式的 HTTP 客户端 | SearchProvider 调用 → REST `/v1/*` |
 | `provider_retry.py` | 仅 CAPTCHA 重试（≤2 次，间隔 1s） | — |
+| `intent/engine.py` | 意图引擎：LLM 拆解自然语言→关键词/属性/预算/降级阶梯，启发式兜底（2.x 起） | 文本 → PurchaseIntent（llm_call 可注入，失败必回退） |
+| `aggregator/aggregate.py` | 决策聚合：平台内去重、风险标签（按平台规则）、LLM/启发式排序 | 候选 → DecisionItem 列表 + summary |
+| `reporter/card.py` | Markdown 决策卡片渲染（降级提示/平台分节/"N 条未进推荐"/失败节） | DecisionReport → 纯文本卡片 |
+| `purchase.py` | `PurchaseDecisionService`：并发搜索→逐级降级→聚合排序的编排（2.x 起） | requirement 文本 → DecisionReport；单平台 20s 超时+异常隔离 |
 | `provider_agent.py` | LLM 兜底提取（AX 树→商品/登录态/收藏按钮） | AX 文本 + llm_call → JSON |
 | `browser_agent.py` | `GofishBrowserAgent`：独立 Chromium 的 ReAct 循环，对应 llm_tool `goofish_browser_task` | task 描述 → 多步浏览器动作 |
 | `types.py` | 全部领域 dataclass + ProviderError | `DEFAULT_PLATFORM="goofish"`（阶段 0.1 起） |
