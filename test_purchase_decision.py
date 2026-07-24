@@ -12,6 +12,7 @@ import unittest
 
 from app.aggregator.aggregate import (
     DecisionItem,
+    cluster_same_shop,
     dedupe_items,
     rank_items,
     risk_tags_for,
@@ -19,7 +20,7 @@ from app.aggregator.aggregate import (
 )
 from app.intent.engine import PurchaseIntent, parse_intent
 from app.platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
-from app.purchase import PurchaseDecisionService
+from app.purchase import DecisionReport, PurchaseDecisionService
 from app.reporter.card import render_decision_card
 from app.types import MarketPrice, NormalizedItem
 
@@ -531,6 +532,150 @@ class PlatformIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(report.items), 1)
         self.assertIn("超时", report.errors[PLATFORM_GOOFISH])
         self.assertNotIn(PLATFORM_TAOBAO, report.errors)
+
+
+# ── ⑥.5 同店同款聚类 ─────────────────────────────────────────────────────────
+
+def _tb_decision(
+    item_id: str,
+    title: str,
+    price: float,
+    score: float,
+    shop: str | None = "Apple旗舰店",
+    platform: str = PLATFORM_TAOBAO,
+) -> DecisionItem:
+    raw = {"shopName": shop} if shop else {}
+    return DecisionItem(
+        item=make_item(item_id, title, price, platform=platform, raw=raw),
+        risk_tags=["品牌/官方店铺"],
+        price_note=None,
+        score=score,
+    )
+
+
+class ClusterSameShopTest(unittest.TestCase):
+    def test_three_same_shop_links_merge_into_one(self) -> None:
+        a = _tb_decision("t1", "iPhone17 Pro 手机 白色 全新", 100.0, 80.0)
+        b = _tb_decision("t2", "iPhone17 Pro 手机 黑色", 90.0, 70.0)
+        c = _tb_decision("t3", "iPhone17 Pro 手机 白色 官方预购", 95.0, 60.0)
+        out = cluster_same_shop([a, b, c])
+        self.assertEqual(len(out), 1)
+        rep = out[0]
+        # 分数最高者为代表，score/risk_tags 不改动
+        self.assertEqual(rep.item.item_id, "t1")
+        self.assertEqual(rep.score, 80.0)
+        self.assertEqual(rep.risk_tags, ["品牌/官方店铺"])
+        self.assertEqual(rep.item.raw["cluster_count"], 3)
+        self.assertEqual(rep.item.raw["cluster_price_min"], 90.0)  # 被归并者最低价
+        # raw 复制后再改：原对象不被污染
+        for cand in (a, b, c):
+            self.assertNotIn("cluster_count", cand.item.raw)
+            self.assertNotIn("cluster_price_min", cand.item.raw)
+
+    def test_representative_keeps_position_of_highest_score(self) -> None:
+        solo1 = _tb_decision("s1", "别的商品A", 10.0, 50.0, shop="甲店")
+        a = _tb_decision("t1", "iPhone17 Pro 手机 白色", 100.0, 60.0)
+        solo2 = _tb_decision("s2", "别的商品B", 20.0, 55.0, shop="乙店")
+        b = _tb_decision("t2", "iPhone17 Pro 手机 黑色", 90.0, 80.0)
+        out = cluster_same_shop([solo1, a, solo2, b])
+        # 代表 b 出现在它原来的位置（原最高分成员处），整体保序
+        self.assertEqual([d.item.item_id for d in out], ["s1", "s2", "t2"])
+        self.assertEqual(out[2].item.raw["cluster_count"], 2)
+        self.assertEqual(out[2].item.raw["cluster_price_min"], 100.0)
+
+    def test_no_cluster_when_shop_empty_differs_or_platform_differs(self) -> None:
+        no_shop_a = _tb_decision("n1", "iPhone17 Pro 手机", 100.0, 80.0, shop=None)
+        no_shop_b = _tb_decision("n2", "iPhone17 Pro 手机", 90.0, 70.0, shop="")
+        diff_shop_a = _tb_decision("d1", "iPhone17 Pro 手机", 100.0, 80.0, shop="甲店")
+        diff_shop_b = _tb_decision("d2", "iPhone17 Pro 手机", 90.0, 70.0, shop="乙店")
+        plat_a = _tb_decision("p1", "iPhone17 Pro 手机", 100.0, 80.0)
+        plat_b = _tb_decision(
+            "p2", "iPhone17 Pro 手机", 90.0, 70.0, platform=PLATFORM_GOOFISH
+        )
+        out = cluster_same_shop(
+            [no_shop_a, no_shop_b, diff_shop_a, diff_shop_b, plat_a, plat_b]
+        )
+        self.assertEqual(len(out), 6)
+        for cand in out:
+            self.assertNotIn("cluster_count", cand.item.raw)
+
+    def test_card_shows_cluster_annotations(self) -> None:
+        a = _tb_decision("t1", "iPhone17 Pro 手机 白色 全新", 100.0, 80.0)
+        b = _tb_decision("t2", "iPhone17 Pro 手机 黑色", 90.0, 70.0)
+        c = _tb_decision("t3", "iPhone17 Pro 手机 白色 官方预购", 95.0, 60.0)
+        rep = cluster_same_shop([a, b, c])[0]
+        report = DecisionReport(
+            intent=PurchaseIntent(raw_query="iPhone17", keyword="iPhone17", attributes={}),
+            level_used=0,
+            level_note=None,
+            level_hint=None,
+            items=[rep],
+            market_refs={},
+            errors={},
+            searched_platforms=[PLATFORM_TAOBAO],
+            used_llm=False,
+            summary="测试",
+            platform_counts={PLATFORM_TAOBAO: 3},
+        )
+        card = render_decision_card(report)
+        self.assertIn("（同店同款 ×3）", card)
+        self.assertIn("（同店最低 ¥90）", card)
+
+    def test_card_omits_cluster_min_when_not_lower(self) -> None:
+        # 代表本身就是同店最低价时，不追加"同店最低"。
+        a = _tb_decision("t1", "iPhone17 Pro 手机 白色", 90.0, 80.0)
+        b = _tb_decision("t2", "iPhone17 Pro 手机 黑色", 100.0, 70.0)
+        rep = cluster_same_shop([a, b])[0]
+        report = DecisionReport(
+            intent=PurchaseIntent(raw_query="iPhone17", keyword="iPhone17", attributes={}),
+            level_used=0,
+            level_note=None,
+            level_hint=None,
+            items=[rep],
+            market_refs={},
+            errors={},
+            searched_platforms=[PLATFORM_TAOBAO],
+            used_llm=False,
+            summary="测试",
+        )
+        card = render_decision_card(report)
+        self.assertIn("（同店同款 ×2）", card)
+        self.assertNotIn("同店最低", card)
+
+
+class ClusterIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_top_k_not_flooded_by_same_shop(self) -> None:
+        # 同店 3 条近似链接 + 另一店 1 条；top_k=2 不应被同店占满。
+        def tb(item_id: str, title: str, price: float, shop: str) -> NormalizedItem:
+            return make_item(
+                item_id, title, price, platform=PLATFORM_TAOBAO,
+                raw={"shopName": shop},
+            )
+
+        items = [
+            tb("t1", "iPhone17 Pro 手机 白色 全新", 100.0, "Apple旗舰店"),
+            tb("t2", "iPhone17 Pro 手机 黑色", 90.0, "Apple旗舰店"),
+            tb("t3", "iPhone17 Pro 手机 白色 官方预购", 95.0, "Apple旗舰店"),
+            tb("t4", "iPhone17 Pro Max 手机 全新", 120.0, "小王数码店"),
+        ]
+        providers = {PLATFORM_TAOBAO: FakeProvider({"iPhone17": items})}
+        service = PurchaseDecisionService(providers=providers, llm_call=None, top_k=2)
+        report = await service.run("iPhone17")
+
+        # platform_counts 语义不变：聚类前的去重总数
+        self.assertEqual(report.platform_counts[PLATFORM_TAOBAO], 4)
+        # top_k=2：1 条同店代表（×3）+ 1 条另一店
+        self.assertEqual(len(report.items), 2)
+        self.assertEqual(report.items[0].item.item_id, "t1")  # 同分取最前者
+        self.assertEqual(report.items[0].item.raw["cluster_count"], 3)
+        self.assertEqual(report.items[0].item.raw["cluster_price_min"], 90.0)
+        self.assertNotIn("cluster_count", report.items[1].item.raw)
+        shops = {str(d.item.raw.get("shopName")) for d in report.items}
+        self.assertEqual(shops, {"Apple旗舰店", "小王数码店"})
+
+        card = render_decision_card(report)
+        self.assertIn("同店同款 ×3", card)
+        self.assertIn("同店最低 ¥90", card)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,8 @@
     → require_terms 过滤 → 预算过滤 → dedupe，合并后非空即停止降级；
       全部级都空则 level_used=最后一级、items 空、summary 说明
     → storage.get_market_price 取各平台 EMA 参考价（异常静默为 None）
-    → risk_tags / price_note / score_heuristic → rank_items → DecisionReport
+    → risk_tags / price_note / score_heuristic → cluster_same_shop 同店聚类
+    → rank_items → DecisionReport
     → 下游 reporter.render_decision_card 渲染成 Markdown 卡片发送。
 """
 
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from .aggregator.aggregate import (
     DecisionItem,
+    cluster_same_shop,
     dedupe_items,
     rank_items,
     risk_tags_for,
@@ -125,6 +127,9 @@ class PurchaseDecisionService:
             )
             for item in merged
         ]
+        # 同店同款聚类：需在 DecisionItem 组装（拿到 shopName 与 score）之后、
+        # rank_items 之前；platform_counts 保持聚类前的去重总数不变。
+        candidates = cluster_same_shop(candidates)
         ranked, summary, used_llm = await rank_items(
             candidates,
             requirement=requirement,

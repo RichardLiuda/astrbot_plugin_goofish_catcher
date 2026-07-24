@@ -25,6 +25,8 @@
 - P1 体验修复（AstrBot 实测反馈）：`check_subscription` 按平台路由 provider，重复触发返回友好提示而非报错；`check_login_state` 冷启动不再直接报 error；淘宝间隔下限改为可配置 `taobao_min_interval_sec`（创建/更新一致生效）；不支持详情分析的平台跳过节流 sleep 与占位缓存；浏览器被用户手动关闭后自动检测并重拉（不再连环 UNKNOWN 报错）。
 - 2.x 冒烟修复：意图启发式的预算识别改为必须有上下文锚点（预算/以内/元，修复"RTX 5090"被误吞为预算 ¥5090）；单平台搜索超时默认 10s→20s（对齐引擎真实耗时）；`SiteProfile.auth_on_payload_markers`（淘宝=False）——访客可用平台不再因次要接口的 SESSION_EXPIRED 误判 AUTH_REQUIRED，只认真登录墙重定向。
 - 阶段 1.3（淘宝详情分析）：`SiteProfile.parse_detail_page` 详情页解析钩子（闲鱼默认路径零改动）；淘宝详情页实测为 SSR（无详情 mtop 接口），解析 HTML 内嵌 `var b={...}` JSON（`loaderData.home.data.res`）——提取店铺三件套（sellerNick/DSR 三项/creditLevel/体验分）、SKU 全档真实价目表（props 维度解码 + sku2info 价格库存，skuId/下标双键兼容）、主图；信用规则（DSR 全 ≥4.8→good、有 <4.5→bad、旗舰店上调）；风险提示（C店低分/SKU 价差>3 倍引流/部分档位无货）；`TAOBAO_PROFILE.supports_item_detail=True`（调度器对淘宝订阅恢复真实深度分析，替代原"暂未支持"占位）。
+- 阶段 0.3b（详情解析入档案，纯重构零行为变化）：闲鱼详情解析四件套（`_build_deep_analysis_result`/`_find_item_detail_payload`/`_classify_credit`/`_extract_image_urls`）从引擎逐字迁入 `app/platforms/goofish.py` 并接成 `GOOFISH_PROFILE.parse_detail_page`，引擎 `analyze_item_detail` 两平台统一走钩子（留 re-export 别名，既有测试零改动）；`_payload_indicates_captcha` 统一为 8 标记版（删除 login_session 私有 3 标记版）。
+- 聚合层同店聚类：决策管线新增 `cluster_same_shop`——同平台内同店铺且标题主键相似的商品归并为一条（保留最高分者），卡片标注"同店同款 ×N / 同店最低 ¥X"，top 推荐不再被同店引流链接刷屏。
 - 多平台改造阶段 1.1（淘宝搜索适配）：`app/platforms/taobao.py` 淘宝档案落地——`SiteProfile` 新增 `parse_dom_card` / `dom_card_extractor_js` 可选钩子，淘宝 SSR 搜索页走 DOM 定制提取（title 属性取标题、priceInt+priceFloat 拼价格、店铺名/销量进 `raw`），`click.simba.taobao.com` 广告链接在选择器层与解析层双重过滤；`extract_item_id_from_url` / `normalize_url` 下沉至 `platforms/registry.py` 共享；错误消息按 `profile.display_name` 参数化（不再硬编码 "goofish"）。本地实测淘宝搜索返回正确结果（访客态，滑块手动过后）。淘宝商品 ID 带 `taobao:` 前缀，与闲鱼 ID 空间隔离。已知边界：分页与价格 URL 参数未实测（单页搜索 + 内存过滤兜底）；列表价为 SKU 区间最低价。
 
 ### Added

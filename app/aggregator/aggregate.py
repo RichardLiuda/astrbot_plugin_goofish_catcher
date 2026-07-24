@@ -1,9 +1,10 @@
-"""聚合层：多平台候选的去重、风险打标、启发式评分与 LLM 重排。
+"""聚合层：多平台候选的去重、风险打标、启发式评分、同店聚类与 LLM 重排。
 
 数据流：
     NormalizedItem（各平台原始结果）
     → dedupe_items 去重 → risk_tags_for 打标 → score_heuristic 评分
-    → DecisionItem → rank_items（LLM 优先，失败回退启发式排序）
+    → DecisionItem → cluster_same_shop 同店聚类
+    → rank_items（LLM 优先，失败回退启发式排序）
     → (排序后 Top-K, 总结文本, used_llm)。
 全部被 purchase.PurchaseDecisionService 串起；本模块不触网、不依赖 AstrBot。
 """
@@ -14,7 +15,7 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..intent.engine import PurchaseIntent
@@ -67,6 +68,51 @@ def dedupe_items(items: list[NormalizedItem]) -> list[NormalizedItem]:
         seen_fuzzy.add(fuzzy)
         out.append(item)
     return out
+
+
+def cluster_same_shop(candidates: list[DecisionItem]) -> list[DecisionItem]:
+    """同店同款聚类：同一平台内，shopName 相同（非空）且标题主键相似的
+    DecisionItem 归并为一个。保留分数最高者为代表，把归并数记进
+    representative.item.raw['cluster_count']（同时保留被归并者的最低价
+    记进 raw['cluster_price_min']）。空 shopName 或不同店各自独立，不受影响。
+    标题主键：去空格/标点后的前 12 个字符（空主键不参与聚类）。
+
+    保序：代表出现在原最高分成员的位置；不改动被保留者的 score/risk_tags；
+    raw 复制后再改（NormalizedItem.raw 可能被多处引用），代表是新对象。
+    """
+    groups: dict[tuple[str, str, str], list[int]] = {}
+    for idx, cand in enumerate(candidates):
+        shop = str((cand.item.raw or {}).get("shopName") or "").strip()
+        title_key = _title_key(cand.item.title)
+        if shop and title_key:
+            groups.setdefault((cand.item.platform, shop, title_key), []).append(idx)
+
+    representatives: dict[int, DecisionItem] = {}  # 代表原下标 → 归并后的新代表
+    dropped: set[int] = set()
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        rep_idx = max(idxs, key=lambda i: float(candidates[i].score))
+        rep = candidates[rep_idx]
+        others_min = min(
+            float(candidates[i].item.price) for i in idxs if i != rep_idx
+        )
+        new_raw = dict(rep.item.raw or {})
+        new_raw["cluster_count"] = len(idxs)
+        new_raw["cluster_price_min"] = others_min
+        representatives[rep_idx] = replace(rep, item=replace(rep.item, raw=new_raw))
+        dropped.update(i for i in idxs if i != rep_idx)
+
+    return [
+        representatives.get(idx, cand)
+        for idx, cand in enumerate(candidates)
+        if idx not in dropped
+    ]
+
+
+def _title_key(title: str | None) -> str:
+    """标题主键：去空格/标点（含下划线）后的前 12 个字符。"""
+    return re.sub(r"[\W_]+", "", title or "")[:12]
 
 
 def risk_tags_for(item: NormalizedItem) -> list[str]:

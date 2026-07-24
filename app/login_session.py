@@ -10,7 +10,9 @@ from typing import Any
 from uuid import uuid4
 
 from .platforms.base import SiteProfile
-from .platforms.goofish import GOOFISH_PROFILE
+# 0.3b：_payload_indicates_captcha 统一为 8 标记共享版（与 provider_playwright
+# 同一份实现），私有 3 标记版已删除。
+from .platforms.goofish import GOOFISH_PROFILE, _payload_indicates_captcha
 
 try:
     from astrbot.api import logger
@@ -469,11 +471,6 @@ def _payload_requires_login(payload: dict[str, Any]) -> bool:
             "need_login",
         )
     )
-
-
-def _payload_indicates_captcha(payload: dict[str, Any]) -> bool:
-    ret_text = _payload_ret_summary(payload).lower()
-    return any(marker in ret_text for marker in ("captcha", "验证码", "滑块"))
 
 
 # 谓词实现与 provider_playwright 版逐字一致，已收口至 GOOFISH_PROFILE

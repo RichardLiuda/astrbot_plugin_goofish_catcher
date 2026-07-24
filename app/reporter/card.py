@@ -121,9 +121,17 @@ def _render_price_ref(report: "DecisionReport", platform: str, decisions: list) 
 def _render_item_lines(idx: int, decision) -> list[str]:
     item = decision.item
     raw = item.raw or {}
-    lines = [f"{idx}. [{decision.score:.0f}] {item.title}"]
+    title = item.title
+    cluster_count = _safe_int(raw.get("cluster_count"))
+    if cluster_count > 1:
+        title = f"{title}（同店同款 ×{cluster_count}）"
+    lines = [f"{idx}. [{decision.score:.0f}] {title}"]
 
-    meta = [f"💰 {_fmt_price(item.price)} 元"]
+    price_text = f"💰 {_fmt_price(item.price)} 元"
+    cluster_min = _safe_float(raw.get("cluster_price_min"))
+    if cluster_min is not None and cluster_min < float(item.price):
+        price_text += f"（同店最低 ¥{_fmt_price(cluster_min)}）"
+    meta = [price_text]
     if decision.price_note:
         meta.append(decision.price_note)
     shop = str(raw.get("shopName") or "").strip()
@@ -147,6 +155,20 @@ def _render_item_lines(idx: int, decision) -> list[str]:
     if item.url:
         lines.append(f"   🔗 {item.url}")
     return lines
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _fmt_price(value: float) -> str:

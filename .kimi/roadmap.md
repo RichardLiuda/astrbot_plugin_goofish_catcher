@@ -34,7 +34,7 @@
 - [x] 1.5b 插件内淘宝订阅：`build_providers()` 平台路由表（淘宝独立 storage_state/profile 目录，远程模式跳过）；scheduler 按 sub.platform 路由（无 provider 时 PLATFORM_UNAVAILABLE 暂停+告警）；深度分析按 item_id 前缀路由 + `supports_item_detail=False` 短路；`goofish_create_subscription` 加 platform 参数；admin 校验（未启用报错/间隔≥1800s/平台不可改）；通知文案按平台显示名（【淘宝建议】）；淘宝收藏优雅跳过；`taobao_enabled` 配置四同步。9 个路由测试全绿
 
 ### 阶段 0 剩余（顺延）
-- [ ] 0.3b 详情解析入档案：`_build_deep_analysis_result`/`_find_item_detail_payload`/`_classify_credit`/图片提取（~400 行）移入 profile 钩子，provider_playwright 留 re-export 兼容（test_provider_playwright_detail_analysis 护行为）；顺带统一 `_payload_indicates_captcha` 双版本差异（provider 8 标记 vs login_session 3 标记）
+- [x] 0.3b 详情解析入档案（2026-07-23 完成，纯重构零行为变化）：`_build_deep_analysis_result`/`_find_item_detail_payload`/`_classify_credit`/`_extract_image_urls` 等四件套从引擎逐字搬进 goofish.py 接成 `GOOFISH_PROFILE.parse_detail_page`；引擎 `analyze_item_detail` 两平台统一走钩子，留 re-export 别名保既有测试；`_payload_indicates_captcha` 统一为 8 标记版（login_session 私有 3 标记版删除——新版是旧版超集且修了"风控被误判 ok"的假阳性）；受控基线对照改动前后同为 177/1；有头真实回归：闲鱼详情卖家/信用/想要数提取一致
 - [x] 0.4 多 provider 容器（随 1.5b 完成）：build_providers() -> dict[str, SearchProvider]，scheduler 按 sub.platform 路由；单平台行为不变
 
 ### 阶段 2：意图引擎 + 决策卡片（核心差异化，2026-07-23 完成）
@@ -43,6 +43,7 @@
 - [x] 2.3 `app/aggregator/aggregate.py`：平台内去重 + 风险标签（闲鱼二手词/淘宝旗舰 vs C店）+ LLM/启发式排序（宁缺毋滥）
 - [x] 2.4 `app/reporter/card.py`：Markdown 决策卡片，降级提示+💡替代建议+"N 条未进推荐"平台露面+失败平台节
 - [x] 2.5 `buyagent_purchase_decision` llm_tool（main.py，第 18 个工具）+ local_lab `decide` 命令（LAB_LLM_* 接任意 OpenAI 兼容 LLM，无配置走启发式）；test_purchase_decision.py 31 用例全绿；lab 实测双平台卡片（66 候选→top5 淘宝+闲鱼另有 30 条露面）
+- [x] 2.6 聚合层同店聚类（2026-07-23）：`cluster_same_shop`——同平台内 shopName 相同且标题主键（去标点前 12 字）相似者归并为一条，保留最高分者记 `cluster_count`/`cluster_price_min`，卡片显示"同店同款 ×N / 同店最低 ¥X"；空 shopName/空主键不聚类；接入 purchase.py（DecisionItem 组装后、rank 前）
 
 ### 阶段 3（按需）
 慢慢买逆向 API + KV 缓存表（URL MD5，TTL 1h，仅服务新品链接）；京东适配器（非 mtop，独立引擎）；多平台订阅 UI；worker 协议加 platform 字段；Admin 平台状态面板；每平台速率限制。
