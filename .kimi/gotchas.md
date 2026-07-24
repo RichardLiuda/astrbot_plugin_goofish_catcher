@@ -22,7 +22,7 @@
 - 闲鱼登录**不会**给 .taobao.com 域播种 cookie（cookie2=False）→ 登录态按平台隔离（已定决策）。
 - 淘宝允许**访客搜索**，但新浏览器指纹必弹滑块；手动过后页面正常。
 - 闲鱼式 DOM 提取直接套淘宝会错配：标题抓成角标（"品牌旗舰店/分期免息"）、价格误匹配（¥24.00 / ¥5080 万拼接爆炸）、混入 `click.simba.taobao.com` 广告链接——这些都要在 TaobaoProfile 里解决。
-- 实验脚本：`scripts/local_lab.py {login|check|search|search-taobao|sso}`，产物在 `local_data/`（含 cookie，已 gitignore）。日志级别 `LAB_LOG=INFO`。
+- 实验脚本：`scripts/local_lab.py {login|login-taobao|check|search|search-taobao|watch-taobao|decide|sso|probe-detail|detail-taobao}`，产物在 `local_data/`（含 cookie，已 gitignore）。日志级别 `LAB_LOG=INFO`；decide 可配 `LAB_LLM_BASE_URL/API_KEY/MODEL` 接任意 OpenAI 兼容 LLM（无配置走启发式）。
 
 ## 淘宝适配实战经验（2026-07-21，1.1 落地验证）
 

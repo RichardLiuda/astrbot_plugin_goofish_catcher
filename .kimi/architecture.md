@@ -1,11 +1,11 @@
-# 架构与数据流（截至 v3.6.0 + 阶段 0.1 改造）
+# 架构与数据流（截至 阶段 0-2 多平台改造完成 + 0.3b）
 
 > 范式：每个模块对应什么功能、数据从哪进从哪出、涉及哪些表/字段、用户动作如何流转到这一层。
 
 ## 一句话定位
 
 AstrBot 插件「闲鱼蹲蹲助手」：LLM 工具调用 + 关键词订阅监控 + LLM 推荐排序。
-**正在改造为多平台采购决策 Agent**（淘宝优先，见 roadmap.md）。
+**已是多平台采购决策 Agent**：闲鱼 + 淘宝（搜索/订阅/登录/详情/决策卡片全通），新平台只加 SiteProfile。
 
 ## 部署形态（provider_mode，与电商平台无关）
 
@@ -17,7 +17,7 @@ AstrBot 插件「闲鱼蹲蹲助手」：LLM 工具调用 + 关键词订阅监�
 | 文件 | 功能 | 数据进 → 出 |
 |---|---|---|
 | `provider.py` | `SearchProvider` Protocol + `build_provider`（单平台，兼容保留）+ `build_providers`（平台路由表 dict，1.5b 起：淘宝独立会话目录，远程模式跳过） | settings → dict[platform, provider] |
-| `provider_playwright.py` | 核心抓取引擎：真实 Chromium 渲染 + XHR 嗅探；平台特数据全部读 `self._profile`（0.3a 起）；`analyze_item_detail` 对 `supports_item_detail=False` 的平台短路（1.5b 起） | keyword → `list[NormalizedItem]`；cookie 从 storage_state.json/browser_profile 进，操作后回写 |
+| `provider_playwright.py` | 核心抓取引擎：真实 Chromium 渲染 + XHR 嗅探；平台特数据全部读 `self._profile`（0.3a 起）；`analyze_item_detail` 统一走 `profile.parse_detail_page` 钩子（0.3b 起，两平台同路径） | keyword → `list[NormalizedItem]`；cookie 从 storage_state.json/browser_profile 进，操作后回写 |
 | `provider_remote.py` | 远程模式的 HTTP 客户端 | SearchProvider 调用 → REST `/v1/*` |
 | `provider_retry.py` | 仅 CAPTCHA 重试（≤2 次，间隔 1s） | — |
 | `intent/engine.py` | 意图引擎：LLM 拆解自然语言→关键词/属性/预算/降级阶梯，启发式兜底（2.x 起） | 文本 → PurchaseIntent（llm_call 可注入，失败必回退） |
@@ -27,7 +27,7 @@ AstrBot 插件「闲鱼蹲蹲助手」：LLM 工具调用 + 关键词订阅监�
 | `provider_agent.py` | LLM 兜底提取（AX 树→商品/登录态/收藏按钮） | AX 文本 + llm_call → JSON |
 | `browser_agent.py` | `GofishBrowserAgent`：独立 Chromium 的 ReAct 循环，对应 llm_tool `goofish_browser_task` | task 描述 → 多步浏览器动作 |
 | `types.py` | 全部领域 dataclass + ProviderError | `DEFAULT_PLATFORM="goofish"`（阶段 0.1 起） |
-| `platforms/` | 多平台适配层：`registry.py`=item_id 归属+商品 URL+URL 工具收口；`base.py`=`SiteProfile`（21 数据字段+6 钩子，含可选 `parse_dom_card`/`dom_card_extractor_js`）；`goofish.py`=闲鱼档案；`taobao.py`=淘宝档案（SSR→DOM 定制提取，1.1 已验证） | provider_playwright 经 profile 读平台特数据，新平台只加档案 |
+| `platforms/` | 多平台适配层：`registry.py`=item_id 归属+商品 URL+URL 工具收口；`base.py`=`SiteProfile`（数据字段+钩子：搜索 URL/auth 判定/DOM 提取/详情解析等，随平台按需实现）；`goofish.py`=闲鱼档案（含详情解析四件套，0.3b 迁入）；`taobao.py`=淘宝档案（SSR→DOM 搜索提取 1.1 + `var b` JSON 详情解析 1.3，均实测） | provider_playwright 经 profile 读平台特数据，新平台只加档案 |
 | `config.py` | `PluginSettings` 加载（AstrBot config + admin_runtime_config.json overlay，overlay 永远赢） | dict → 强类型 settings |
 | `storage.py` | `SubscriptionStorage`（aiosqlite + WAL + 写锁 + user_version 迁移） | 见下方 DB schema |
 | `scheduler.py` | `MonitoringScheduler`：自研 asyncio 队列轮询订阅；**按 `sub.platform` 路由 provider**（dict 注入，1.5b 起；无 provider 时 PLATFORM_UNAVAILABLE 暂停+告警）；深度分析按 item_id 前缀路由 | 到期订阅 → 搜索 → 检测 → 推荐 → 通知；写 items/price_history/market_price/notifications |
@@ -38,9 +38,19 @@ AstrBot 插件「闲鱼蹲蹲助手」：LLM 工具调用 + 关键词订阅监�
 | `remote_auth_recovery.py` | 会话级登录恢复状态机（**按平台分 flow**，P0 起：淘宝订阅暂停→推淘宝二维码→只恢复淘宝订阅） | ProviderError + platform → 用户消息 → confirm |
 | `admin_service.py` / `admin_server.py` / `admin_types.py` | Admin WebUI facade + FastAPI（8790） | storage/scheduler → REST → Preact 前端 |
 | `activity_monitor.py` | 内存态任务看板（admin 展示用） | — |
-| `main.py` | **全部 17 个 llm_tool 必须在此**（AstrBot 校验 handler.__module__）+ 11 个 /闲鱼 子命令 + 引用收藏 | 用户消息 ↔ 上述全部组件 |
+| `main.py` | **全部 18 个 llm_tool 必须在此**（AstrBot 校验 handler.__module__）+ 11 个 /闲鱼 子命令 + 引用收藏 | 用户消息 ↔ 上述全部组件 |
 
 ## 核心数据流
+
+### 采购决策卡片（llm_tool `buyagent_purchase_decision`，2.x 起）
+```
+自然语言需求 → intent/engine 拆解（关键词/属性/预算/降级阶梯 L0-L3）
+  → purchase.py：asyncio.gather 并发搜 providers 字典（单平台 20s 超时+异常隔离）
+  → 精确匹配为空 → 逐级降级重搜 → dedupe → 同店聚类（同店同款 ×N）
+  → aggregator：风险标签 + LLM/启发式排序（宁缺毋滥）
+  → reporter/card.py：Markdown 卡片（降级提示/平台分节/"N 条未进推荐"/失败平台节）
+  → 合并转发/纯文本发送；工具返回 LLM 摘要
+```
 
 ### 实时搜索（llm_tool `goofish_search_live`）
 ```
