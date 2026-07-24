@@ -25,6 +25,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -48,9 +49,10 @@ from app.config import PROVIDER_MODE_PLAYWRIGHT_LOCAL, PluginSettings
 from app.detector import evaluate_price_drop
 from app.login_session import GoofishLoginSession
 from app.platforms import TAOBAO_PROFILE
+from app.platforms.registry import extract_item_id_from_url, make_item_id
 from app.provider_playwright import PlaywrightSearchProvider
 from app.storage import SubscriptionStorage
-from app.types import ProviderError, ProviderErrorCode
+from app.types import NormalizedItem, ProviderError, ProviderErrorCode
 
 logging.basicConfig(
     level=os.environ.get("LAB_LOG", "WARNING").upper(),
@@ -405,6 +407,94 @@ async def cmd_watch_taobao(keyword: str, interval: int, max_cycles: int, headles
     return 0
 
 
+async def cmd_probe_detail(url: str, headless: bool) -> int:
+    """淘宝详情页探针（1.3 侦察用）：dump payload/HTML/截图，列出命中的 mtop API 名。"""
+    state = TAOBAO_STORAGE_STATE if TAOBAO_STORAGE_STATE.exists() else None
+    settings = _make_settings(headless=headless)
+    settings.playwright_storage_state_path = state
+    provider = PlaywrightSearchProvider(settings, profile=TAOBAO_PROFILE)
+    try:
+        context, should_close = await provider._open_operation_context()
+        page = await context.new_page()
+        payloads: list[dict] = []
+
+        async def _on_response(response) -> None:
+            try:
+                if "json" not in (response.headers.get("content-type") or ""):
+                    return
+                payloads.append({"url": response.url, "data": await response.json()})
+            except Exception:
+                return
+
+        page.on("response", lambda r: asyncio.create_task(_on_response(r)))
+        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_timeout(3000)
+        await page.mouse.wheel(0, 1500)
+        await page.wait_for_timeout(3000)
+        html = await page.content()
+
+        slug = re.sub(r"[^0-9A-Za-z]+", "_", url)[-40:] or "detail"
+        (LOCAL_DATA / f"probe_{slug}.html").write_text(html, encoding="utf-8")
+        (LOCAL_DATA / f"probe_{slug}.json").write_text(
+            json.dumps(payloads, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        await page.screenshot(path=str(LOCAL_DATA / f"probe_{slug}.png"))
+
+        apis = sorted(
+            {
+                m.group(1)
+                for p in payloads
+                if (m := re.search(r"/h5/([^/]+)/\d+(?:\.\d+)*/", p["url"]))
+            }
+        )
+        print(f"[PROBE] payloads={len(payloads)} html={len(html)} 快照=probe_{slug}.html/.json/.png")
+        print(f"[PROBE] mtop APIs ({len(apis)}):")
+        for api in apis:
+            print(f"  - {api}")
+        return 0
+    finally:
+        await provider.close()
+
+
+async def cmd_detail_taobao(url: str, headless: bool) -> int:
+    """淘宝详情页深度分析（1.3 验证用）：打印店铺信用与 SKU 真实价目表。"""
+    state = TAOBAO_STORAGE_STATE if TAOBAO_STORAGE_STATE.exists() else None
+    settings = _make_settings(headless=headless)
+    settings.playwright_storage_state_path = state
+    provider = PlaywrightSearchProvider(settings, profile=TAOBAO_PROFILE)
+    try:
+        raw_id = extract_item_id_from_url(url) or "unknown"
+        item = NormalizedItem(
+            item_id=make_item_id("taobao", raw_id),
+            title=url,
+            price=0.0,
+            url=url,
+            platform="taobao",
+        )
+        result = await provider.analyze_item_detail(item=item, timeout_sec=45)
+        print(f"[DETAIL] status={result.status} credit={result.credit_status}")
+        print(f"  卖家: {result.seller_name} | 信用: {result.seller_credit}")
+        print(f"  结论: {result.credit_reason}")
+        print(f"  摘要: {result.summary}")
+        print(f"  风险: {result.risk or '-'}")
+        print(f"  图片: {len(result.image_urls)} 张")
+        raw = result.raw or {}
+        sku_table = raw.get("sku_table") or []
+        if sku_table:
+            print(f"  SKU 档（共 {raw.get('sku_count', len(sku_table))} 档，"
+                  f"¥{raw.get('price_min')}~¥{raw.get('price_max')}）:")
+            for sku in sku_table[:8]:
+                note = sku.get("quantityText") or ""
+                print(f"    - {sku.get('label')}: ¥{sku.get('price')} {note}")
+        return 0
+    except ProviderError as exc:
+        print(f"[DETAIL] {exc.code.value}: {exc.message}")
+        return 1
+    finally:
+        await provider.close()
+
+
 async def cmd_sso(keyword: str, headless: bool) -> int:
     if not STORAGE_STATE.exists():
         print("[SSO] 没有已存会话，先运行 login。")
@@ -658,6 +748,18 @@ def main() -> int:
         return asyncio.run(
             cmd_decide(requirement, top_k, headless="--headless" in rest)
         )
+    if cmd == "probe-detail":
+        url = positional[0] if positional else ""
+        if not url:
+            print('用法: probe-detail "https://item.taobao.com/item.htm?id=..." [--headless]')
+            return 2
+        return asyncio.run(cmd_probe_detail(url, headless="--headless" in rest))
+    if cmd == "detail-taobao":
+        url = positional[0] if positional else ""
+        if not url:
+            print('用法: detail-taobao "https://item.taobao.com/item.htm?id=..." [--headless]')
+            return 2
+        return asyncio.run(cmd_detail_taobao(url, headless="--headless" in rest))
     if cmd == "sso":
         keyword = positional[0] if positional else "RTX 5090"
         # 默认有头：第一次接触淘宝，看得见页面、能手动过滑块，对实验更有价值

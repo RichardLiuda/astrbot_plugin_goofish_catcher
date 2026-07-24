@@ -464,11 +464,19 @@ class PlaywrightSearchProvider:
                 )
                 if page_error is not None:
                     raise page_error
-                detail = _build_deep_analysis_result(
-                    item=item,
-                    payloads=captured_payloads,
-                    page_title=_normalize_item_page_title(await page.title()),
-                )
+                if self._profile.parse_detail_page is not None:
+                    # 平台定制详情解析（如淘宝 SSR 页面）：钩子必须总是返回结果
+                    # （失败时给保守结果），不走闲鱼默认 payload 解析。
+                    html = await page.content()
+                    detail = self._profile.parse_detail_page(
+                        html, captured_payloads, item
+                    )
+                else:
+                    detail = _build_deep_analysis_result(
+                        item=item,
+                        payloads=captured_payloads,
+                        page_title=_normalize_item_page_title(await page.title()),
+                    )
                 await self._persist_context_storage_state(context)
                 return detail
             except TimeoutError as exc:

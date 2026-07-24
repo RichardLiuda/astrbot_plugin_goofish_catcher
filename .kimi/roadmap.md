@@ -26,7 +26,7 @@
 ### 阶段 1：淘宝适配器（提前于 0.3b/0.4 执行——用第二个平台验证 SiteProfile 抽象）
 - [x] 1.1 TaobaoProfile（2026-07-21 完成）：`app/platforms/taobao.py`——s.taobao.com 搜索 URL、`a[href*='item.htm']` 卡片选择器、DOM 字段规则（title 属性取标题/priceInt+priceFloat 拼价格/shopName/realSales 进 raw）、host 白名单过滤 click.simba 广告；引擎新增 `parse_dom_card`/`dom_card_extractor_js` 可选钩子（base.py）；`extract_item_id_from_url`/`normalize_url` 下沉 registry；淘宝 `embedded_login_markers=()`（阿里登录组件常驻页面会误报，只认 login.taobao.com 重定向）；local_lab `search-taobao` 实测 39+ 条正确结果（ID 带前缀、价格/标题/店铺全部正确）。已知遗留：分页选择器未实测（仅单页）、价格 URL 参数名未验证（内存过滤兜底）、SKU 低价引流导致列表价≠真实 SKU 价（聚合层处理）
 - [x] 1.2 登录态隔离落地（2026-07-22/23 完成，即 P0）：登录链路三层（GoofishLoginSession/LocalAuthSessionController/RemoteAuthRecoveryCoordinator）全部 profile 化；淘宝登录落地页 login.taobao.com + 校验接口 mtop.user.getusersimple；恢复流程按平台分 flow、只恢复同平台订阅；start_login/check_login 工具加 platform 参数；quick-login 误判根治（quick_login_enabled=False）；local_lab `login-taobao`。15 新测试全绿，总 109 测试/1 既有错误
-- [ ] 1.3 详情分析保守版（店铺名/天猫 vs C 店）；favorite_item 先 unsupported
+- [x] 1.3 详情分析（2026-07-23 完成，超出保守版）：实测淘宝详情页为 SSR（无详情 mtop 接口），`SiteProfile.parse_detail_page` 钩子解析 HTML 内嵌 `var b={...}` JSON——店铺三件套（sellerNick/DSR/体验分/店铺类型）、SKU 全档真实价目表（含无货标注，低价引流无处遁形）、主图、信用规则与风险提示；supports_item_detail=True；test_taobao_detail.py 31 用例全绿 + 双真实链接实测通过（天猫 12 档 ¥2399~11999 / C店 23 档 ¥18000~32500）。favorite_item 仍 unsupported（后续单独做）
 - [ ] 1.4 已知错配修复：角标误当标题、价格拼接爆炸（实证案例见 gotchas.md）
 
 ### 阶段 1.5：淘宝订阅接入插件（0.4 提前，2026-07-21 完成）

@@ -216,22 +216,17 @@ class BuildProvidersTest(unittest.TestCase):
 
 
 class DetailAnalysisShortCircuitTest(unittest.IsolatedAsyncioTestCase):
-    async def test_taobao_profile_short_circuits_without_browser(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            settings = build_settings(Path(tmpdir))
-            provider = PlaywrightSearchProvider(settings, profile=TAOBAO_PROFILE)
-            result = await provider.analyze_item_detail(
-                item=NormalizedItem(item_id="taobao:1", title="t", price=1.0, url="u"),
-                timeout_sec=5,
-            )
-            self.assertEqual(result.status, "ok")
-            self.assertEqual(result.credit_status, "unknown")
-            self.assertIn("暂未支持深度分析", result.credit_reason)
-            self.assertEqual(result.item_id, "taobao:1")
-            # 未启动浏览器
-            self.assertIsNone(provider._playwright)
-            self.assertIsNone(provider._browser)
-            self.assertIsNone(provider._persistent_context)
+    async def test_taobao_detail_hook_wired_and_safe_without_browser(self) -> None:
+        # 1.3 起淘宝支持详情分析：profile 必须接好钩子；
+        # 垃圾 HTML 直接调钩子也必须安全返回保守结果（不抛异常、无需浏览器）。
+        self.assertTrue(TAOBAO_PROFILE.supports_item_detail)
+        self.assertIsNotNone(TAOBAO_PROFILE.parse_detail_page)
+
+        item = NormalizedItem(item_id="taobao:1", title="t", price=1.0, url="u")
+        result = TAOBAO_PROFILE.parse_detail_page("<html>no data here</html>", [], item)
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.credit_status, "unknown")
+        self.assertEqual(result.item_id, "taobao:1")
 
 
 class SchedulerPlatformRoutingTest(unittest.IsolatedAsyncioTestCase):

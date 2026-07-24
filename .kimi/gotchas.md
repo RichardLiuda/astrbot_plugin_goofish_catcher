@@ -31,7 +31,7 @@
 - 淘宝风控惩罚页走 `cf.aliyun.com/nocaptcha/initialize.jsonp`，被惩罚的 mtop 接口是 `mtop.alibaba.fc.api.maoxland.*`——说明淘宝搜索**也会发 mtop XHR**，未惩罚时 payload 层可能有货（后续可研究）。
 - **登录落地页 ≠ 登录态探测页**（P0 实测踩坑）：淘宝登录页是纯登录页，`validate_login` 若 goto 它会把已登录用户拖回去、且校验接口（getusersimple 只在内容页触发）永远不命中。故 `SiteProfile.validate_probe_url`：落地页展示二维码、探测页验证登录态；闲鱼两者同一页（搜索页）无需设置。等待循环里兜底校验前要先判"当前是否仍在登录页"，否则会把二维码从用户屏幕上拖走。
 - 淘宝**真实登录态下搜索有头即通、无滑块**（cookie2/unb/_tb_token_ 齐全时）；但 **headless 即使有真实会话也必弹滑块**——淘宝风控认浏览器指纹胜过认 cookie，生产必须保持有头（与闲鱼同）。
-- 淘宝列表价是 SKU 区间最低价，存在低价引流（如 ¥2768 的"5090D"实为 5070Ti 档位）——列表价≠真实到手价，聚合/比价层必须知道这一点。
+- 淘宝列表价是 SKU 区间最低价，存在低价引流（如 ¥2768 的"5090D"实为 5070Ti 档位）——列表价≠真实到手价。**1.3 起可用详情分析拿 SKU 全档真实价**：详情页是 SSR，数据在 HTML 内嵌 `var b={...}` JSON（`loaderData.home.data.res`：seller/DSR/item.images/skuBase.props+skus/skuCore.sku2info）；注意 sku2info 的键在天猫是下标、C店混有 skuId 键（实现已双兼容）；体验分在 `res.componentsVO.storeCardVO`。侦察用 `probe-detail`，验证用 `detail-taobao`。
 - `sso` 探针命令的 provider 用的是**闲鱼档案**（历史原因），其提取结果不代表 TaobaoProfile；淘宝提取以 `search-taobao` 为准。
 
 ## AstrBot 插件机制红线

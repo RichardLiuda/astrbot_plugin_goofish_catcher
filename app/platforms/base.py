@@ -47,3 +47,7 @@ class SiteProfile:
     # 访客可用平台（淘宝）应关闭：次要接口的 SESSION_EXPIRED 不代表搜索被墙，
     # 只认 login.* 重定向才是真登录墙。
     auth_on_payload_markers: bool = True
+    # 可选：详情页解析钩子（html, payloads, item) -> DeepAnalysisResult。
+    # 设置后引擎的 analyze_item_detail 直接使用其结果（不再走闲鱼默认 payload 解析）；
+    # 解析失败也应返回保守结果而不是 None。淘宝 SSR 页面走此路径（1.3 起）。
+    parse_detail_page: "Callable[[str, list, NormalizedItem], DeepAnalysisResult] | None" = None

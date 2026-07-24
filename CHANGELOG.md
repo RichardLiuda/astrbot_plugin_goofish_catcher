@@ -24,6 +24,7 @@
 - P0 实测修复：`SiteProfile` 新增 `validate_probe_url`（登录落地页与登录态探测页分离）——淘宝登录页是纯登录页，登录态校验改走搜索页（`mtop.user.getusersimple` 仅在内容页触发）；真实淘宝登录态下有头搜索验证通过（无滑块）。
 - P1 体验修复（AstrBot 实测反馈）：`check_subscription` 按平台路由 provider，重复触发返回友好提示而非报错；`check_login_state` 冷启动不再直接报 error；淘宝间隔下限改为可配置 `taobao_min_interval_sec`（创建/更新一致生效）；不支持详情分析的平台跳过节流 sleep 与占位缓存；浏览器被用户手动关闭后自动检测并重拉（不再连环 UNKNOWN 报错）。
 - 2.x 冒烟修复：意图启发式的预算识别改为必须有上下文锚点（预算/以内/元，修复"RTX 5090"被误吞为预算 ¥5090）；单平台搜索超时默认 10s→20s（对齐引擎真实耗时）；`SiteProfile.auth_on_payload_markers`（淘宝=False）——访客可用平台不再因次要接口的 SESSION_EXPIRED 误判 AUTH_REQUIRED，只认真登录墙重定向。
+- 阶段 1.3（淘宝详情分析）：`SiteProfile.parse_detail_page` 详情页解析钩子（闲鱼默认路径零改动）；淘宝详情页实测为 SSR（无详情 mtop 接口），解析 HTML 内嵌 `var b={...}` JSON（`loaderData.home.data.res`）——提取店铺三件套（sellerNick/DSR 三项/creditLevel/体验分）、SKU 全档真实价目表（props 维度解码 + sku2info 价格库存，skuId/下标双键兼容）、主图；信用规则（DSR 全 ≥4.8→good、有 <4.5→bad、旗舰店上调）；风险提示（C店低分/SKU 价差>3 倍引流/部分档位无货）；`TAOBAO_PROFILE.supports_item_detail=True`（调度器对淘宝订阅恢复真实深度分析，替代原"暂未支持"占位）。
 - 多平台改造阶段 1.1（淘宝搜索适配）：`app/platforms/taobao.py` 淘宝档案落地——`SiteProfile` 新增 `parse_dom_card` / `dom_card_extractor_js` 可选钩子，淘宝 SSR 搜索页走 DOM 定制提取（title 属性取标题、priceInt+priceFloat 拼价格、店铺名/销量进 `raw`），`click.simba.taobao.com` 广告链接在选择器层与解析层双重过滤；`extract_item_id_from_url` / `normalize_url` 下沉至 `platforms/registry.py` 共享；错误消息按 `profile.display_name` 参数化（不再硬编码 "goofish"）。本地实测淘宝搜索返回正确结果（访客态，滑块手动过后）。淘宝商品 ID 带 `taobao:` 前缀，与闲鱼 ID 空间隔离。已知边界：分页与价格 URL 参数未实测（单页搜索 + 内存过滤兜底）；列表价为 SKU 区间最低价。
 
 ### Added
@@ -31,6 +32,7 @@
 - 新增 `test_storage_platform.py`：覆盖 v7 schema、同关键词跨平台订阅、市场均价按平台隔离、v6 老库迁移升级。
 - 新增 `test_scheduler_platform_routing.py`（阶段 1.5b）：provider 路由表构建、淘宝深度分析短路、scheduler 双平台路由与 PLATFORM_UNAVAILABLE 暂停。
 - 新增 2.x 采购决策管线：`app/intent/engine.py`（LLM 意图解析 + 降级阶梯，启发式兜底）、`app/aggregator/aggregate.py`（去重/风险标签/LLM+启发式排序）、`app/reporter/card.py`（Markdown 决策卡片，含降级提示与"N 条未进推荐"平台露面）、`app/purchase.py`（编排服务：并发搜索→空结果逐级降级→聚合排序，单平台超时/异常隔离）；`main.py` 新 llm_tool `buyagent_purchase_decision`（自然语言→决策卡片，合并转发/纯文本发送）；`scripts/local_lab.py` 新增 `decide` 命令（支持 `LAB_LLM_*` 环境变量接任意 OpenAI 兼容 LLM，无配置走启发式）。配套 `test_purchase_decision.py`（31 用例）。
+- 新增 `test_taobao_detail.py`（阶段 1.3，31 用例）：淘宝详情解析（店铺类型/DSR/SKU 价目/价差风险/烂结构兜底）；local_lab 新增 `probe-detail`（详情页结构侦察）与 `detail-taobao`（详情分析验证）命令。
 - 新增 `app/platforms/registry.py`（阶段 0.2）：item_id 平台归属规则（裸 ID 视为 goofish 以兼容存量，新平台必须带 `{platform}:` 前缀）与商品 URL 构建的唯一收口；`make_item_id` / `split_item_id` / `build_item_url` / `platform_display_name`。配套 `test_platform_registry.py`。
 - 新增 `app/platforms/base.py` 与 `app/platforms/goofish.py`（阶段 0.3a）：`SiteProfile` 站点档案数据类（21 个数据字段 + 4 个钩子函数）与闲鱼档案实例，为未来淘宝等档案的接入点。
 - 新增 `app/platforms/taobao.py`（阶段 1.1）：淘宝档案与 DOM 提取钩子；配套 `test_taobao_profile.py`；`scripts/local_lab.py` 新增 `search-taobao` 命令与 sso 探针自动轮询过验证能力。
