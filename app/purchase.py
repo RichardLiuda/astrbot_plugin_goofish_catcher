@@ -53,6 +53,9 @@ class DecisionReport:
     summary: str
     # 各平台在去重后的候选总数（含未进 top_k 的），卡片用来提示"N 条未进推荐"
     platform_counts: dict[str, int] = field(default_factory=dict)
+    # 聚类+排序后未进 top_k 的候选（按分数降序）：给 LLM 回答用户追问用，
+    # 卡片不展示（只提示数量）
+    other_items: list[DecisionItem] = field(default_factory=list)
 
 
 class PurchaseDecisionService:
@@ -136,6 +139,12 @@ class PurchaseDecisionService:
             llm_call=self._llm_call,
             top_k=self._top_k,
         )
+        ranked_ids = {d.item.item_id for d in ranked}
+        other_items = sorted(
+            (d for d in candidates if d.item.item_id not in ranked_ids),
+            key=lambda d: d.score,
+            reverse=True,
+        )
         return DecisionReport(
             intent=intent,
             level_used=hit_level.level,
@@ -148,6 +157,7 @@ class PurchaseDecisionService:
             used_llm=used_llm,
             summary=summary,
             platform_counts=platform_counts,
+            other_items=other_items,
         )
 
     # ── 内部 ─────────────────────────────────────────────────────────────────

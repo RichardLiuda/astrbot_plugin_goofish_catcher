@@ -1359,6 +1359,23 @@ class GoofishCatcherPlugin(Star):
                 for name, msg in report.errors.items()
             )
             parts.append(f"部分平台失败：{err_text}。")
+        if report.other_items:
+            briefs = [
+                f"[{platform_display_name(getattr(d.item, 'platform', '') or '')}] "
+                f"{(d.item.title or '')[:30]} ¥{d.item.price:.2f}"
+                for d in report.other_items[:12]
+            ]
+            suffix = (
+                f" 等 {len(report.other_items)} 条"
+                if len(report.other_items) > 12
+                else ""
+            )
+            parts.append(
+                "未进推荐的候选简表（用户可能追问这些，可直接据此回答，无需重新搜索）："
+                + "；".join(briefs)
+                + suffix
+                + "。"
+            )
         parts.append("采购决策卡片已发送给用户，无需重复展示。")
         return "".join(parts)
 

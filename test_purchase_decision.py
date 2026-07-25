@@ -254,6 +254,29 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(report.items), 1)
         self.assertEqual(report.items[0].item.item_id, "g2")
 
+    async def test_other_items_contains_non_top_candidates(self) -> None:
+        # other_items：聚类+排序后未进 top_k 的候选，供 LLM 回答"未进推荐的都有啥"
+        items = [
+            make_item(f"g{i}", f"RTX5090 显卡 {i}", 9000.0 + i * 100)
+            for i in range(5)
+        ]
+        providers = {PLATFORM_GOOFISH: FakeProvider({"RTX5090": items})}
+        service = PurchaseDecisionService(providers=providers, llm_call=None, top_k=2)
+        report = await service.run("RTX5090")
+        self.assertEqual(len(report.items), 2)
+        self.assertEqual(len(report.other_items), 3)
+        top_ids = {d.item.item_id for d in report.items}
+        self.assertTrue(
+            all(d.item.item_id not in top_ids for d in report.other_items)
+        )
+        scores = [d.score for d in report.other_items]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        # 总数不变：top_k + other = 去重后候选总数
+        self.assertEqual(
+            len(report.items) + len(report.other_items),
+            report.platform_counts[PLATFORM_GOOFISH],
+        )
+
     async def test_all_levels_empty(self) -> None:
         providers = {PLATFORM_GOOFISH: FakeProvider({})}
         service = PurchaseDecisionService(providers=providers, llm_call=None)

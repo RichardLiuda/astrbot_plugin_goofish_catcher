@@ -36,6 +36,7 @@
 - 新增 2.x 采购决策管线：`app/intent/engine.py`（LLM 意图解析 + 降级阶梯，启发式兜底）、`app/aggregator/aggregate.py`（去重/风险标签/LLM+启发式排序）、`app/reporter/card.py`（Markdown 决策卡片，含降级提示与"N 条未进推荐"平台露面）、`app/purchase.py`（编排服务：并发搜索→空结果逐级降级→聚合排序，单平台超时/异常隔离）；`main.py` 新 llm_tool `buyagent_purchase_decision`（自然语言→决策卡片，合并转发/纯文本发送）；`scripts/local_lab.py` 新增 `decide` 命令（支持 `LAB_LLM_*` 环境变量接任意 OpenAI 兼容 LLM，无配置走启发式）。配套 `test_purchase_decision.py`（31 用例）。
 - 新增 `test_taobao_detail.py`（阶段 1.3，31 用例）：淘宝详情解析（店铺类型/DSR/SKU 价目/价差风险/烂结构兜底）；local_lab 新增 `probe-detail`（详情页结构侦察）与 `detail-taobao`（详情分析验证）命令。
 - skills 文档多平台化：新增 `skills/purchase.md`（决策卡片工具说明）与 `skills/platforms.md`（多平台机制/能力矩阵/淘宝数据真相，吸收 TAOBAO_GUIDE 内容）；`skills/README.md` 决策树与工具表覆盖全部 18 个工具；subscribe/favorite/search/data-and-status 四篇补充平台参数与淘宝边界。
+- 决策报告新增 `other_items`（未进 top_k 的候选简表），`buyagent_purchase_decision` 返回给 LLM 的摘要附带该简表——用户追问"未进推荐的都有啥"时 LLM 可直接回答（此前摘要只有数量，LLM 只能重新搜索）。
 - 新增 `app/platforms/registry.py`（阶段 0.2）：item_id 平台归属规则（裸 ID 视为 goofish 以兼容存量，新平台必须带 `{platform}:` 前缀）与商品 URL 构建的唯一收口；`make_item_id` / `split_item_id` / `build_item_url` / `platform_display_name`。配套 `test_platform_registry.py`。
 - 新增 `app/platforms/base.py` 与 `app/platforms/goofish.py`（阶段 0.3a）：`SiteProfile` 站点档案数据类（21 个数据字段 + 4 个钩子函数）与闲鱼档案实例，为未来淘宝等档案的接入点。
 - 新增 `app/platforms/taobao.py`（阶段 1.1）：淘宝档案与 DOM 提取钩子；配套 `test_taobao_profile.py`；`scripts/local_lab.py` 新增 `search-taobao` 命令与 sso 探针自动轮询过验证能力。
