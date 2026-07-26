@@ -4,9 +4,25 @@
 
 ## 远程 Worker 兼容性
 
-当前插件版本（v3.6.0）需要 Worker **≥ v3.5.0**。
+当前插件版本（v3.7.0）需要 Worker **≥ v3.5.0**。
 
 > Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
+
+---
+
+## [3.7.0] - 2026-07-26
+
+### Added
+
+- 无桌面环境自动拉起 Xvfb 虚拟显示（#5）：Linux 下检测不到 `DISPLAY` 时（典型为 Docker 部署的 AstrBot），登录 / 抓取 / 深度搜索的浏览器启动前会自动启动进程级 Xvfb，无需手动 `xvfb-run`。前提是系统已安装 Xvfb（Debian/Ubuntu：`apt-get install -y xvfb`；CentOS/RHEL：`yum install -y xorg-x11-server-Xvfb`），未安装时会给出含安装命令的明确报错。
+- 自启的 Xvfb 意外退出（如容器内存紧张被 OOM killer 杀掉）或插件热重载后，下次启动浏览器时会自动检测并重新拉起，无需重启 AstrBot。
+
+### Fixed
+
+- Chromium 启动参数统一加入 `--disable-dev-shm-usage` 与 `--disable-gpu`：修复 Docker 默认 `/dev/shm`（64MB）过小导致的浏览器崩溃，以及 Xvfb 无真实 GPU 时登录二维码截图概率性失败（"Unable to capture screenshot"）的问题。
+- LLM 浏览器 Agent（深度搜索）启动中途失败时正确清理 Playwright driver 进程，不再泄漏；清理过程被任务取消打断时也能保证资源释放完整。
+
+> 本地模式与远程 Worker 模式均受益；`remote_rest` 模式的 Worker 服务器如同样运行在无桌面环境，`git pull` 后即可获得同样的 Xvfb 自启能力（非必须，协议无变更）。
 
 ---
 
