@@ -4,17 +4,13 @@
 
 ## 远程 Worker 兼容性
 
-当前插件版本（v3.7.0）需要 Worker **≥ v3.5.0**。
+当前插件版本（v3.7.1）需要 Worker **≥ v3.5.0**。
 
 > Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
 
 ---
 
 ## [Unreleased]
-
-### Added
-
-- Xvfb 缺失时自动安装（#5 开箱即用收尾）：无桌面环境下检测到未安装 Xvfb 时，自动通过系统包管理器安装（支持 apt-get / dnf / yum / apk），Docker 用户无需手动进容器执行安装命令，容器重建后下次需要时也会自动重装。安装失败（如无网络、非 root）进入 10 分钟冷却后自动重试，并退回原有的手动安装提示。
 
 ### Fixed（合入前集成评审修复）
 
@@ -57,6 +53,14 @@
 - 新增 `app/platforms/base.py` 与 `app/platforms/goofish.py`（阶段 0.3a）：`SiteProfile` 站点档案数据类（21 个数据字段 + 4 个钩子函数）与闲鱼档案实例，为未来淘宝等档案的接入点。
 - 新增 `app/platforms/taobao.py`（阶段 1.1）：淘宝档案与 DOM 提取钩子；配套 `test_taobao_profile.py`；`scripts/local_lab.py` 新增 `search-taobao` 命令与 sso 探针自动轮询过验证能力。
 - 新增 `scripts/local_lab.py` 本地实验台（登录/搜索/SSO 探针）。
+
+---
+
+## [3.7.1] - 2026-07-26
+
+### Added
+
+- Xvfb 缺失时自动安装（#5 开箱即用收尾）：无桌面环境下检测到未安装 Xvfb 时，自动通过系统包管理器安装（支持 apt-get / dnf / yum / apk），Docker 用户无需手动进容器执行安装命令，容器重建后下次需要时也会自动重装。安装失败（如无网络、非 root）进入 10 分钟冷却后自动重试，并退回原有的手动安装提示。
 
 ---
 
