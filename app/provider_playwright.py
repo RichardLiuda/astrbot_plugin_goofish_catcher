@@ -26,6 +26,7 @@ except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 from .config import PluginSettings
+from .login_session import BASE_LAUNCH_ARGS, ensure_virtual_display
 from .provider import ProviderConfigurationError
 from .provider_agent import (
     extract_items_via_llm,
@@ -67,8 +68,29 @@ class PlaywrightSearchProvider:
         self._operation_lock = asyncio.Lock()
         self._configured_executable_path = self._validate_executable_path()
 
+    async def _ensure_display_for_headed_mode(self) -> None:
+        """Headed 模式下确保有可用的 DISPLAY（无桌面环境时自动拉起 Xvfb）。
+
+        headless 模式不需要 X server，直接跳过 —— 否则未装 Xvfb 的机器上
+        headless 抓取也会被误判为缺依赖。to_thread：Xvfb 启动失败路径最长可
+        阻塞 ~20s，不能卡事件循环。OSError 覆盖 Popen 本身失败（如容器内存
+        紧张时 fork 报 ENOMEM）。
+        """
+        if self.settings.playwright_headless:
+            return
+        try:
+            await asyncio.to_thread(ensure_virtual_display)
+        except (RuntimeError, OSError) as exc:
+            raise ProviderError(
+                ProviderErrorCode.DEPENDENCY_MISSING,
+                str(exc),
+                retry_after_sec=1800,
+            ) from exc
+
     def _build_launch_args(self) -> list[str]:
-        args = ["--disable-blink-features=AutomationControlled"]
+        # 基础 args（含 Docker /dev/shm 与 Xvfb 无 GPU 的 workaround）统一定义在
+        # login_session.BASE_LAUNCH_ARGS，注释也在那里。
+        args = list(BASE_LAUNCH_ARGS)
         if self.settings.playwright_force_direct:
             # Force direct egress and bypass system proxy to reduce IP switching.
             args.extend(
@@ -192,6 +214,7 @@ class PlaywrightSearchProvider:
         async with self._init_lock:
             if self._persistent_context is not None:
                 return self._persistent_context
+            await self._ensure_display_for_headed_mode()
             playwright = await async_playwright().start()
             if playwright is None:
                 raise ProviderError(
@@ -253,6 +276,9 @@ class PlaywrightSearchProvider:
         async with self._init_lock:
             if self._browser is not None:
                 return self._browser
+            # 当前配置下不可达（PLAYWRIGHT_LOCAL 模式必设 user_data_dir，见
+            # config.py），但保持与持久化分支一致：headed 模式同样需要虚拟显示。
+            await self._ensure_display_for_headed_mode()
             playwright = await async_playwright().start()
             if playwright is None:
                 raise ProviderError(

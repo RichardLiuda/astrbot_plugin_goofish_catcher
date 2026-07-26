@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import os
+import selectors
+import shutil
+import socket
+import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -102,8 +109,25 @@ def resolve_save_state_executable_path() -> Path | None:
     return normalize_executable_path(raw_path)
 
 
+# Shared Chromium launch args for every browser this plugin starts (login,
+# scraping provider, LLM browser-use agent) — keep them in one place so the
+# Docker/Xvfb workarounds below apply consistently:
+# --disable-dev-shm-usage: Docker's default /dev/shm is 64MB, too small for
+#   Chromium's shared memory usage; this makes it fall back to /tmp instead of
+#   crashing (e.g. on page.screenshot()) —
+#   see https://github.com/GoogleChrome/lighthouse-ci/issues/193
+# --disable-gpu: under Xvfb (no real GPU) Chromium's GPU compositing path is
+#   unreliable and intermittently fails page.screenshot() with "Unable to
+#   capture screenshot"; forcing software rendering fixes this consistently.
+BASE_LAUNCH_ARGS: tuple[str, ...] = (
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+)
+
+
 def build_login_launch_args(*, force_direct: bool = False) -> list[str]:
-    args = ["--disable-blink-features=AutomationControlled"]
+    args = list(BASE_LAUNCH_ARGS)
     if force_direct:
         args.extend(
             [
@@ -113,6 +137,172 @@ def build_login_launch_args(*, force_direct: bool = False) -> list[str]:
             ]
         )
     return args
+
+
+_VIRTUAL_DISPLAY_START_TIMEOUT_SEC = 10
+_virtual_display_lock = threading.Lock()
+_virtual_display_proc: subprocess.Popen | None = None
+_external_display_logged = False
+# 记录自启 Xvfb 的 DISPLAY 值。放在 os.environ 而非模块全局：AstrBot 热重载插件
+# 会重新 import 本模块（模块全局全部重置），但 os.environ 和自启的 Xvfb 子进程
+# 随宿主进程存续——靠这个标记在重载后仍能识别"这个 DISPLAY 是我们自己起的"，
+# 从而在它死亡后重启，而不是误判为外部显示、永久失效。
+_XVFB_MARKER_ENV = "GOOFISH_XVFB_DISPLAY"
+
+
+def _reap_xvfb(proc: subprocess.Popen) -> None:
+    """Terminate a half-started Xvfb and reap it so it doesn't linger as a
+    zombie until the interpreter's next Popen cleanup pass."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _wait_display_ready(read_fd: int, timeout_sec: float) -> bool:
+    """Wait for Xvfb to write its display number to the -displayfd pipe.
+
+    用 selectors（Linux 上是 epoll）而非 select.select：后者受 FD_SETSIZE=1024
+    限制，长驻进程 fd 号超过 1024 时会直接抛 ValueError。
+    """
+    sel = selectors.DefaultSelector()
+    try:
+        sel.register(read_fd, selectors.EVENT_READ)
+        return bool(sel.select(timeout_sec))
+    finally:
+        sel.close()
+
+
+def _xvfb_display_alive(display: str) -> bool:
+    """Probe whether the X server behind ``display`` (e.g. ":99") still accepts
+    connections on its unix socket. Used after a plugin hot-reload, when the
+    Popen handle for our own Xvfb has been lost with the old module instance."""
+    name = display.lstrip(":").split(".", 1)[0]
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        sock.connect(f"/tmp/.X11-unix/X{name}")
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def ensure_virtual_display() -> None:
+    """Lazily start a process-wide throwaway Xvfb display so headed Playwright
+    browsers can launch on a Linux box with no X server (typical for AstrBot
+    deployed via Docker with no desktop environment).
+
+    Every headed browser this plugin launches (login, the adopted long-lived
+    scraping browser, the LLM browser-use agent) must run headed rather than
+    headless=True, since goofish's passport page detects and blocks headless
+    Chromium. The display is started once per process and left running for
+    the process lifetime — it is cheap, and the adopted login browser keeps
+    using it long after the login step itself finishes. If the Xvfb we started
+    dies (e.g. OOM killer inside a memory-tight container), the next call
+    detects it via poll() and starts a fresh one instead of failing forever.
+    """
+    global _virtual_display_proc, _external_display_logged
+
+    if sys.platform != "linux":
+        return
+
+    with _virtual_display_lock:
+        proc = _virtual_display_proc
+        if proc is not None:
+            if proc.poll() is None:
+                return
+            # 我们启动的 Xvfb 已退出（例如容器内存紧张被 OOM killer 杀掉）。
+            # 丢掉失效的 DISPLAY 并重新启动，否则后续所有 headed 启动会永远失败。
+            logger.warning(
+                "[goofish_catcher][login_session] previously started Xvfb "
+                "(DISPLAY=%s) exited with code %s; restarting",
+                os.environ.get("DISPLAY"),
+                proc.returncode,
+            )
+            _virtual_display_proc = None
+            os.environ.pop("DISPLAY", None)
+            os.environ.pop(_XVFB_MARKER_ENV, None)
+
+        display = os.environ.get("DISPLAY")
+        if display:
+            if display == os.environ.get(_XVFB_MARKER_ENV):
+                # 这是我们之前自启的 Xvfb，但 Popen 句柄已随插件热重载丢失，
+                # 只能通过 unix socket 探活。活着就直接沿用。
+                if _xvfb_display_alive(display):
+                    return
+                logger.warning(
+                    "[goofish_catcher][login_session] previously auto-started "
+                    "Xvfb (DISPLAY=%s) is no longer alive after plugin reload; "
+                    "restarting",
+                    display,
+                )
+                os.environ.pop("DISPLAY", None)
+                os.environ.pop(_XVFB_MARKER_ENV, None)
+            else:
+                # 外部已有 DISPLAY（宿主 X server 或镜像预置的环境变量），跳过自启。
+                # 注意：部分镜像会预置 DISPLAY=:0 却没有真实 X server，这种情况
+                # 浏览器仍会启动失败——log 一句方便排查时定位到这里。
+                if not _external_display_logged:
+                    _external_display_logged = True
+                    logger.info(
+                        "[goofish_catcher][login_session] existing DISPLAY=%s "
+                        "detected, skip auto-starting Xvfb",
+                        display,
+                    )
+                return
+
+        xvfb_path = shutil.which("Xvfb")
+        if xvfb_path is None:
+            raise RuntimeError(
+                "未检测到 DISPLAY 环境变量，且系统未安装 Xvfb（无桌面环境下运行闲鱼登录/抓取浏览器"
+                "需要一个虚拟显示）。请安装后重试，例如 Debian/Ubuntu: "
+                "apt-get install -y xvfb；CentOS/RHEL: yum install -y xorg-x11-server-Xvfb。"
+            )
+
+        read_fd, write_fd = os.pipe()
+        try:
+            try:
+                proc = subprocess.Popen(
+                    [xvfb_path, "-displayfd", str(write_fd), "-screen", "0", "1280x960x24", "-nolisten", "tcp"],
+                    pass_fds=(write_fd,),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            finally:
+                # 无论 Popen 成败都要关父进程侧的写端：成功时让子进程持有唯一
+                # 写端（子进程退出 → read 端立刻 EOF），失败时避免泄漏。
+                os.close(write_fd)
+
+            if not _wait_display_ready(read_fd, _VIRTUAL_DISPLAY_START_TIMEOUT_SEC):
+                _reap_xvfb(proc)
+                raise RuntimeError(
+                    f"启动 Xvfb 虚拟显示超时（{_VIRTUAL_DISPLAY_START_TIMEOUT_SEC}s 内未就绪），"
+                    "请检查系统是否正确安装了 Xvfb"
+                )
+            display_number = os.read(read_fd, 32).decode().strip()
+        finally:
+            # read_fd 的关闭放在最外层 finally：Popen 本身抛异常（如容器内存
+            # 紧张时 fork 报 ENOMEM）时也不泄漏。
+            os.close(read_fd)
+
+        if not display_number:
+            _reap_xvfb(proc)
+            raise RuntimeError("启动 Xvfb 虚拟显示失败，未能获取 display 编号")
+
+        os.environ["DISPLAY"] = f":{display_number}"
+        os.environ[_XVFB_MARKER_ENV] = f":{display_number}"
+        _virtual_display_proc = proc
+        logger.info(
+            "[goofish_catcher][login_session] auto-started Xvfb on display :%s",
+            display_number,
+        )
 
 
 @dataclass(slots=True)
@@ -164,8 +354,11 @@ class GoofishLoginSession:
                 "uv run python -m playwright install chromium chromium-headless-shell"
             ) from exc
 
-        self._playwright = await async_playwright().start()
         try:
+            # to_thread：Xvfb 启动失败路径最长可阻塞 ~20s（等待超时 + reap），
+            # 不能在事件循环线程上同步执行。
+            await asyncio.to_thread(ensure_virtual_display)
+            self._playwright = await async_playwright().start()
             launch_kwargs: dict[str, Any] = {
                 "headless": False,
                 "args": build_login_launch_args(force_direct=self.force_direct),

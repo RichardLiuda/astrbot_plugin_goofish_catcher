@@ -23,6 +23,7 @@ except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 from .provider_agent import _extract_json_object
+from .login_session import BASE_LAUNCH_ARGS, ensure_virtual_display
 
 # ── 全局活跃实例计数 ──────────────────────────────────────────────────────────
 _active_agents: int = 0
@@ -192,77 +193,99 @@ class GofishBrowserAgent:
             caller_stack,
         )
 
-        self._playwright = await async_playwright().start()
-        launch_kwargs: dict[str, Any] = {
-            "headless": self._headless,
-            "args": self._build_launch_args(),
-        }
-        if self._executable_path is not None:
-            launch_kwargs["executable_path"] = str(self._executable_path)
+        # 任一步骤失败（ensure_virtual_display 抛 RuntimeError、launch/new_context
+        # 出错）时 async with 不会调用 __aexit__，这里必须自行清理，否则已启动的
+        # playwright driver 子进程会泄漏、活跃计数也不会减回去。
+        try:
+            if not self._headless:
+                # to_thread：Xvfb 失败路径可阻塞 ~20s，不能卡事件循环
+                await asyncio.to_thread(ensure_virtual_display)
+            self._playwright = await async_playwright().start()
+            launch_kwargs: dict[str, Any] = {
+                "headless": self._headless,
+                "args": self._build_launch_args(),
+            }
+            if self._executable_path is not None:
+                launch_kwargs["executable_path"] = str(self._executable_path)
 
-        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-        logger.info(
-            "[goofish_catcher][browser_agent] Chromium launched — active_agents=%d pid=%s",
-            _active_agents,
-            getattr(getattr(self._browser, "process", None), "pid", "?"),
-        )
+            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+            logger.info(
+                "[goofish_catcher][browser_agent] Chromium launched — active_agents=%d pid=%s",
+                _active_agents,
+                getattr(getattr(self._browser, "process", None), "pid", "?"),
+            )
 
-        context_kwargs: dict[str, Any] = {
-            "viewport": {"width": 1280, "height": 800},
-        }
-        if self._storage_state is not None:
-            context_kwargs["storage_state"] = self._storage_state
+            context_kwargs: dict[str, Any] = {
+                "viewport": {"width": 1280, "height": 800},
+            }
+            if self._storage_state is not None:
+                context_kwargs["storage_state"] = self._storage_state
 
-        self._context = await self._browser.new_context(**context_kwargs)
-        self._page = await self._context.new_page()
+            self._context = await self._browser.new_context(**context_kwargs)
+            self._page = await self._context.new_page()
 
-        # 拦截 JSON 响应，供 extract_items 动作使用（零额外延迟）
-        captured = self._captured_payloads
+            # 拦截 JSON 响应，供 extract_items 动作使用（零额外延迟）
+            captured = self._captured_payloads
 
-        async def _on_response(response) -> None:
-            ct = (response.headers.get("content-type") or "").lower()
-            if "json" not in ct:
-                return
-            try:
-                payload = await response.json()
-                if isinstance(payload, (dict, list)):
-                    captured.append(payload)
-            except Exception:
-                pass
+            async def _on_response(response) -> None:
+                ct = (response.headers.get("content-type") or "").lower()
+                if "json" not in ct:
+                    return
+                try:
+                    payload = await response.json()
+                    if isinstance(payload, (dict, list)):
+                        captured.append(payload)
+                except Exception:
+                    pass
 
-        self._page.on("response", _on_response)
-        return self
+            self._page.on("response", _on_response)
+            return self
+        except BaseException:
+            await self.__aexit__(None, None, None)
+            raise
 
     async def __aexit__(self, *exc_info) -> None:
         global _active_agents
-        for obj, name in [
-            (self._page, "page"),
-            (self._context, "context"),
-            (self._browser, "browser"),
-        ]:
-            if obj is not None:
+        # 清理途中可能被 cancel（如 worker SSE 断连触发 bg_task.cancel()）。
+        # 逐项兜住 CancelledError 保证剩余 close/stop 仍执行、字段与计数一致，
+        # 清理完成后再重抛，不吞掉取消信号。
+        pending_cancel: asyncio.CancelledError | None = None
+        try:
+            for obj, name in [
+                (self._page, "page"),
+                (self._context, "context"),
+                (self._browser, "browser"),
+            ]:
+                if obj is not None:
+                    try:
+                        await obj.close()
+                    except asyncio.CancelledError as e:
+                        pending_cancel = e
+                    except Exception as e:
+                        logger.debug(
+                            "[goofish_catcher][browser_agent] %s close error: %s", name, e
+                        )
+            if self._playwright is not None:
                 try:
-                    await obj.close()
+                    await self._playwright.stop()
+                except asyncio.CancelledError as e:
+                    pending_cancel = e
                 except Exception as e:
                     logger.debug(
-                        "[goofish_catcher][browser_agent] %s close error: %s", name, e
+                        "[goofish_catcher][browser_agent] playwright stop error: %s", e
                     )
-        if self._playwright is not None:
-            try:
-                await self._playwright.stop()
-            except Exception as e:
-                logger.debug(
-                    "[goofish_catcher][browser_agent] playwright stop error: %s", e
-                )
-        self._page = None
-        self._context = None
-        self._browser = None
-        self._playwright = None
-        _active_agents = max(0, _active_agents - 1)
-        logger.info(
-            "[goofish_catcher][browser_agent] Chromium closed — active_agents=%d",
-            _active_agents,
-        )
+        finally:
+            self._page = None
+            self._context = None
+            self._browser = None
+            self._playwright = None
+            _active_agents = max(0, _active_agents - 1)
+            logger.info(
+                "[goofish_catcher][browser_agent] Chromium closed — active_agents=%d",
+                _active_agents,
+            )
+        if pending_cancel is not None:
+            raise pending_cancel
 
     # ── 公开 API ──────────────────────────────────────────────────────────────
 
@@ -672,7 +695,9 @@ class GofishBrowserAgent:
         return "(无法获取页面结构)"
 
     def _build_launch_args(self) -> list[str]:
-        args = ["--disable-blink-features=AutomationControlled"]
+        # 基础 args（含 Docker /dev/shm 与 Xvfb 无 GPU 的 workaround）统一定义在
+        # login_session.BASE_LAUNCH_ARGS，注释也在那里。
+        args = list(BASE_LAUNCH_ARGS)
         if self._force_direct:
             args.extend(
                 [
