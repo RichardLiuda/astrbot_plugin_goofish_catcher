@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,111 @@ _external_display_logged = False
 _XVFB_MARKER_ENV = "GOOFISH_XVFB_DISPLAY"
 
 
+# Xvfb 自动安装：单次安装可能要几十秒（apt-get update + install），失败后
+# 加冷却避免每次 headed 启动都重跑一遍慢路径（provider 的重试间隔是 30 分钟）。
+_XVFB_INSTALL_TIMEOUT_SEC = 600
+_XVFB_INSTALL_RETRY_COOLDOWN_SEC = 600
+_xvfb_install_last_failed_at: float | None = None
+
+
+def _run_pkg_cmd(cmd: list[str], *, env: dict[str, str] | None = None) -> bool:
+    try:
+        result = subprocess.run(
+            cmd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=_XVFB_INSTALL_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "[goofish_catcher][login_session] %s failed: %s", " ".join(cmd), exc
+        )
+        return False
+    if result.returncode != 0:
+        stderr_tail = (result.stderr or b"")[-500:].decode(errors="replace").strip()
+        logger.warning(
+            "[goofish_catcher][login_session] %s exited %s: %s",
+            " ".join(cmd),
+            result.returncode,
+            stderr_tail,
+        )
+        return False
+    return True
+
+
+def _install_xvfb() -> str | None:
+    """尝试用系统包管理器自动安装 Xvfb，成功返回其路径，失败返回 None。
+
+    目标场景是 AstrBot 官方 Docker 镜像内装插件的用户：容器里没法方便地
+    改镜像、装了重建又会丢，所以做成用到时自动装——重建后下次需要时这里
+    会自动重装，保证开箱即用。失败时由调用方给出手动安装提示。
+    """
+    global _xvfb_install_last_failed_at
+
+    if (
+        _xvfb_install_last_failed_at is not None
+        and time.monotonic() - _xvfb_install_last_failed_at
+        < _XVFB_INSTALL_RETRY_COOLDOWN_SEC
+    ):
+        logger.debug(
+            "[goofish_catcher][login_session] skip Xvfb auto-install "
+            "(last attempt failed recently)"
+        )
+        return None
+
+    if shutil.which("apt-get"):
+        env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+        logger.info(
+            "[goofish_catcher][login_session] Xvfb 未安装，尝试通过 apt-get 自动安装"
+            "（首次可能需要几十秒）…"
+        )
+        # slim 镜像默认没有本地包索引，update 失败（如离线镜像源）不立即放弃，
+        # 交给 install 用已有索引再试一次
+        _run_pkg_cmd(["apt-get", "update"], env=env)
+        ok = _run_pkg_cmd(
+            ["apt-get", "install", "-y", "--no-install-recommends", "xvfb"], env=env
+        )
+    elif shutil.which("dnf"):
+        logger.info(
+            "[goofish_catcher][login_session] Xvfb 未安装，尝试通过 dnf 自动安装…"
+        )
+        ok = _run_pkg_cmd(["dnf", "install", "-y", "xorg-x11-server-Xvfb"])
+    elif shutil.which("yum"):
+        logger.info(
+            "[goofish_catcher][login_session] Xvfb 未安装，尝试通过 yum 自动安装…"
+        )
+        ok = _run_pkg_cmd(["yum", "install", "-y", "xorg-x11-server-Xvfb"])
+    elif shutil.which("apk"):
+        logger.info(
+            "[goofish_catcher][login_session] Xvfb 未安装，尝试通过 apk 自动安装…"
+        )
+        ok = _run_pkg_cmd(["apk", "add", "--no-cache", "xvfb"])
+    else:
+        logger.warning(
+            "[goofish_catcher][login_session] 未识别到受支持的包管理器"
+            "（apt-get/dnf/yum/apk），无法自动安装 Xvfb"
+        )
+        _xvfb_install_last_failed_at = time.monotonic()
+        return None
+
+    xvfb_path = shutil.which("Xvfb") if ok else None
+    if xvfb_path:
+        _xvfb_install_last_failed_at = None
+        logger.info(
+            "[goofish_catcher][login_session] Xvfb 自动安装成功: %s", xvfb_path
+        )
+        return xvfb_path
+
+    _xvfb_install_last_failed_at = time.monotonic()
+    logger.warning(
+        "[goofish_catcher][login_session] Xvfb 自动安装失败"
+        "（%d 分钟内不再重试），请手动安装",
+        _XVFB_INSTALL_RETRY_COOLDOWN_SEC // 60,
+    )
+    return None
+
+
 def _reap_xvfb(proc: subprocess.Popen) -> None:
     """Terminate a half-started Xvfb and reap it so it doesn't linger as a
     zombie until the interpreter's next Popen cleanup pass."""
@@ -258,10 +364,14 @@ def ensure_virtual_display() -> None:
 
         xvfb_path = shutil.which("Xvfb")
         if xvfb_path is None:
+            # 开箱即用：Docker 内装插件的用户往往没条件改镜像，先尝试自动安装
+            xvfb_path = _install_xvfb()
+        if xvfb_path is None:
             raise RuntimeError(
                 "未检测到 DISPLAY 环境变量，且系统未安装 Xvfb（无桌面环境下运行闲鱼登录/抓取浏览器"
-                "需要一个虚拟显示）。请安装后重试，例如 Debian/Ubuntu: "
-                "apt-get install -y xvfb；CentOS/RHEL: yum install -y xorg-x11-server-Xvfb。"
+                "需要一个虚拟显示），自动安装未成功（原因见日志）。请手动安装后重试，"
+                "例如 Debian/Ubuntu: apt-get install -y xvfb；"
+                "CentOS/RHEL: yum install -y xorg-x11-server-Xvfb。"
             )
 
         read_fd, write_fd = os.pipe()

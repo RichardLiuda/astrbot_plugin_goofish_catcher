@@ -36,6 +36,7 @@ class EnsureVirtualDisplayTest(unittest.TestCase):
     def setUp(self) -> None:
         login_session._virtual_display_proc = None
         login_session._external_display_logged = False
+        login_session._xvfb_install_last_failed_at = None
         self._saved_env = {key: os.environ.pop(key, None) for key in self._ENV_KEYS}
 
     def tearDown(self) -> None:
@@ -171,6 +172,20 @@ class EnsureVirtualDisplayTest(unittest.TestCase):
         procs[0].terminate.assert_called_once()
         procs[0].wait.assert_called_once()
 
+    def test_auto_install_used_when_xvfb_missing(self) -> None:
+        """Xvfb 缺失时先尝试自动安装，成功后用装好的路径正常拉起。"""
+        with patch.object(login_session.sys, "platform", "linux"), patch(
+            "shutil.which", return_value=None
+        ), patch.object(
+            login_session, "_install_xvfb", return_value="/usr/bin/Xvfb"
+        ) as install, patch(
+            "subprocess.Popen", side_effect=_fake_popen(b"66\n")
+        ) as popen:
+            login_session.ensure_virtual_display()
+        install.assert_called_once()
+        popen.assert_called_once()
+        self.assertEqual(os.environ["DISPLAY"], ":66")
+
     def test_popen_failure_closes_pipe_fds(self) -> None:
         """Popen 本身抛异常（如容器内存紧张 fork 报 ENOMEM）时，管道两端 fd
         都必须关闭，长驻进程反复重试不能累积泄漏。"""
@@ -194,6 +209,69 @@ class EnsureVirtualDisplayTest(unittest.TestCase):
         for fd in pipes[0]:
             with self.assertRaises(OSError):
                 os.fstat(fd)
+
+
+class InstallXvfbTest(unittest.TestCase):
+    def setUp(self) -> None:
+        login_session._xvfb_install_last_failed_at = None
+
+    def tearDown(self) -> None:
+        login_session._xvfb_install_last_failed_at = None
+
+    def test_apt_get_flow_success(self) -> None:
+        run_calls: list = []
+
+        def fake_run(cmd, **kwargs):
+            run_calls.append((cmd, kwargs.get("env")))
+            return unittest.mock.Mock(returncode=0, stderr=b"")
+
+        def fake_which(name):
+            if name == "apt-get":
+                return "/usr/bin/apt-get"
+            if name == "Xvfb":
+                # 只有跑完安装命令后才"存在"
+                return "/usr/bin/Xvfb" if run_calls else None
+            return None
+
+        with patch("shutil.which", side_effect=fake_which), patch(
+            "subprocess.run", side_effect=fake_run
+        ):
+            path = login_session._install_xvfb()
+        self.assertEqual(path, "/usr/bin/Xvfb")
+        self.assertEqual(run_calls[0][0][:2], ["apt-get", "update"])
+        self.assertEqual(run_calls[1][0][:2], ["apt-get", "install"])
+        self.assertIn("xvfb", run_calls[1][0])
+        self.assertEqual(run_calls[1][1]["DEBIAN_FRONTEND"], "noninteractive")
+        self.assertIsNone(login_session._xvfb_install_last_failed_at)
+
+    def test_install_failure_sets_cooldown(self) -> None:
+        def fake_which(name):
+            return "/usr/bin/apt-get" if name == "apt-get" else None
+
+        with patch("shutil.which", side_effect=fake_which), patch(
+            "subprocess.run",
+            return_value=unittest.mock.Mock(
+                returncode=100, stderr=b"E: Unable to locate package xvfb"
+            ),
+        ):
+            self.assertIsNone(login_session._install_xvfb())
+        self.assertIsNotNone(login_session._xvfb_install_last_failed_at)
+        # 冷却期内直接跳过，不再反复执行慢的包管理器命令。
+        # 这里必须同样 patch shutil.which 命中 apt-get：否则在没有包管理器的
+        # 开发机上会走"未识别包管理器"分支，即使冷却逻辑被删测试也照样通过
+        with patch("shutil.which", side_effect=fake_which), patch(
+            "subprocess.run"
+        ) as run:
+            self.assertIsNone(login_session._install_xvfb())
+        run.assert_not_called()
+
+    def test_no_supported_package_manager(self) -> None:
+        with patch("shutil.which", return_value=None), patch(
+            "subprocess.run"
+        ) as run:
+            self.assertIsNone(login_session._install_xvfb())
+        run.assert_not_called()
+        self.assertIsNotNone(login_session._xvfb_install_last_failed_at)
 
 
 if __name__ == "__main__":
