@@ -90,6 +90,8 @@ uv run python -m playwright install chromium chromium-headless-shell
 3. 直接发送一次 `/闲鱼 登录`，按提示扫码完成登录
 4. 使用 `/闲鱼 订阅 <关键词>` 或 `/闲鱼 查询 <关键词>` 开始使用，或者直接向 LLM 说"帮我搜一下……"
 
+如启用了淘宝（`taobao_enabled = true`，仅本地模式支持），发送 `/闲鱼 登录 淘宝` 用手机淘宝 App 扫码登录；淘宝登录态独立保存（`storage_state.taobao.json`），与闲鱼互不影响。
+
 如果你想改用系统 Chrome/Chromium，再额外填写 `playwright_executable_path`。
 
 ### 4. 远程模式最小步骤

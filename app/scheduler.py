@@ -750,8 +750,8 @@ class MonitoringScheduler:
                     else:
                         display_name = platform_display_name(sub.platform)
                         start_hint = f"已尝试启动{display_name}登录恢复流程"
-                        recovery_hint = f"请使用{display_name}登录工具重新发起登录"
-                        retry_hint = f"可稍后使用{display_name}登录工具重试"
+                        recovery_hint = f"可发送 /闲鱼 登录 {display_name}"
+                        retry_hint = f"可稍后发送 /闲鱼 登录 {display_name} 重试"
                     try:
                         await self.remote_auth_coordinator.handle_provider_auth_failure(
                             umo=sub.umo,

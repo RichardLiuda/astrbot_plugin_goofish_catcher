@@ -1002,7 +1002,7 @@ class PlaywrightSearchProvider:
                     )
                     raise ProviderError(
                         ProviderErrorCode.AUTH_REQUIRED,
-                        "authentication required by goofish",
+                        f"authentication required by {self._profile.display_name}",
                     )
                 # 快速进入成功：清除登录前积累的所有 error_flags，重新 goto 重新抓取
                 error_flags.discard("auth")
@@ -1078,6 +1078,10 @@ class PlaywrightSearchProvider:
         timeout = max(1500, min(6000, timeout_ms // 3))
 
         async def _click_text(text: str, *, exact: bool = True) -> bool:
+            # 平台档案未提供该过滤器 label（淘宝多个 label 为空）时直接跳过，
+            # 避免 get_by_text("") 命中任意空文本元素误点。
+            if not text:
+                return False
             try:
                 locator = page.get_by_text(text, exact=exact).first
                 if await locator.count() <= 0:
@@ -1113,7 +1117,7 @@ class PlaywrightSearchProvider:
         timeout_ms: int,
     ) -> None:
         parts = [part.strip() for part in str(region or "").split("/") if part.strip()]
-        if not parts:
+        if not parts or not self._profile.filter_label_region:
             return
         try:
             trigger = page.get_by_text(self._profile.filter_label_region, exact=True).first
@@ -1275,7 +1279,7 @@ class PlaywrightSearchProvider:
         )
 
     async def check_login_state(self, *, timeout_sec: int = 15) -> str:
-        """Probe Goofish and return the current auth state.
+        """Probe the platform site and return the current auth state.
 
         Returns one of:
           ``"ok"``            – browser is reachable and session is valid
@@ -1286,6 +1290,8 @@ class PlaywrightSearchProvider:
         This method is intentionally lightweight: it opens a minimal page,
         checks URL / HTML markers (no CSS selectors, no LLM), and closes the
         page immediately.  Safe to call from a periodic heartbeat task.
+        平台带 validate_probe_url（淘宝）时改探测该页并监听登录态校验接口，
+        否则（闲鱼）维持 base_url + 启发式判定不变。
         """
         # 心跳只探测、不拉起浏览器：未初始化或已被用户手动关闭（已死）时直接
         # 返回 error。否则本地有头模式下，用户关掉窗口后 30 分钟一次的心跳会
@@ -1313,15 +1319,31 @@ class PlaywrightSearchProvider:
             page = await context.new_page()
             error_flags: set[str] = set()
             self._attach_page_state_watchers(page, error_flags)
+            # 访客可用平台（淘宝：embedded/payload/llm 判定全关）在 base_url 上
+            # 对「已登出」不可见——访客首页完全合法，URL/HTML 启发式永远返回 ok。
+            # 这类平台改探测 validate_probe_url 并监听登录态校验接口的 payload
+            # （与 login_session.validate_login 同一信号源），拿到真实登录态。
+            payload_states: set[str] = set()
+            probe_url = self._profile.base_url
+            if self._profile.validate_probe_url:
+                probe_url = self._profile.validate_probe_url
+                self._attach_login_probe_watcher(page, payload_states)
 
             await page.goto(
-                self._profile.base_url,
+                probe_url,
                 wait_until="domcontentloaded",
                 timeout=timeout_ms,
             )
             await self._maybe_wait_for_network_idle(page, timeout_ms)
 
             err = await self._classify_timeout_page_state(page, error_flags=error_flags)
+            if (
+                "auth_required" in payload_states
+                and "ok" not in payload_states
+                and (err is None or err.code == ProviderErrorCode.AUTH_REQUIRED)
+            ):
+                # 校验接口明确报未登录（且页面未同时呈现验证码墙）。
+                return "auth_required"
             if err is None:
                 return "ok"
             if err.code == ProviderErrorCode.AUTH_REQUIRED:
@@ -1584,6 +1606,36 @@ class PlaywrightSearchProvider:
                     )
 
         on("framenavigated", _on_frame_navigated)
+        on("response", _on_response)
+
+    def _attach_login_probe_watcher(self, page, payload_states: set[str]) -> None:
+        """监听 profile.login_status_api_markers 接口的 payload，向
+        check_login_state 汇报真实登录态："auth_required"（SESSION_EXPIRED 等
+        登录失效标记）或 "ok"（ret 为 SUCCESS）。仅用于登录态探测——搜索路径
+        对访客可用平台（auth_on_payload_markers=False）刻意忽略这些标记，
+        因为访客搜索合法；但登录态检查必须如实上报。"""
+        on = getattr(page, "on", None)
+        if not callable(on):
+            return
+        markers = tuple(
+            marker.lower() for marker in self._profile.login_status_api_markers
+        )
+
+        async def _on_response(response) -> None:
+            url = str(getattr(response, "url", "") or "").lower()
+            if not any(marker in url for marker in markers):
+                return
+            try:
+                payload = await response.json()
+            except Exception:
+                return
+            if not isinstance(payload, dict):
+                return
+            if _payload_requires_login(payload):
+                payload_states.add("auth_required")
+            elif _payload_ret_summary(payload).lower().startswith("success"):
+                payload_states.add("ok")
+
         on("response", _on_response)
 
     async def _classify_timeout_page_state(

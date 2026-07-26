@@ -42,7 +42,8 @@ class LocalAuthSession:
     cleanup_profile_dir: bool = True
 
 
-def resolve_local_storage_state_path() -> Path:
+def resolve_local_storage_state_path(platform: str = PLATFORM_GOOFISH) -> Path:
+    """按平台解析本地 storage_state 落地路径（goofish 保持既有固定文件名）。"""
     plugin_data_dir: Path
     if StarTools is not None:
         try:
@@ -66,7 +67,9 @@ def resolve_local_storage_state_path() -> Path:
             / PLUGIN_NAME
         )
     plugin_data_dir.mkdir(parents=True, exist_ok=True)
-    return plugin_data_dir / "storage_state.json"
+    if platform == PLATFORM_GOOFISH:
+        return plugin_data_dir / "storage_state.json"
+    return plugin_data_dir / f"storage_state.{platform}.json"
 
 
 async def save_login_session_state(
@@ -112,17 +115,18 @@ class LocalAuthSessionController:
         self._active_session: LocalAuthSession | None = None
 
     def _resolve_storage_state_path(self) -> Path:
-        # goofish 维持既有固定文件名；其他平台按平台名区分，互不覆盖。
+        # goofish 维持既有固定文件名；其他平台经 settings 收口的推导
+        # （storage_state.{platform}.json），与 build_providers 同源，互不覆盖。
         if self.platform == PLATFORM_GOOFISH:
             return self.settings.plugin_data_dir / "storage_state.json"
-        return self.settings.plugin_data_dir / f"storage_state.{self.platform}.json"
+        return self.settings.storage_state_path_for(self.platform)
 
     def _resolve_stable_profile_dir(self) -> Path | None:
         # 登录态浏览器 profile 的稳定落地目录；goofish 沿用 settings 配置
-        # （可能为 None = 仅用 storage_state），其他平台固定在 plugin_data_dir 下。
+        # （可能为 None = 仅用 storage_state），其他平台经 settings 收口推导。
         if self.platform == PLATFORM_GOOFISH:
             return self.settings.playwright_user_data_dir
-        return self.settings.plugin_data_dir / f"browser_profile_{self.platform}"
+        return self.settings.browser_profile_dir_for(self.platform)
 
     def _looks_like_logged_in_probe_url(self, url: str) -> bool:
         # 按档案 base_url 的 host 判定（goofish: www.goofish.com，行为不变）。
@@ -165,9 +169,8 @@ class LocalAuthSessionController:
                 # Goofish auto-refreshes remembered cookies).  In that state the
                 # screenshot is a normal search page, not a QR/login page.  Do a
                 # validation pass before sending a needless QR prompt.
-                if self._looks_like_logged_in_probe_url(
-                    str(getattr(snapshot, "page_url", "") or "")
-                ):
+                landing_url = str(getattr(snapshot, "page_url", "") or "")
+                if self._looks_like_logged_in_probe_url(landing_url):
                     try:
                         validation = await session.validate_login()
                         if validation.get("ok"):
@@ -184,6 +187,44 @@ class LocalAuthSessionController:
                             "[goofish_catcher] pre-QR logged-in validation failed: %s",
                             already_login_exc,
                         )
+                    # 探测页与登录页分离的平台（淘宝）：validate_login 已把页面
+                    # 带去探测页，失败后必须回登录页，否则二维码截图会是搜索/
+                    # 验证码页。goofish 探测页=登录落地页，无需也不应重导航。
+                    if self._profile.validate_probe_url:
+                        await session.return_to_login_page()
+                elif (
+                    self._profile.validate_probe_url
+                    and self._profile.is_auth_url(landing_url)
+                    and self._resolve_storage_state_path().exists()
+                ):
+                    # 登录落地页是纯登录页的平台（淘宝）：URL 捷径永远不命中，
+                    # 但持久 profile 里可能还留着有效登录态。曾确认过登录
+                    # （storage_state 文件存在）时先探测一次真实登录态，有效则
+                    # 免扫码自动保存（与闲鱼 pre-QR 捷径体验对齐）；无效则回到
+                    # 登录页继续二维码流程（代价 = 一次探测页导航）。
+                    pre_qr_ok = False
+                    try:
+                        validation = await session.validate_login()
+                        pre_qr_ok = bool(validation.get("ok"))
+                    except Exception as probe_exc:
+                        logger.info(
+                            "[goofish_catcher] pre-QR probe validation failed"
+                            " (platform=%s): %s",
+                            self.platform,
+                            probe_exc,
+                        )
+                    if pre_qr_ok:
+                        logger.info(
+                            "[goofish_catcher] %s login state still valid,"
+                            " auto-saving session without QR",
+                            self.platform,
+                        )
+                        return await self._save_auto_login_session(
+                            session,
+                            profile_dir=profile_dir,
+                            cleanup_profile_dir=cleanup_profile_dir,
+                        )
+                    await session.return_to_login_page()
 
                 # Try quick login before falling back to QR scan flow.
                 try:

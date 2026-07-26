@@ -18,7 +18,7 @@ from app.aggregator.aggregate import (
     risk_tags_for,
     score_heuristic,
 )
-from app.intent.engine import PurchaseIntent, parse_intent
+from app.intent.engine import PurchaseIntent, extract_platforms, parse_intent
 from app.platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
 from app.purchase import DecisionReport, PurchaseDecisionService
 from app.reporter.card import render_decision_card
@@ -843,6 +843,168 @@ class ClusterIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             len(report.items) + len(report.other_items),
             report.platform_counts[PLATFORM_TAOBAO],
+        )
+
+
+# ── 平台限定词提取与平台约束 ─────────────────────────────────────────────────
+
+class ExtractPlatformsTest(unittest.TestCase):
+    def test_suffix_qualifier_stripped(self) -> None:
+        cleaned, platforms = extract_platforms("RTX 5060 Ti 显卡，淘宝平台")
+        self.assertEqual(cleaned, "RTX 5060 Ti 显卡")
+        self.assertEqual(platforms, ("taobao",))
+
+    def test_lead_qualifier_variants(self) -> None:
+        for text, expect_kw, expect_platform in (
+            ("在淘宝搜 iPhone 15", "iPhone 15", "taobao"),
+            ("闲鱼上的 二手iPhone", "二手iPhone", "goofish"),
+            ("咸鱼 RTX5090", "RTX5090", "goofish"),
+            ("淘宝网 机械键盘", "机械键盘", "taobao"),
+            ("Taobao RTX5090", "RTX5090", "taobao"),
+            ("帮我在淘宝找 机械键盘 预算500元", "机械键盘 预算500元", "taobao"),
+            ("请在闲鱼搜索 尼康Z9", "尼康Z9", "goofish"),
+            ("去淘宝看看 5060ti", "5060ti", "taobao"),
+            ("5060ti 淘宝上买", "5060ti", "taobao"),
+        ):
+            cleaned, platforms = extract_platforms(text)
+            self.assertEqual(cleaned, expect_kw, text)
+            self.assertEqual(platforms, (expect_platform,), text)
+
+    def test_no_platform_mention_untouched(self) -> None:
+        cleaned, platforms = extract_platforms("红色RTX5090显卡 预算1万5")
+        self.assertEqual(cleaned, "红色RTX5090显卡 预算1万5")
+        self.assertEqual(platforms, ())
+
+    def test_platform_chars_inside_product_word_not_stripped(self) -> None:
+        # 「闲鱼玩偶」的"闲鱼"是商品词的一部分（后接非分隔字符），不得剥离
+        cleaned, platforms = extract_platforms("闲鱼玩偶 抱枕")
+        self.assertEqual(cleaned, "闲鱼玩偶 抱枕")
+        self.assertEqual(platforms, ())
+
+    def test_both_platforms_recorded(self) -> None:
+        cleaned, platforms = extract_platforms("淘宝 闲鱼 RTX5090")
+        self.assertEqual(cleaned, "RTX5090")
+        self.assertEqual(set(platforms), {"taobao", "goofish"})
+
+    def test_interior_strip_leaves_no_doubled_separator(self) -> None:
+        # 前导分隔符消耗式匹配：中段剥离不留「，，」/悬空逗号
+        cleaned, platforms = extract_platforms("显卡，淘宝，全新")
+        self.assertEqual(cleaned, "显卡，全新")
+        self.assertEqual(platforms, ("taobao",))
+        cleaned, platforms = extract_platforms("别去淘宝，闲鱼搜 显卡")
+        self.assertEqual(cleaned, "别去淘宝 显卡")
+        self.assertEqual(platforms, ("goofish",))
+
+    def test_platform_only_query_keeps_raw_as_keyword(self) -> None:
+        cleaned, platforms = extract_platforms("淘宝")
+        self.assertEqual(cleaned, "淘宝")
+        self.assertEqual(platforms, ("taobao",))
+
+
+class ParseIntentPlatformTest(unittest.IsolatedAsyncioTestCase):
+    async def test_heuristic_platform_constraint_and_clean_keyword(self) -> None:
+        intent = await parse_intent("RTX 5060 Ti 显卡，淘宝平台", llm_call=None)
+        self.assertEqual(intent.platforms, ("taobao",))
+        self.assertEqual(intent.keyword, "RTX 5060 Ti 显卡")
+        self.assertEqual(intent.raw_query, "RTX 5060 Ti 显卡，淘宝平台")
+        # 降级链关键词同样不含平台词
+        for level in intent.degradation:
+            self.assertNotIn("淘宝", level.keyword)
+
+    async def test_heuristic_platform_with_budget(self) -> None:
+        intent = await parse_intent("淘宝平台 RTX5090 预算1万5", llm_call=None)
+        self.assertEqual(intent.platforms, ("taobao",))
+        self.assertEqual(intent.budget_max, 15000.0)
+
+    async def test_llm_path_platform_constraint_preserved(self) -> None:
+        intent = await parse_intent(
+            "红色RTX5090 预算15000，淘宝平台",
+            llm_call=make_llm(INTENT_LLM_PAYLOAD),
+        )
+        self.assertEqual(intent.platforms, ("taobao",))
+        self.assertEqual(intent.raw_query, "红色RTX5090 预算15000，淘宝平台")
+        self.assertEqual(intent.keyword, "RTX5090")
+
+    async def test_no_platform_means_all(self) -> None:
+        intent = await parse_intent("RTX5090 显卡", llm_call=None)
+        self.assertEqual(intent.platforms, ())
+
+
+class PurchaseServicePlatformScopeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_named_platform_scopes_search(self) -> None:
+        goofish_provider = FakeProvider(
+            {"RTX5090": [make_item("g1", "闲鱼RTX5090", 9000.0)]}
+        )
+        taobao_provider = FakeProvider(
+            {
+                "RTX5090": [
+                    make_item("taobao:t1", "淘宝RTX5090", 11000.0, PLATFORM_TAOBAO)
+                ]
+            }
+        )
+        service = PurchaseDecisionService(
+            providers={
+                PLATFORM_GOOFISH: goofish_provider,
+                PLATFORM_TAOBAO: taobao_provider,
+            },
+            llm_call=None,
+        )
+
+        report = await service.run("RTX5090，淘宝平台")
+
+        # 只搜点名的淘宝；闲鱼 provider 完全未被调用
+        self.assertEqual(goofish_provider.calls, [])
+        self.assertTrue(taobao_provider.calls)
+        self.assertEqual(report.searched_platforms, [PLATFORM_TAOBAO])
+        self.assertTrue(report.items)
+        self.assertTrue(
+            all(d.item.platform == PLATFORM_TAOBAO for d in report.items)
+        )
+        self.assertEqual(report.errors, {})
+
+    async def test_named_platform_unavailable_reports_clearly(self) -> None:
+        goofish_provider = FakeProvider(
+            {"RTX5090": [make_item("g1", "闲鱼RTX5090", 9000.0)]}
+        )
+        service = PurchaseDecisionService(
+            providers={PLATFORM_GOOFISH: goofish_provider},
+            llm_call=None,
+        )
+
+        report = await service.run("RTX5090，淘宝平台")
+
+        # 点名的淘宝不可用：不静默回退闲鱼，明确报告原因
+        self.assertEqual(goofish_provider.calls, [])
+        self.assertEqual(report.items, [])
+        self.assertEqual(report.searched_platforms, [])
+        self.assertIn(PLATFORM_TAOBAO, report.errors)
+        self.assertIn("不可用", report.summary)
+
+    async def test_no_platform_constraint_searches_all(self) -> None:
+        goofish_provider = FakeProvider(
+            {"RTX5090": [make_item("g1", "闲鱼RTX5090", 9000.0)]}
+        )
+        taobao_provider = FakeProvider(
+            {
+                "RTX5090": [
+                    make_item("taobao:t1", "淘宝RTX5090", 11000.0, PLATFORM_TAOBAO)
+                ]
+            }
+        )
+        service = PurchaseDecisionService(
+            providers={
+                PLATFORM_GOOFISH: goofish_provider,
+                PLATFORM_TAOBAO: taobao_provider,
+            },
+            llm_call=None,
+        )
+
+        report = await service.run("RTX5090")
+
+        self.assertTrue(goofish_provider.calls)
+        self.assertTrue(taobao_provider.calls)
+        self.assertEqual(
+            set(report.searched_platforms), {PLATFORM_GOOFISH, PLATFORM_TAOBAO}
         )
 
 

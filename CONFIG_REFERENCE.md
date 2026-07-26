@@ -111,8 +111,9 @@
 ## 补登录态相关说明
 
 - 本地模式下，直接发送 `/闲鱼 登录` 即可拉起统一补登录态流程
-- 如需 CLI，也可以运行 `save_state.py` 更新 `plugin_data/storage_state.json`
-- 远程模式下，推荐使用 2.1.0 的自动补登录态流程
+- 淘宝（`taobao_enabled = true`）：发送 `/闲鱼 登录 淘宝` 拉起淘宝扫码；登录态独立保存为 `storage_state.taobao.json`；`/闲鱼 状态` 可查看各平台登录态
+- 如需 CLI，也可以运行 `save_state.py` 更新 `plugin_data/storage_state.json`（淘宝：`save_state.py --platform taobao`）
+- 远程模式下，推荐使用 2.1.0 的自动补登录态流程（远程模式暂不支持淘宝）
 - 如果远程 worker 返回 `CAPTCHA`，插件会自动重试 2 次
 - 重试后仍失败时，会向首次触发的会话发送二维码截图
 - 扫码后在同一会话回复任意消息即可继续

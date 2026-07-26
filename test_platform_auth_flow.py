@@ -104,7 +104,10 @@ def _chain_plain_texts(chain) -> list[str]:
         if getattr(part, "text", None)
     ]
 
-from app.auth_session import LocalAuthSessionController
+from app.auth_session import (
+    LocalAuthSessionController,
+    resolve_local_storage_state_path,
+)
 from app.config import PluginSettings
 from app.login_session import (
     DEFAULT_LOGIN_URL,
@@ -336,6 +339,37 @@ class LocalAuthSessionControllerPlatformTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             LocalAuthSessionController(settings, platform="jd")
 
+    def test_settings_platform_path_helpers_match_controller(self) -> None:
+        """settings 收口的路径推导与 controller/build_providers 取值一致。"""
+        settings = build_settings(self.base_dir)
+        controller = LocalAuthSessionController(settings, platform="taobao")
+        self.assertEqual(
+            settings.storage_state_path_for(PLATFORM_TAOBAO),
+            controller._resolve_storage_state_path(),
+        )
+        self.assertEqual(
+            settings.browser_profile_dir_for(PLATFORM_TAOBAO),
+            controller._resolve_stable_profile_dir(),
+        )
+        # goofish 走配置字段链路
+        self.assertEqual(
+            settings.storage_state_path_for(PLATFORM_GOOFISH),
+            settings.playwright_storage_state_path,
+        )
+        self.assertEqual(
+            settings.browser_profile_dir_for(PLATFORM_GOOFISH),
+            settings.playwright_user_data_dir,
+        )
+
+    def test_resolve_local_storage_state_path_platform_suffix(self) -> None:
+        self.assertEqual(
+            resolve_local_storage_state_path().name, "storage_state.json"
+        )
+        self.assertEqual(
+            resolve_local_storage_state_path("taobao").name,
+            "storage_state.taobao.json",
+        )
+
     def test_probe_url_judged_by_profile_base_url(self) -> None:
         settings = build_settings(self.base_dir)
         goofish_controller = LocalAuthSessionController(settings)
@@ -426,8 +460,10 @@ class CoordinatorPlatformFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(umo, "umo-1")
         chain_text = "\n".join(_chain_plain_texts(chain))
         self.assertIn("检测到需要重新登录淘宝。", chain_text)
-        self.assertNotIn("/闲鱼 登录", chain_text)
-        self.assertIn("淘宝登录工具", chain_text)
+        # 超时重启提示指向真实存在的带平台参数命令（不再是「淘宝登录工具」）
+        self.assertIn("/闲鱼 登录 淘宝", chain_text)
+        self.assertIn("/闲鱼 登录取消", chain_text)
+        self.assertNotIn("登录工具", chain_text)
         # flow 注册在 taobao 键下，goofish 无 flow
         self.assertIn("taobao", coordinator._active_flows)
         self.assertNotIn("goofish", coordinator._active_flows)
@@ -538,6 +574,183 @@ class CoordinatorPlatformFlowTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await storage.close()
 
+    async def test_restart_markers_resolve_platform(self) -> None:
+        """restart 消息标记带平台后缀时路由到对应平台（无后缀 = goofish）。"""
+        from app.remote_auth_recovery import LOGIN_RESTART_MARKERS
+
+        self.assertIn("闲鱼 登录 淘宝", LOGIN_RESTART_MARKERS)
+        self.assertIn("/闲鱼 登录 taobao", LOGIN_RESTART_MARKERS)
+        resolve = RemoteAuthRecoveryCoordinator.resolve_restart_platform
+        self.assertEqual(resolve("/闲鱼 登录"), PLATFORM_GOOFISH)
+        self.assertEqual(resolve("闲鱼 登录"), PLATFORM_GOOFISH)
+        self.assertEqual(resolve("闲鱼 登录 淘宝"), PLATFORM_TAOBAO)
+        self.assertEqual(resolve("/闲鱼 登录 淘宝"), PLATFORM_TAOBAO)
+        self.assertEqual(resolve("/Goofish Login Taobao"), PLATFORM_TAOBAO)
+        # 非标记消息回落 goofish（仅在 should_restart 为 True 后调用）
+        self.assertEqual(resolve("随便回复"), PLATFORM_GOOFISH)
+
+        coordinator, _context, _goofish_controller, _taobao_controller = (
+            self._build_coordinator()
+        )
+        await coordinator.handle_provider_auth_failure(
+            umo="umo-1", sub_id=1, platform="taobao"
+        )
+        self.assertTrue(
+            await coordinator.should_restart_login_from_message(
+                umo="umo-1", message_text="/闲鱼 登录 淘宝"
+            )
+        )
+        await coordinator.close()
+
+    async def test_complete_login_multi_platform_flows_same_umo(self) -> None:
+        """同一会话同时有两个平台 flow 时逐个确认：一败一成不再卡死。"""
+
+        class _FailingConfirmController(_StubAuthController):
+            async def confirm_auth_session(self, *, session_id: str):
+                self.confirm_calls.append(session_id)
+                raise RuntimeError("扫码后登录态仍未生效")
+
+        class _StubResumeStorage:
+            async def resume_subscriptions_by_pause_reasons(
+                self, reasons, *, now_ts, platform=None
+            ):
+                return []
+
+        context = _StubContext()
+        goofish_controller = _FailingConfirmController(session_prefix="goofish")
+        taobao_controller = _StubAuthController(session_prefix="taobao")
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=context,
+            settings=build_settings(self.base_dir),
+            auth_controller=goofish_controller,
+            auth_timeout_sec=60,
+        )
+        coordinator.set_auth_controller("taobao", taobao_controller)
+
+        await coordinator.handle_provider_auth_failure(umo="umo-1", sub_id=1)
+        await coordinator.handle_provider_auth_failure(
+            umo="umo-1", sub_id=2, platform="taobao"
+        )
+        self.assertEqual(len(coordinator._active_flows), 2)
+
+        result = await coordinator.complete_login(
+            umo="umo-1",
+            storage=_StubResumeStorage(),
+            scheduler=None,
+        )
+
+        # 两个 flow 都被尝试确认；淘宝成功、闲鱼失败但不吞掉成功结果
+        self.assertEqual(goofish_controller.confirm_calls, ["goofish-1"])
+        self.assertEqual(taobao_controller.confirm_calls, ["taobao-1"])
+        self.assertIn("淘宝登录态已保存。", result)
+        self.assertIn("登录确认失败", result)
+        # 失败的 goofish flow 保留（可重扫再确认），成功的淘宝 flow 清除
+        self.assertIn(PLATFORM_GOOFISH, coordinator._active_flows)
+        self.assertNotIn(PLATFORM_TAOBAO, coordinator._active_flows)
+        # 保留的 flow 必须重新武装超时看门狗（否则成为永不超时的僵尸 flow，
+        # 卡住 scheduler 的 wait_until_idle 且超时后无任何通知）
+        self.assertIn(PLATFORM_GOOFISH, coordinator._timeout_tasks)
+        await coordinator.close()
+
+    async def test_expired_first_flow_does_not_block_live_second_flow_gating(
+        self,
+    ) -> None:
+        """残留的过期 flow（dict 首位）不能挡住另一平台仍有效 flow 的确认。"""
+        coordinator, _context, _goofish_controller, _taobao_controller = (
+            self._build_coordinator()
+        )
+        await coordinator.handle_provider_auth_failure(umo="umo-1", sub_id=1)
+        await coordinator.handle_provider_auth_failure(
+            umo="umo-1", sub_id=2, platform="taobao"
+        )
+        # 人为把先插入的 goofish flow 置为已过期
+        coordinator._active_flows[PLATFORM_GOOFISH].expires_at = time.time() - 1
+
+        self.assertTrue(
+            await coordinator.should_auto_complete_from_message(
+                umo="umo-1", message_text="扫好了"
+            )
+        )
+        self.assertTrue(
+            await coordinator.should_restart_login_from_message(
+                umo="umo-1", message_text="/闲鱼 登录 淘宝"
+            )
+        )
+        await coordinator.close()
+
+    async def test_cancel_login_isolates_per_flow_errors(self) -> None:
+        """某平台 controller 取消失败不拦住其余平台，flow 状态一律清除。"""
+
+        class _FailingCancelController(_StubAuthController):
+            async def cancel_auth_session(self, *, session_id: str):
+                self.cancel_calls.append(session_id)
+                raise RuntimeError("controller cancel boom")
+
+        context = _StubContext()
+        goofish_controller = _FailingCancelController(session_prefix="goofish")
+        taobao_controller = _StubAuthController(session_prefix="taobao")
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=context,
+            settings=build_settings(self.base_dir),
+            auth_controller=goofish_controller,
+            auth_timeout_sec=60,
+        )
+        coordinator.set_auth_controller("taobao", taobao_controller)
+        await coordinator.handle_provider_auth_failure(umo="umo-1", sub_id=1)
+        await coordinator.handle_provider_auth_failure(
+            umo="umo-1", sub_id=2, platform="taobao"
+        )
+
+        result = await coordinator.cancel_login(umo="umo-1")
+
+        # goofish controller 抛异常，但淘宝仍被取消；两个 flow 都清除
+        self.assertEqual(goofish_controller.cancel_calls, ["goofish-1"])
+        self.assertEqual(taobao_controller.cancel_calls, ["taobao-1"])
+        self.assertEqual(result, "已取消当前登录恢复流程。")
+        self.assertFalse(coordinator.has_active_flow())
+        await coordinator.close()
+
+    async def test_cancel_login_single_flow_error_still_raises(self) -> None:
+        """单 flow 全部取消失败时保持抛异常语义（调用方渲染取消失败）。"""
+
+        class _FailingCancelController(_StubAuthController):
+            async def cancel_auth_session(self, *, session_id: str):
+                self.cancel_calls.append(session_id)
+                raise RuntimeError("controller cancel boom")
+
+        context = _StubContext()
+        goofish_controller = _FailingCancelController(session_prefix="goofish")
+        coordinator = RemoteAuthRecoveryCoordinator(
+            context=context,
+            settings=build_settings(self.base_dir),
+            auth_controller=goofish_controller,
+            auth_timeout_sec=60,
+        )
+        await coordinator.handle_provider_auth_failure(umo="umo-1", sub_id=1)
+
+        with self.assertRaises(RuntimeError):
+            await coordinator.cancel_login(umo="umo-1")
+        # 抛错但 coordinator 状态已清除（不残留僵尸 flow）
+        self.assertFalse(coordinator.has_active_flow())
+        await coordinator.close()
+
+    async def test_cancel_login_cancels_all_owned_flows(self) -> None:
+        coordinator, _context, goofish_controller, taobao_controller = (
+            self._build_coordinator()
+        )
+        await coordinator.handle_provider_auth_failure(umo="umo-1", sub_id=1)
+        await coordinator.handle_provider_auth_failure(
+            umo="umo-1", sub_id=2, platform="taobao"
+        )
+
+        result = await coordinator.cancel_login(umo="umo-1")
+
+        self.assertEqual(result, "已取消当前登录恢复流程。")
+        self.assertEqual(goofish_controller.cancel_calls, ["goofish-1"])
+        self.assertEqual(taobao_controller.cancel_calls, ["taobao-1"])
+        self.assertFalse(coordinator.has_active_flow())
+        await coordinator.close()
+
 
 class StorageResumePlatformFilterTests(unittest.IsolatedAsyncioTestCase):
     """storage.resume_subscriptions_by_pause_reasons 的可选平台过滤。"""
@@ -638,6 +851,88 @@ class ProviderQuickLoginGateTests(unittest.IsolatedAsyncioTestCase):
         # 档案开关本身：goofish 保持启用，淘宝禁用
         self.assertTrue(GOOFISH_PROFILE.quick_login_enabled)
         self.assertFalse(TAOBAO_PROFILE.quick_login_enabled)
+
+
+class ProviderLoginProbeWatcherTests(unittest.IsolatedAsyncioTestCase):
+    """check_login_state 的登录态接口 payload 监听（淘宝真实登录态探测）。"""
+
+    async def asyncSetUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup_temp_dir)
+        self.base_dir = Path(self._temp_dir.name)
+
+    async def _cleanup_temp_dir(self) -> None:
+        self._temp_dir.cleanup()
+
+    async def test_probe_watcher_classifies_marker_payloads(self) -> None:
+        provider = PlaywrightSearchProvider(
+            build_settings(self.base_dir),
+            profile=TAOBAO_PROFILE,
+        )
+        handlers: dict[str, object] = {}
+
+        class _FakePage:
+            def on(self, event, handler):
+                handlers[event] = handler
+
+        states: set[str] = set()
+        provider._attach_login_probe_watcher(_FakePage(), states)
+        handler = handlers["response"]
+
+        class _FakeResponse:
+            def __init__(self, url, payload):
+                self.url = url
+                self._payload = payload
+
+            async def json(self):
+                return self._payload
+
+        # 非登录态校验接口一律忽略
+        await handler(
+            _FakeResponse("https://s.taobao.com/other", {"ret": ["SUCCESS::ok"]})
+        )
+        self.assertEqual(states, set())
+
+        # SESSION_EXPIRED → auth_required（URL 驼峰 api 名兼容）
+        await handler(
+            _FakeResponse(
+                "https://h5api.m.taobao.com/h5/mtop.user.getUserSimple/1.0/",
+                {"ret": ["FAIL_SYS_SESSION_EXPIRED::Session过期"]},
+            )
+        )
+        self.assertEqual(states, {"auth_required"})
+
+        # SUCCESS → ok
+        states.clear()
+        await handler(
+            _FakeResponse(
+                "https://h5api.m.taobao.com/h5/mtop.user.getusersimple/1.0/",
+                {"ret": ["SUCCESS::调用成功"]},
+            )
+        )
+        self.assertEqual(states, {"ok"})
+
+    async def test_goofish_profile_has_no_probe_url(self) -> None:
+        # goofish 无 validate_probe_url → check_login_state 维持 base_url 判定
+        self.assertIsNone(GOOFISH_PROFILE.validate_probe_url)
+        self.assertTrue(TAOBAO_PROFILE.validate_probe_url)
+
+    async def test_taobao_is_auth_url_ignores_silent_login_probe(self) -> None:
+        """login 域下 /newlogin/ 静默接口不是登录墙（AstrBot 实测：已登录页面
+        例行触发 silentHasLogin.do，整域判定会把扫码成功误判 AUTH_REQUIRED）。"""
+        is_auth = TAOBAO_PROFILE.is_auth_url
+        self.assertFalse(
+            is_auth(
+                "https://login.taobao.com/newlogin/silentHasLogin.do"
+                "?documentReferer=https%3A%2F%2Fs.taobao.com%2Fsearch&ltl=true"
+            )
+        )
+        self.assertFalse(is_auth("https://login.taobao.com/newlogin/qrcode/generate.do"))
+        # 真登录墙（文档跳转登录页）与 passport 域仍判定为 auth
+        self.assertTrue(is_auth("https://login.taobao.com/member/login.jhtml"))
+        self.assertTrue(is_auth("https://passport.taobao.com/iv/verify.htm"))
+        self.assertFalse(is_auth("https://www.taobao.com/"))
+        self.assertFalse(is_auth("https://s.taobao.com/search?q=x"))
 
 
 if __name__ == "__main__":

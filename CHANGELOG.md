@@ -12,6 +12,28 @@
 
 ## [Unreleased]
 
+### Added（搜索链路平台路由——修复「淘宝平台」被当关键词打进闲鱼搜索框）
+
+- 意图引擎平台预提取：`extract_platforms()` 在 LLM/启发式解析之前用确定性正则从需求原文剥离平台限定词（「，淘宝平台」「在淘宝搜」「闲鱼上的」等形态；「闲鱼玩偶」这类商品词不受影响），`PurchaseIntent` 新增 `platforms` 约束；两条解析路径的关键词与降级链都不再含平台词。
+- 采购决策按平台约束搜索：用户点名平台时只搜点名的（「淘宝的 RTX5090」不再同时搜闲鱼）；点名平台不可用时如实记入卡片 errors，全部不可用直接给明确报告，绝不静默回退全平台。
+- `goofish_search_live` 新增 `platform` 参数（goofish/taobao），按平台路由 provider；登录过期/验证码提示按平台（指向 `/闲鱼 登录 淘宝`）；淘宝分页钳到 1（档案 pending）、结果尾注说明淘宝暂不支持回复收藏；docstring 明确「平台名放参数、严禁留在 keyword」。
+- 过滤器空标签防御：`_apply_search_filters`/`_apply_region_filter` 对档案未提供的过滤器 label（淘宝多个为空）直接跳过，不再对 `get_by_text("")` 冒险点击。
+- 淘宝登录墙判定收窄（AstrBot 实测修复）：`login.taobao.com/newlogin/` 下的静默登录态检查接口（`silentHasLogin.do` 等）是页头在已登录页面上例行触发的 XHR，不再判为登录墙——此前扫码成功、`getusersimple` 返回 SUCCESS 仍被误判 `AUTH_REQUIRED`（「扫码后登录态仍未生效：SUCCESS::调用成功」）；真登录墙（文档跳转 `/member/login.jhtml`、passport 域）判定不变，登录失效仍由 mtop 标记接口兜底。
+- 平台词剥离的分隔符清理：前导分隔符改消耗式匹配，中段剥离不再留下「显卡，，全新」式重复/悬空逗号。
+- 引用回复收藏的淘宝识别补 tmall：淘宝搜索结果里的 `detail.tmall.com` 天猫链接同样按淘宝平台优雅跳过收藏，不再落到闲鱼收藏流程报错。
+
+### Added（淘宝登录体验与数据管理对齐闲鱼）
+
+- 命令入口对齐：`/闲鱼 登录` 支持可选平台参数（`/闲鱼 登录 淘宝` 或 `taobao`），无 LLM 会话也能手动发起淘宝扫码登录；`/闲鱼 登录完成`、`/闲鱼 登录取消` 原本即按会话跨平台解析 flow，保持不变。消息级重启标记同步支持平台后缀（扫码等待中发送「闲鱼 登录 淘宝」重启淘宝二维码），重启与自动快速登录的订阅恢复按解析出的平台路由。
+- 登录态可见性对齐：`/闲鱼 状态` 在本地模式下逐平台显示登录态保存状态与时间（淘宝仅在 `taobao_enabled` 时显示）；Admin WebUI provider health `details` 新增 `platforms` 分平台登录态（文件存在性与路径）。
+- 登录态检测对齐：`check_login_state` 对带 `validate_probe_url` 的平台（淘宝）改探测该页并监听登录态校验接口（`mtop.user.getusersimple`）payload——访客页面完全合法导致 URL/HTML 启发式永远报 ok 的盲区消除，`goofish_check_login(platform="taobao")` 不再对已登出状态误报正常；闲鱼探测路径逐字节不变。
+- 自动登录对齐：淘宝登录落地页是纯登录页（URL 捷径不命中），现补充 pre-QR 探测——曾确认过登录（storage_state 存在）时先验一次真实登录态，有效则免扫码自动保存（与闲鱼「记住 cookie 免扫码」体验一致），无效则回到登录页继续二维码流程。
+- 手动种登录态对齐：`save_state.py` 新增 `--platform taobao`（保存到 `storage_state.taobao.json`）；`resolve_local_storage_state_path` 支持平台参数。
+- 并发扫码修复：同一会话同时存在闲鱼与淘宝登录 flow 时，「回复任意消息确认」与「登录取消」改为遍历该会话拥有的全部平台 flow 逐个处理（此前按 dict 插入顺序取第一个，先发起的 flow 未扫码会卡死后发起的确认）；确认失败保留的 flow 重新武装超时看门狗（不再留下卡住 scheduler `wait_until_idle` 的永不超时僵尸 flow）；消息确认/重启的门控改为「任一未过期 flow 即放行」（残留过期 flow 不再挡住另一平台的有效确认）；取消流程按平台隔离异常且状态一律清除（单平台 controller 取消失败不再拦住其余平台）。
+- 文案修复：淘宝二维码超时/取消/刷新提示改为指向真实存在的命令（`/闲鱼 登录 淘宝`、`/闲鱼 登录取消`），不再指向不存在的「淘宝登录工具」；调度器与自动恢复失败回退提示同步平台化；平台不可用提示按模式区分真实原因（远程模式说「暂不支持淘宝」而非误导性的「请开启 taobao_enabled」），消息级重启路径补齐与命令路径同等的平台可用性校验；共享路径中的 `authentication required by goofish`、Xvfb 错误文案等闲鱼硬编码措辞平台化。
+- 路径推导收口：淘宝 `storage_state.taobao.json` / `browser_profile_taobao` 的推导集中到 `PluginSettings.storage_state_path_for()` / `browser_profile_dir_for()`，`build_providers` 与 `LocalAuthSessionController` 同源取值（此前两处独立硬编码，改名会静默失联）。
+- 已知不对齐（有意保留）：心跳仍只探测闲鱼登录态——淘宝访客搜索合法，登录过期不应连坐暂停订阅，惰性检测（调度失败触发恢复）+ 手动真实检测已覆盖；远程 worker 模式仍不支持淘宝（多平台 worker 另行推进）。
+
 ### Fixed（合入前集成评审修复）
 
 - 意图引擎：预算解析全部要求上下文锚点（预算/以内/元/￥ 等），「850W电源 预算400元」不再把功率误判为预算；`require_terms` 对 LLM 返回的标量/字符串健壮化，LLM 输出解析异常一律回退启发式而不再冒泡报错。

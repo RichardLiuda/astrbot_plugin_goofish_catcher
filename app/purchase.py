@@ -81,14 +81,47 @@ class PurchaseDecisionService:
         levels = intent.degradation or [
             DegradationLevel(level=0, keyword=intent.keyword, note="精确匹配")
         ]
-        searched = list(self._providers)
         errors: dict[str, str] = {}
+
+        # 平台约束：用户点名平台时只搜点名的；点名但不可用的平台记入 errors
+        # （卡片如实展示原因），全部不可用则直接给明确报告，不静默回退全平台。
+        providers = self._providers
+        if intent.platforms:
+            providers = {
+                name: provider
+                for name, provider in self._providers.items()
+                if name in intent.platforms
+            }
+            for name in intent.platforms:
+                if name not in self._providers:
+                    errors[name] = (
+                        "平台未启用或当前模式不支持"
+                        "（淘宝需 taobao_enabled=true 且本地 playwright 模式）"
+                    )
+            if not providers:
+                hit = levels[0]
+                return DecisionReport(
+                    intent=intent,
+                    level_used=hit.level,
+                    level_note=hit.note,
+                    level_hint=hit.hint,
+                    items=[],
+                    market_refs={},
+                    errors=errors,
+                    searched_platforms=[],
+                    used_llm=False,
+                    summary=(
+                        "指定的平台当前不可用，未执行搜索："
+                        + "；".join(f"{name}（{msg}）" for name, msg in errors.items())
+                    ),
+                )
+        searched = list(providers)
 
         # 逐级降级：当前级合并结果非空即停；全空则停在最后一级。
         hit_level = levels[-1]
         merged: list[NormalizedItem] = []
         for level in levels:
-            batch = await self._search_all(level.keyword, errors)
+            batch = await self._search_all(level.keyword, errors, providers)
             batch = _filter_by_require_terms(batch, level.require_terms)
             batch = _filter_by_budget(batch, intent.budget_max)
             merged = dedupe_items(batch)
@@ -96,7 +129,7 @@ class PurchaseDecisionService:
                 hit_level = level
                 break
 
-        market_refs = await self._collect_market_refs(hit_level.keyword)
+        market_refs = await self._collect_market_refs(hit_level.keyword, providers)
 
         if not merged:
             summary = (
@@ -170,9 +203,14 @@ class PurchaseDecisionService:
     # ── 内部 ─────────────────────────────────────────────────────────────────
 
     async def _search_all(
-        self, keyword: str, errors: dict[str, str]
+        self,
+        keyword: str,
+        errors: dict[str, str],
+        providers: dict[str, "SearchProvider"] | None = None,
     ) -> list[NormalizedItem]:
-        """并发搜所有平台；单平台失败记 errors 并返回空，不拖垮其他平台。"""
+        """并发搜指定平台（缺省全部）；单平台失败记 errors 并返回空，不拖垮其他平台。"""
+        if providers is None:
+            providers = self._providers
 
         async def _one(name: str, provider: "SearchProvider") -> list[NormalizedItem]:
             try:
@@ -198,7 +236,7 @@ class PurchaseDecisionService:
             return result
 
         results = await asyncio.gather(
-            *(_one(name, provider) for name, provider in self._providers.items()),
+            *(_one(name, provider) for name, provider in providers.items()),
             return_exceptions=True,
         )
         merged: list[NormalizedItem] = []
@@ -208,12 +246,16 @@ class PurchaseDecisionService:
                 merged.extend(result)
         return merged
 
-    async def _collect_market_refs(self, keyword: str) -> dict[str, float | None]:
+    async def _collect_market_refs(
+        self,
+        keyword: str,
+        providers: dict[str, "SearchProvider"] | None = None,
+    ) -> dict[str, float | None]:
         """各平台 EMA 参考价；storage 缺失或单平台异常都静默为 None。"""
         refs: dict[str, float | None] = {}
         if self._storage is None:
             return refs
-        for platform in self._providers:
+        for platform in providers if providers is not None else self._providers:
             refs[platform] = await self._market_ema(keyword, platform)
         return refs
 

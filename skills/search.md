@@ -1,20 +1,25 @@
 # 技能：搜索商品
 
 **工具**：`goofish_search_live`  
-**场景**：用户询问某类商品的闲鱼行情、价格区间，或想看看现有挂单情况。
+**场景**：用户询问某类商品的行情、价格区间，或想看看现有挂单情况。
 
-> **平台边界**：本工具只搜闲鱼。多平台比价/模糊需求（颜色/预算/成色）请用
-> `buyagent_purchase_decision`（见 [purchase.md](purchase.md)）；
+> **平台路由铁律**：用户指明淘宝时传 `platform="taobao"`，**严禁把平台名留在
+> keyword 里**（会被原样打进搜索框污染结果）。多平台比价/模糊需求
+> （颜色/预算/成色）请用 `buyagent_purchase_decision`（见
+> [purchase.md](purchase.md)，需求里点名的平台会被自动解析）；
 > 淘宝机制见 [platforms.md](platforms.md)。
 
 ## 工具参数
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `keyword` | string | 必填 | 搜索关键词 |
-| `pages` | int | 1 | 搜索页数，上限 3 |
+| `keyword` | string | 必填 | 搜索关键词（只放商品词，不放平台名） |
+| `pages` | int | 1 | 搜索页数，上限 3（淘宝仅 1 页） |
 | `min_price` | float | 0 | 最低价（元），0=不限 |
 | `max_price` | float | 0 | 最高价（元），0=不限 |
+| `platform` | string | goofish | 搜索平台：goofish=闲鱼、taobao=淘宝 |
+
+淘宝边界：个人闲置/新发布/地区过滤是闲鱼特有（淘宝忽略）；淘宝商品暂不支持回复收藏。
 
 ## 工具行为
 

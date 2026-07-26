@@ -50,13 +50,13 @@ goofish_get_item_detail(item_id="12345678")
 - `"captcha"` — 遇到验证码
 - `"error: ..."` — 其他错误
 
-**`platform` 参数**（默认 `goofish`）：检查淘宝会话传 `platform="taobao"`。
+**`platform` 参数**（默认 `goofish`）：检查淘宝会话传 `platform="taobao"`。淘宝走真实登录态探测（监听 `mtop.user.getusersimple` 接口），已登出会如实返回 `auth_required`，不因访客页面合法而误报 `ok`。
 
 ### `goofish_start_login`
 
 启动登录流程，返回二维码或登录链接供用户扫码/点击。
 
-**`platform` 参数**（默认 `goofish`）：淘宝登录传 `platform="taobao"`——推送淘宝二维码（落地页 login.taobao.com），需用**手机淘宝 App** 扫码；成功后只恢复淘宝侧被暂停的订阅。
+**`platform` 参数**（默认 `goofish`）：淘宝登录传 `platform="taobao"`——推送淘宝二维码（落地页 login.taobao.com），需用**手机淘宝 App** 扫码；成功后只恢复淘宝侧被暂停的订阅。若淘宝曾登录过且 cookie 仍有效，会先探测并免扫码自动保存。用户也可以直接发送斜杠命令 `/闲鱼 登录 淘宝` 达到同样效果。
 
 ## 典型场景
 

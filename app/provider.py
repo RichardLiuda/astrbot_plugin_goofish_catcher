@@ -101,12 +101,13 @@ def build_providers(settings: PluginSettings, *, llm_call=None) -> dict[str, Sea
 
     from .provider_playwright import PlaywrightSearchProvider
 
+    # 路径推导收口在 PluginSettings（与 LocalAuthSessionController 同源）。
     taobao_settings = dataclasses.replace(
         settings,
-        playwright_storage_state_path=(
-            settings.plugin_data_dir / "storage_state.taobao.json"
+        playwright_storage_state_path=settings.storage_state_path_for(
+            PLATFORM_TAOBAO
         ),
-        playwright_user_data_dir=settings.plugin_data_dir / "browser_profile_taobao",
+        playwright_user_data_dir=settings.browser_profile_dir_for(PLATFORM_TAOBAO),
     )
     providers[PLATFORM_TAOBAO] = PlaywrightSearchProvider(
         taobao_settings,

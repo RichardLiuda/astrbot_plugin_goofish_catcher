@@ -9,7 +9,7 @@
 | 订阅监控（建/删/改/停/恢复/立即查） | ✅ | ✅（`platform="taobao"`） |
 | 登录（扫码 + 失效自动恢复） | ✅ | ✅（`platform="taobao"`，落地页 login.taobao.com） |
 | 推送（降价/上新/建议） | ✅【闲鱼建议】 | ✅【淘宝建议】 |
-| 实时搜索 | ✅ `goofish_search_live` | 用 `buyagent_purchase_decision`（多平台并发） |
+| 实时搜索 | ✅ `goofish_search_live` | ✅（`platform="taobao"`，关键词+价格过滤，单页） |
 | 详情深度分析 | ✅（卖家信用/想要数） | ✅（店铺 DSR/类型 + **SKU 全档真实价**） |
 | 收藏 | ✅ | ❌（回复收藏时优雅跳过） |
 | 远程 Worker 模式 | ✅ | ❌（仅本地模式） |
@@ -24,6 +24,13 @@
 
 **3. 登录态按平台隔离**
 会话文件与浏览器 profile 均按平台独立：`storage_state.{platform}.json` + `browser_profile_{platform}/`。闲鱼登录**不会**给淘宝域播种 cookie（实测），各扫各的码。淘宝订阅触发 `AUTH_REQUIRED` 时，恢复流程会推送**淘宝**二维码（不是闲鱼的）。
+
+**登录入口（与闲鱼对齐）**：
+- 斜杠命令：`/闲鱼 登录 淘宝`（或 `taobao`）手动发起淘宝扫码；`/闲鱼 登录取消`、扫码后回复任意消息确认——这两个对全平台 flow 通用。
+- LLM 工具：`goofish_start_login(platform="taobao")` / `goofish_check_login(platform="taobao")`（后者对淘宝走真实登录态探测：探测搜索页并监听 `mtop.user.getusersimple`，已登出不会误报正常）。
+- 免扫码自动登录：淘宝曾登录过（storage_state 存在）且持久 profile 里 cookie 仍有效时，发起登录会先探测一次并自动保存，无需扫码（与闲鱼 pre-QR 捷径一致）。
+- 登录态查看：`/闲鱼 状态` 逐平台显示登录态保存状态与时间。
+- 命令行手动种登录态：`python save_state.py --platform taobao`。
 
 ## 淘宝的两个数据真相（使用时必须知道）
 
@@ -44,10 +51,20 @@ LLM：goofish_create_subscription(keyword="RTX5090 显卡", platform="taobao", i
 注意：淘宝间隔有下限（taobao_min_interval_sec，默认 1800s，可配置）
 ```
 
+**实时搜索淘宝商品**
+```
+用户：淘宝搜一下 RTX 5060 Ti 显卡
+LLM：goofish_search_live(keyword="RTX 5060 Ti 显卡", platform="taobao")
+铁律：平台名放 platform 参数，严禁留在 keyword 里（会被原样打进搜索框污染结果）。
+淘宝仅支持关键词+价格过滤、单页；个人闲置/新发布/地区过滤是闲鱼特有。
+采购决策（buyagent_purchase_decision）会自动解析需求里点名的平台并只搜该平台。
+```
+
 **淘宝会话失效**
 ```
 淘宝订阅暂停（AUTH_REQUIRED）→ 系统自动推送淘宝二维码
-用户用【手机淘宝 App】扫码 → 订阅自动恢复（只恢复淘宝的，不影响闲鱼）
+用户用【手机淘宝 App】扫码 → 回复任意消息 → 订阅自动恢复（只恢复淘宝的，不影响闲鱼）
+二维码超时/未收到 → 发送 /闲鱼 登录 淘宝 重新发起（或 goofish_start_login(platform="taobao")）
 ```
 
 **查淘宝商品真实价格**

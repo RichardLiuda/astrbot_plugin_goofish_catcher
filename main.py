@@ -708,6 +708,11 @@ class GoofishCatcherPlugin(Star):
     ) -> str | None:
         if self.remote_auth_coordinator is None:
             return None
+        retry_hint = (
+            "可稍后发送 /闲鱼 登录 重试。"
+            if platform == PLATFORM_GOOFISH
+            else f"可稍后发送 /闲鱼 登录 {platform_display_name(platform)} 重试。"
+        )
         try:
             result = await self.remote_auth_coordinator.handle_provider_auth_failure(
                 umo=umo,
@@ -726,7 +731,7 @@ class GoofishCatcherPlugin(Star):
             return (
                 "自动启动登录恢复失败。\n"
                 f"{exc.code.value}: {exc.message}\n"
-                "可稍后发送 /闲鱼 登录 重试。"
+                f"{retry_hint}"
             )
         except Exception as exc:
             logger.warning(
@@ -737,7 +742,7 @@ class GoofishCatcherPlugin(Star):
             return (
                 "自动启动登录恢复失败。\n"
                 f"{exc}\n"
-                "可稍后发送 /闲鱼 登录 重试。"
+                f"{retry_hint}"
             )
 
     async def _resume_subs_after_auto_login(
@@ -811,11 +816,25 @@ class GoofishCatcherPlugin(Star):
                 )
             )
             if should_restart:
+                # 重启标记可带平台后缀（如「闲鱼 登录 淘宝」），按标记路由平台。
+                restart_platform = (
+                    self.remote_auth_coordinator.resolve_restart_platform(message_text)
+                )
+                # 与 /闲鱼 登录 命令路径同等的平台可用性校验（此路径拦截在
+                # 命令分发之前，缺了校验会报错为「未启用登录恢复流程」误导用户）
+                if restart_platform not in self.providers:
+                    yield event.plain_result(
+                        self._platform_unavailable_message(restart_platform)
+                    ).stop_event()
+                    return
                 message = await self.remote_auth_coordinator.start_login(
-                    umo=event.unified_msg_origin
+                    umo=event.unified_msg_origin,
+                    platform=restart_platform,
                 )
                 if message == AUTO_LOGIN_DONE_SENTINEL:
-                    message = await self._resume_subs_after_auto_login()
+                    message = await self._resume_subs_after_auto_login(
+                        platform=restart_platform
+                    )
                 yield event.plain_result(message).stop_event()
                 return
             should_complete = await (
@@ -959,8 +978,12 @@ class GoofishCatcherPlugin(Star):
             title = item.title
             item_id = item.item_id or _extract_item_id_from_url(item.url) or ""
             platform, _ = split_item_id(item_id)
-            if platform == PLATFORM_GOOFISH and PLATFORM_TAOBAO + ".com" in (item.url or ""):
+            item_url = item.url or ""
+            if platform == PLATFORM_GOOFISH and (
+                PLATFORM_TAOBAO + ".com" in item_url or "tmall.com" in item_url
+            ):
                 # 引用消息里的链接只带裸数字 ID，需按 URL 域名兜底识别淘宝商品
+                # （淘宝搜索结果含 detail.tmall.com 天猫链接，同属淘宝平台）
                 platform = PLATFORM_TAOBAO
             if platform != PLATFORM_GOOFISH:
                 display = platform_display_name(platform)
@@ -1056,6 +1079,17 @@ class GoofishCatcherPlugin(Star):
         if self._admin_service is None:
             return "插件尚未初始化，请稍后重试。"
         return None
+
+    def _platform_unavailable_message(self, platform: str) -> str:
+        """平台无 provider 时的提示：远程模式说真实原因（不支持），
+        本地模式指向开关配置。"""
+        display = platform_display_name(platform)
+        if self.settings.provider_mode == PROVIDER_MODE_REMOTE_REST:
+            return (
+                f"远程 worker 模式暂不支持{display}，"
+                "如需使用请切换 provider_mode 为 playwright_local。"
+            )
+        return f"{display}平台未启用，请在配置中开启 taobao_enabled。"
 
     @llm_tool(name="goofish_browser_task")
     async def goofish_browser_task(
@@ -1195,27 +1229,41 @@ class GoofishCatcherPlugin(Star):
         free_shipping: bool = False,
         new_publish_option: str = "",
         region: str = "",
+        platform: str = "goofish",
     ) -> str:
-        """实时搜索闲鱼商品（直接调脚本，速度快，无需浏览器 Agent）。
-        结果以列表形式发出，用户可引用该消息并回复序号来快速收藏商品。
+        """实时搜索商品（直接调脚本，速度快，无需浏览器 Agent）。
+        结果以列表形式发出，闲鱼商品可引用该消息并回复序号来快速收藏。
         优先用此工具处理搜索需求；仅当需要查看商品详情页或执行收藏等页面操作时才用 goofish_browser_task。
 
         Args:
-            keyword(string): 搜索关键词
-            pages(number): 搜索页数，默认 1，最多 3
+            keyword(string): 搜索关键词。只放商品词，平台名（淘宝/闲鱼）必须放 platform 参数，严禁留在关键词里
+            pages(number): 搜索页数，默认 1，最多 3（淘宝仅支持 1 页）
             min_price(number): 最低价格（元），0 表示不限
             max_price(number): 最高价格（元），0 表示不限
-            personal_only(boolean): 是否只看个人闲置
+            personal_only(boolean): 是否只看个人闲置（闲鱼特有，淘宝忽略）
             free_shipping(boolean): 是否只看包邮
-            new_publish_option(string): 新发布范围，如 24小时内/7天内/14天内，空表示不限
-            region(string): 地区筛选，如 江苏/南京/全南京，空表示不限
+            new_publish_option(string): 新发布范围，如 24小时内/7天内/14天内，空表示不限（闲鱼特有，淘宝忽略）
+            region(string): 地区筛选，如 江苏/南京/全南京，空表示不限（闲鱼特有，淘宝忽略）
+            platform(string): 搜索平台：goofish=闲鱼（默认）、taobao=淘宝
         """
         if err := self._llm_tools_guard():
             return err
-        if self.provider is None:
+        resolved_platform = _normalize_platform_arg(platform)
+        if resolved_platform is None:
+            return f"未知平台：{platform}（支持 goofish/闲鱼、taobao/淘宝）"
+        if resolved_platform == PLATFORM_GOOFISH:
+            provider = self.provider
+        else:
+            provider = self.providers.get(resolved_platform)
+            if provider is None:
+                return self._platform_unavailable_message(resolved_platform)
+        if provider is None:
             return "搜索组件未就绪，请稍后重试。"
 
         pages = max(1, min(int(pages), 3))
+        if resolved_platform != PLATFORM_GOOFISH:
+            # 淘宝分页未实测（档案 pending），MVP 单页
+            pages = 1
         min_price = float(min_price) if min_price else 0.0
         max_price = float(max_price) if max_price else 0.0
         filters = SearchFilters(
@@ -1227,17 +1275,24 @@ class GoofishCatcherPlugin(Star):
             region=region,
         ).normalized()
 
+        platform_label = platform_display_name(resolved_platform)
         try:
             items = await self._search_with_captcha_retry(
                 keyword=keyword,
                 pages=pages,
                 filters=filters,
+                provider=provider,
             )
         except ProviderError as exc:
             if exc.code == ProviderErrorCode.AUTH_REQUIRED:
-                return "闲鱼会话已过期，请先登录：/闲鱼 登录"
+                login_hint = (
+                    "/闲鱼 登录"
+                    if resolved_platform == PLATFORM_GOOFISH
+                    else f"/闲鱼 登录 {platform_label}"
+                )
+                return f"{platform_label}会话已过期，请先登录：{login_hint}"
             if exc.code == ProviderErrorCode.CAPTCHA:
-                return "遇到闲鱼验证码，请稍后重试。"
+                return f"遇到{platform_label}验证码，请稍后重试。"
             return f"搜索失败：{exc.message}"
         except Exception as exc:
             return f"搜索出错：{exc}"
@@ -1257,10 +1312,15 @@ class GoofishCatcherPlugin(Star):
         items_to_show = filtered[:20]
         min_price_val = min_price or None
         max_price_val = max_price or None
+        display_keyword = (
+            keyword
+            if resolved_platform == PLATFORM_GOOFISH
+            else f"{keyword}（{platform_label}）"
+        )
 
         if event.get_platform_name() == "aiocqhttp":
             nodes = _build_search_result_nodes(
-                keyword=keyword,
+                keyword=display_keyword,
                 items=items_to_show,
                 raw_total=len(items),
                 min_price=min_price_val,
@@ -1287,7 +1347,7 @@ class GoofishCatcherPlugin(Star):
             )
         else:
             rendered = _render_live_search_results(
-                keyword=keyword,
+                keyword=display_keyword,
                 items=items_to_show,
                 raw_total=len(items),
                 min_price=min_price_val,
@@ -1308,11 +1368,16 @@ class GoofishCatcherPlugin(Star):
             if prices
             else ""
         )
+        favorite_hint = (
+            "用户可引用上方消息并回复序号（如 1 或 1 3）来收藏商品，无需额外操作。"
+            if resolved_platform == PLATFORM_GOOFISH
+            else f"{platform_label}商品暂不支持回复收藏。"
+        )
         return (
-            f"已搜索「{keyword}」，共 {len(items)} 件"
+            f"已搜索「{display_keyword}」，共 {len(items)} 件"
             + (f"，价格过滤后 {len(filtered)} 件" if len(filtered) != len(items) else "")
             + f"，已展示前 {shown} 件{price_summary}。"
-            "用户可引用上方消息并回复序号（如 1 或 1 3）来收藏商品，无需额外操作。"
+            + favorite_hint
         )
 
     @llm_tool(name="buyagent_purchase_decision")
@@ -1325,9 +1390,10 @@ class GoofishCatcherPlugin(Star):
         """自然语言采购决策：拆解需求、多平台并发搜索比价、输出采购决策卡片。
         当用户想买某个东西、比价、蹲好价、问“xxx 值得买吗/帮我看看 xxx”时使用。
         支持模糊需求（颜色/预算/成色），精确匹配不到时自动降级并给出替代建议。
+        需求原文里点名的平台（如“淘宝的xxx”）会被解析为平台约束，只搜点名平台。
 
         Args:
-            requirement(string): 采购需求原文，如“红色 RTX 5090 预算1万5”
+            requirement(string): 采购需求原文（保留用户措辞，含平台/预算等限定），如“红色 RTX 5090 预算1万5”
             top_k(number): 最多推荐条数，默认5
         """
         if err := self._llm_tools_guard():
@@ -2011,10 +2077,7 @@ class GoofishCatcherPlugin(Star):
         else:
             provider = self.providers.get(platform)
             if provider is None:
-                return (
-                    f"{platform_display_name(platform)}平台未启用，"
-                    "请在配置中开启 taobao_enabled。"
-                )
+                return self._platform_unavailable_message(platform)
         check_fn = getattr(provider, "check_login_state", None) if provider else None
         if not callable(check_fn):
             return "当前 provider 不支持登录状态检测。"
@@ -2044,10 +2107,7 @@ class GoofishCatcherPlugin(Star):
         if self.remote_auth_coordinator is None:
             return "当前 provider 未启用登录恢复流程。"
         if platform not in self.providers:
-            return (
-                f"{platform_display_name(platform)}平台未启用，"
-                "请在配置中开启 taobao_enabled。"
-            )
+            return self._platform_unavailable_message(platform)
         try:
             result = await self.remote_auth_coordinator.start_login(
                 umo=event.unified_msg_origin,
@@ -2075,7 +2135,7 @@ class GoofishCatcherPlugin(Star):
             "/闲鱼 恢复 <关键词>\n"
             "/闲鱼 立即检查 [关键词]\n"
             "/闲鱼 查询 <关键词...> [--pages N]\n"
-            "/闲鱼 登录\n"
+            "/闲鱼 登录 [淘宝]\n"
             "/闲鱼 登录取消\n"
             "/闲鱼 明细 <关键词> [limit]\n"
             "/闲鱼 状态"
@@ -2528,21 +2588,35 @@ class GoofishCatcherPlugin(Star):
             return
 
     @goofish.command("登录", alias={"login", "auth"})
-    async def remote_login(self, event: AstrMessageEvent):
-        """手动拉起登录流程并回传二维码截图。"""
+    async def remote_login(self, event: AstrMessageEvent, platform: str = ""):
+        """手动拉起登录流程并回传二维码截图。可选平台参数：淘宝/taobao（默认闲鱼）。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
         if self.remote_auth_coordinator is None:
             yield event.plain_result("当前 Provider 未启用登录恢复流程。")
             return
+        resolved_platform = _normalize_platform_arg(platform)
+        if resolved_platform is None:
+            yield event.plain_result(
+                f"未知平台：{platform}（支持 闲鱼/goofish、淘宝/taobao）"
+            )
+            return
+        if resolved_platform not in self.providers:
+            yield event.plain_result(
+                self._platform_unavailable_message(resolved_platform)
+            )
+            return
 
         try:
             message = await self.remote_auth_coordinator.start_login(
-                umo=event.unified_msg_origin
+                umo=event.unified_msg_origin,
+                platform=resolved_platform,
             )
             if message == AUTO_LOGIN_DONE_SENTINEL:
-                message = await self._resume_subs_after_auto_login()
+                message = await self._resume_subs_after_auto_login(
+                    platform=resolved_platform
+                )
             yield event.plain_result(message)
             return
         except ProviderError as exc:
@@ -2681,6 +2755,7 @@ class GoofishCatcherPlugin(Star):
             f"- DB：{self.settings.db_path}",
             f"- Admin WebUI：{self.admin_webui_url or '-'}",
         ]
+        lines.extend(_render_local_auth_status_lines(self.settings))
         lines.extend(
             _render_remote_status_lines(
                 settings=self.settings,
@@ -2714,6 +2789,16 @@ def _format_ts(ts: int | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _normalize_platform_arg(text: str) -> str | None:
+    """命令行平台参数归一：中文/英文别名 → 平台标识；未知返回 None。"""
+    value = str(text or "").strip().lower()
+    if value in ("", "goofish", "闲鱼"):
+        return PLATFORM_GOOFISH
+    if value in ("taobao", "淘宝"):
+        return PLATFORM_TAOBAO
+    return None
+
+
 async def _run_remote_provider_healthcheck(
     provider: SearchProvider,
     settings: PluginSettings,
@@ -2745,6 +2830,26 @@ async def _run_remote_provider_healthcheck(
             "remote healthcheck did not return ok=true",
         )
     return result, checked_at
+
+
+def _render_local_auth_status_lines(settings: PluginSettings) -> list[str]:
+    """本地 playwright 模式下逐平台的登录态保存状态（淘宝仅在启用时显示）。"""
+    if settings.provider_mode != PROVIDER_MODE_PLAYWRIGHT_LOCAL:
+        return []
+    entries = [(PLATFORM_GOOFISH, settings.storage_state_path_for(PLATFORM_GOOFISH))]
+    if settings.taobao_enabled:
+        entries.append(
+            (PLATFORM_TAOBAO, settings.storage_state_path_for(PLATFORM_TAOBAO))
+        )
+    lines: list[str] = []
+    for platform, path in entries:
+        display = platform_display_name(platform)
+        if path is not None and path.exists():
+            saved_at = _format_ts(int(path.stat().st_mtime))
+            lines.append(f"- {display}登录态：已保存（{saved_at}）")
+        else:
+            lines.append(f"- {display}登录态：未保存")
+    return lines
 
 
 def _render_remote_status_lines(

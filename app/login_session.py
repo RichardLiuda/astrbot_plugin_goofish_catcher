@@ -368,7 +368,7 @@ def ensure_virtual_display() -> None:
             xvfb_path = _install_xvfb()
         if xvfb_path is None:
             raise RuntimeError(
-                "未检测到 DISPLAY 环境变量，且系统未安装 Xvfb（无桌面环境下运行闲鱼登录/抓取浏览器"
+                "未检测到 DISPLAY 环境变量，且系统未安装 Xvfb（无桌面环境下运行登录/抓取浏览器"
                 "需要一个虚拟显示），自动安装未成功（原因见日志）。请手动安装后重试，"
                 "例如 Debian/Ubuntu: apt-get install -y xvfb；"
                 "CentOS/RHEL: yum install -y xorg-x11-server-Xvfb。"
@@ -688,6 +688,20 @@ class GoofishLoginSession:
             "frame_urls": frame_urls,
             "payload_rets": payload_rets,
         }
+
+    async def return_to_login_page(self) -> None:
+        """把当前页面导航回登录落地页。
+
+        供 pre-QR 登录态探测（validate_login 会把页面带去探测页）失败后
+        恢复二维码展示使用。"""
+        if self._page is None:
+            raise RuntimeError("login session has not been started")
+        await self._page.goto(
+            self.login_url,
+            wait_until="domcontentloaded",
+            timeout=30_000,
+        )
+        await self._settle_page()
 
     async def close(self) -> None:
         if self._context is not None:

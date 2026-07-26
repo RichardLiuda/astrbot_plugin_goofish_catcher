@@ -78,8 +78,18 @@ def _is_auth_url(url: str) -> bool:
     lowered = str(url or "").lower()
     if not lowered:
         return False
-    host = urlparse(lowered).netloc
-    return "login.taobao.com" in host or "passport.taobao.com" in host
+    parsed = urlparse(lowered)
+    host = parsed.netloc
+    if "login.taobao.com" not in host and "passport.taobao.com" not in host:
+        return False
+    # login 域下的 /newlogin/ 静默接口（如 silentHasLogin.do）是页头在**已登录**
+    # 页面上也会例行触发的登录态检查 XHR，不是登录墙——AstrBot 实测
+    # （2026-07-26）：扫码成功、getusersimple 返回 SUCCESS，却因该接口命中
+    # 整域判定被误判 AUTH_REQUIRED。真登录墙是文档跳转 /member/login.jhtml
+    # （仍命中）；登录失效由 mtop 标记接口兜底（validate_login 的 payload 路径）。
+    if "/newlogin/" in (parsed.path or ""):
+        return False
+    return True
 
 
 def _is_captcha_url(url: str) -> bool:

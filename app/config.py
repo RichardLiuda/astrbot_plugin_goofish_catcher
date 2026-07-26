@@ -11,6 +11,10 @@ try:
 except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
+# 与 platforms.registry.PLATFORM_GOOFISH 同源（types.DEFAULT_PLATFORM）；
+# 从 types 直接取常量，避免 config → platforms 的包级 import。
+from .types import DEFAULT_PLATFORM as _PLATFORM_GOOFISH
+
 PROVIDER_MODE_PLAYWRIGHT_LOCAL = "playwright_local"
 PROVIDER_MODE_REMOTE_REST = "remote_rest"
 SUPPORTED_PROVIDER_MODES = {
@@ -210,6 +214,23 @@ class PluginSettings:
     # 淘宝订阅轮询间隔下限（秒）。淘宝风控激进，过低频率易触发 punish；
     # 创建/更新淘宝订阅时统一兜底，默认 1800（30 分钟），可按需调低但自担风险。
     taobao_min_interval_sec: int = 1800
+
+    def storage_state_path_for(self, platform: str) -> Path | None:
+        """按平台解析登录态 storage_state 文件路径（唯一权威推导）。
+
+        goofish 沿用 playwright_storage_state_path 配置链路（remote 模式可能
+        为 None）；其他平台固定在 plugin_data_dir 下按平台命名。
+        build_providers 与 LocalAuthSessionController 均以此为准。
+        """
+        if platform == _PLATFORM_GOOFISH:
+            return self.playwright_storage_state_path
+        return self.plugin_data_dir / f"storage_state.{platform}.json"
+
+    def browser_profile_dir_for(self, platform: str) -> Path | None:
+        """按平台解析稳定浏览器 profile 目录（goofish 用配置字段，可能为 None）。"""
+        if platform == _PLATFORM_GOOFISH:
+            return self.playwright_user_data_dir
+        return self.plugin_data_dir / f"browser_profile_{platform}"
 
 
 def get_runtime_override_path(plugin_data_dir: Path) -> Path:

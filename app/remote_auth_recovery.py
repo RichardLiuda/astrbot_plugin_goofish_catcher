@@ -11,7 +11,11 @@ from astrbot.api.star import Context
 
 from .auth_session import AUTH_SESSION_TIMEOUT_SEC
 from .config import PluginSettings
-from .platforms.registry import PLATFORM_GOOFISH, platform_display_name
+from .platforms.registry import (
+    PLATFORM_GOOFISH,
+    PLATFORM_TAOBAO,
+    platform_display_name,
+)
 
 try:
     from astrbot.api import logger
@@ -27,13 +31,25 @@ REMOTE_AUTH_COMMAND_PREFIXES = (
     "/闲鱼",
     "/goofish",
 )
-LOGIN_RESTART_MARKERS = (
+# 重启登录的消息标记：基础形态 = goofish；带平台后缀（如「… 淘宝」）路由到
+# 对应平台。与 /闲鱼 登录 [平台] 命令的参数形态保持一致。
+_LOGIN_RESTART_BASES = (
     "闲鱼 登录",
     "/闲鱼 登录",
     "goofish login",
     "/goofish login",
     "goofish auth",
     "/goofish auth",
+)
+_RESTART_PLATFORM_SUFFIXES: dict[str, str] = {
+    "": PLATFORM_GOOFISH,
+    " 淘宝": PLATFORM_TAOBAO,
+    " taobao": PLATFORM_TAOBAO,
+}
+LOGIN_RESTART_MARKERS = tuple(
+    base + suffix
+    for base in _LOGIN_RESTART_BASES
+    for suffix in _RESTART_PLATFORM_SUFFIXES
 )
 CANCEL_MARKERS = (
     "闲鱼 登录取消",
@@ -233,8 +249,8 @@ class RemoteAuthRecoveryCoordinator:
         scheduler,
     ) -> str:
         async with self._lock:
-            flow_platform, flow = self._find_flow_for_umo_locked(umo)
-            if flow is None:
+            owned = self._find_flows_for_umo_locked(umo)
+            if not owned:
                 if self._active_flows:
                     return "登录恢复已在其他会话进行中，当前会话不能确认。"
                 if not self._supports_auth_recovery(
@@ -242,65 +258,83 @@ class RemoteAuthRecoveryCoordinator:
                 ):
                     return "当前 Provider 未启用登录恢复流程。"
                 return "当前没有进行中的登录恢复流程，请先发送 /闲鱼 登录。"
-            if self._is_flow_expired(flow):
-                await self._clear_active_flow_locked(flow_platform)
-                return (
-                    f"登录二维码已超时（>{int(self.auth_timeout_sec)}s），"
-                    f"请重新{_restart_action_hint(flow_platform)}。"
+            live: list[tuple[str, str]] = []
+            expired_platforms: list[str] = []
+            for flow_platform, flow in owned:
+                if self._is_flow_expired(flow):
+                    await self._clear_active_flow_locked(flow_platform)
+                    expired_platforms.append(flow_platform)
+                    continue
+                self._cancel_timeout_task_locked(flow_platform)
+                live.append((flow_platform, flow.session_id))
+
+        if not live:
+            return (
+                f"登录二维码已超时（>{int(self.auth_timeout_sec)}s），"
+                f"请重新{_restart_action_hint(expired_platforms[0])}。"
+            )
+
+        # 逐平台确认。通常只有一个 flow；同一会话双平台并发扫码时逐个尝试，
+        # 避免 dict 插入顺序决定确认哪个平台（先插入的失败会卡死后插入的）。
+        # 确认失败的 flow 保持活跃并重新武装超时看门狗（上面已统一取消），
+        # 用户可重扫后再回复确认；不重新武装会留下永不超时的僵尸 flow
+        # （不通知、不释放浏览器会话、卡住 scheduler 的 wait_until_idle）。
+        successes: list[tuple[str, dict[str, Any]]] = []
+        failures: list[tuple[str, Exception]] = []
+        for flow_platform, session_id in live:
+            try:
+                result = await self._controller_for(flow_platform).confirm_auth_session(
+                    session_id=session_id
                 )
-            session_id = flow.session_id
-            self._cancel_timeout_task_locked(flow_platform)
+            except Exception as exc:
+                failures.append((flow_platform, exc))
+                async with self._lock:
+                    retained = self._active_flows.get(flow_platform)
+                    if retained is not None and retained.session_id == session_id:
+                        self._set_active_flow(retained)
+                continue
+            successes.append((flow_platform, result))
+            async with self._lock:
+                await self._clear_active_flow_locked(flow_platform)
 
-        result = await self._controller_for(flow_platform).confirm_auth_session(
-            session_id=session_id
-        )
-
-        async with self._lock:
-            await self._clear_active_flow_locked(flow_platform)
+        if not successes:
+            # 单 flow 语义不变：确认失败直接抛给调用方渲染错误。
+            raise failures[0][1]
 
         now_ts = int(time.time())
-        # 只恢复与本次登录同平台的 AUTH 暂停订阅，其他平台保持原样。
-        resumed = await storage.resume_subscriptions_by_pause_reasons(
-            AUTH_PAUSE_REASONS,
-            now_ts=now_ts,
-            platform=flow_platform,
-        )
-        enqueued = 0
-        for sub in resumed:
-            if scheduler is None:
-                continue
-            if await scheduler.enqueue_manual_check(sub.id):
-                enqueued += 1
-
-        saved_path = str(result.get("saved_path", "")).strip() or "-"
-        mirrored_paths = [
-            str(path).strip()
-            for path in (result.get("mirrored_paths") or [])
-            if str(path).strip()
-        ]
-        name_prefix = (
-            ""
-            if flow_platform == PLATFORM_GOOFISH
-            else platform_display_name(flow_platform)
-        )
-        lines = [
-            f"{name_prefix}登录态已保存。",
-            f"保存位置：{saved_path}",
-        ]
-        if mirrored_paths:
-            lines.append(f"同步位置：{', '.join(mirrored_paths)}")
-        lines.extend(
-            [
-                f"已恢复订阅：{len(resumed)}",
-                f"已重新入队：{enqueued}",
-            ]
-        )
-        return "\n".join(lines)
+        message_blocks: list[str] = []
+        for flow_platform, result in successes:
+            # 只恢复与本次登录同平台的 AUTH 暂停订阅，其他平台保持原样。
+            resumed = await storage.resume_subscriptions_by_pause_reasons(
+                AUTH_PAUSE_REASONS,
+                now_ts=now_ts,
+                platform=flow_platform,
+            )
+            enqueued = 0
+            for sub in resumed:
+                if scheduler is None:
+                    continue
+                if await scheduler.enqueue_manual_check(sub.id):
+                    enqueued += 1
+            message_blocks.append(
+                _build_complete_message(
+                    flow_platform,
+                    result=result,
+                    resumed_count=len(resumed),
+                    enqueued_count=enqueued,
+                )
+            )
+        for flow_platform, exc in failures:
+            message_blocks.append(
+                f"{platform_display_name(flow_platform)}登录确认失败：{exc}。"
+                "可重新扫码后回复任意消息再次确认。"
+            )
+        return "\n".join(message_blocks)
 
     async def cancel_login(self, *, umo: str) -> str:
         async with self._lock:
-            flow_platform, flow = self._find_flow_for_umo_locked(umo)
-            if flow is None:
+            owned = self._find_flows_for_umo_locked(umo)
+            if not owned:
                 if self._active_flows:
                     return "登录恢复已在其他会话进行中，当前会话不能取消。"
                 if not self._supports_auth_recovery(
@@ -308,15 +342,35 @@ class RemoteAuthRecoveryCoordinator:
                 ):
                     return "当前 Provider 未启用登录恢复流程。"
                 return "当前没有进行中的登录恢复流程。"
-            session_id = flow.session_id
-            self._cancel_timeout_task_locked(flow_platform)
+            targets = [(platform, flow.session_id) for platform, flow in owned]
+            for flow_platform, _ in targets:
+                self._cancel_timeout_task_locked(flow_platform)
 
-        await self._controller_for(flow_platform).cancel_auth_session(
-            session_id=session_id
-        )
+        # 逐平台取消并隔离异常：某个 controller 取消失败不能拦住其余平台，
+        # 也不能让 flow 留在 _active_flows 里（看门狗已取消，留下即僵尸——
+        # 用户已明确要取消，coordinator 状态一律清除，controller 侧会话
+        # 由其自身的过期逻辑兜底）。全部失败时抛出首个异常保持原有报错语义。
+        cancel_errors: list[Exception] = []
+        for flow_platform, session_id in targets:
+            try:
+                await self._controller_for(flow_platform).cancel_auth_session(
+                    session_id=session_id
+                )
+            except Exception as exc:
+                cancel_errors.append(exc)
+                logger.warning(
+                    "[goofish_catcher] failed to cancel auth session"
+                    " (platform=%s, session_id=%s): %s",
+                    flow_platform,
+                    session_id,
+                    exc,
+                )
 
         async with self._lock:
-            await self._clear_active_flow_locked(flow_platform)
+            for flow_platform, _ in targets:
+                await self._clear_active_flow_locked(flow_platform)
+        if len(cancel_errors) == len(targets) and cancel_errors:
+            raise cancel_errors[0]
         return "已取消当前登录恢复流程。"
 
     def has_active_flow(self) -> bool:
@@ -335,11 +389,14 @@ class RemoteAuthRecoveryCoordinator:
         if not normalized:
             return False
 
+        # 检查该 umo 拥有的全部 flow：只要有任意一个未过期就放行
+        # （残留的过期 flow 不能挡住另一平台仍有效的确认，complete_login
+        # 自己会清理过期项）。
         async with self._lock:
-            _, flow = self._find_flow_for_umo_locked(umo)
-            if flow is None:
+            owned = self._find_flows_for_umo_locked(umo)
+            if not owned:
                 return False
-            if self._is_flow_expired(flow):
+            if all(self._is_flow_expired(flow) for _platform, flow in owned):
                 return False
 
         lowered = normalized.lower()
@@ -360,13 +417,23 @@ class RemoteAuthRecoveryCoordinator:
             return False
 
         async with self._lock:
-            _, flow = self._find_flow_for_umo_locked(umo)
-            if flow is None:
+            owned = self._find_flows_for_umo_locked(umo)
+            if not owned:
                 return False
-            if self._is_flow_expired(flow):
+            if all(self._is_flow_expired(flow) for _platform, flow in owned):
                 return False
 
         return self._is_restart_message(normalized.lower())
+
+    @staticmethod
+    def resolve_restart_platform(message_text: str) -> str:
+        """restart 消息标记 → 目标平台；非标记消息返回 goofish（缺省平台）。
+
+        仅在 should_restart_login_from_message 为 True 后调用，用于把
+        「闲鱼 登录 淘宝」这类带平台后缀的重启消息路由到对应平台。
+        """
+        lowered = str(message_text or "").strip().lower()
+        return _LOGIN_RESTART_PLATFORMS_LOWER.get(lowered, PLATFORM_GOOFISH)
 
     async def close(self) -> None:
         async with self._lock:
@@ -393,15 +460,16 @@ class RemoteAuthRecoveryCoordinator:
             and callable(getattr(controller, "cancel_auth_session", None))
         )
 
-    def _find_flow_for_umo_locked(
+    def _find_flows_for_umo_locked(
         self,
         umo: str,
-    ) -> tuple[str | None, ActiveRemoteAuthFlow | None]:
-        """返回该 umo 拥有的 (platform, flow)；无则 (None, None)。须持锁调用。"""
-        for platform, flow in self._active_flows.items():
-            if flow.owner_umo == umo:
-                return platform, flow
-        return None, None
+    ) -> list[tuple[str, ActiveRemoteAuthFlow]]:
+        """返回该 umo 拥有的全部 (platform, flow)。须持锁调用。"""
+        return [
+            (platform, flow)
+            for platform, flow in self._active_flows.items()
+            if flow.owner_umo == umo
+        ]
 
     async def _send_chain(self, umo: str, chain: MessageChain) -> None:
         try:
@@ -513,10 +581,10 @@ def _build_login_chain(
             "请直接在当前对话里扫码登录。",
             f"二维码有效期约 {timeout_sec} 秒，超时后请重新{_restart_action_hint(platform)}。",
             "扫码登录后回复任意消息即可继续任务。",
-            f"如需取消请使用{display_name}登录工具取消",
+            "如需取消请发送 /闲鱼 登录取消",
         ]
         if owner_only:
-            lines.append(f"如需刷新截图，请再次使用{display_name}登录工具发起登录")
+            lines.append(f"如需刷新截图，可再次发送 /闲鱼 登录 {display_name}")
     if page_url:
         lines.append(f"当前页面：{page_url}")
 
@@ -528,15 +596,49 @@ def _build_login_chain(
     return chain
 
 
+def _build_complete_message(
+    flow_platform: str,
+    *,
+    result: dict[str, Any],
+    resumed_count: int,
+    enqueued_count: int,
+) -> str:
+    """单平台登录确认成功的回执文案（goofish 保持 master 原格式逐字节不变）。"""
+    saved_path = str(result.get("saved_path", "")).strip() or "-"
+    mirrored_paths = [
+        str(path).strip()
+        for path in (result.get("mirrored_paths") or [])
+        if str(path).strip()
+    ]
+    name_prefix = (
+        ""
+        if flow_platform == PLATFORM_GOOFISH
+        else platform_display_name(flow_platform)
+    )
+    lines = [
+        f"{name_prefix}登录态已保存。",
+        f"保存位置：{saved_path}",
+    ]
+    if mirrored_paths:
+        lines.append(f"同步位置：{', '.join(mirrored_paths)}")
+    lines.extend(
+        [
+            f"已恢复订阅：{resumed_count}",
+            f"已重新入队：{enqueued_count}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _normalize_platform(platform: str | None) -> str:
     return str(platform or "").strip() or PLATFORM_GOOFISH
 
 
 def _restart_action_hint(platform: str) -> str:
-    """超时/失效后重新发起登录的动作提示（goofish 走斜杠命令，其他平台走登录工具）。"""
+    """超时/失效后重新发起登录的动作提示（/闲鱼 登录 [平台] 对全平台可用）。"""
     if platform == PLATFORM_GOOFISH:
         return "发送 /闲鱼 登录"
-    return f"使用{platform_display_name(platform)}登录工具发起登录"
+    return f"发送 /闲鱼 登录 {platform_display_name(platform)}"
 
 
 def _qr_sent_text(platform: str) -> str:
@@ -582,3 +684,9 @@ def _resolve_flow_expires_at(
 
 _LOGIN_RESTART_MARKERS_LOWER = {marker.lower() for marker in LOGIN_RESTART_MARKERS}
 _CANCEL_MARKERS_LOWER = {marker.lower() for marker in CANCEL_MARKERS}
+# 小写标记 → 目标平台，restart-by-message 按此路由（无后缀 = goofish）。
+_LOGIN_RESTART_PLATFORMS_LOWER = {
+    (base + suffix).lower(): platform
+    for base in _LOGIN_RESTART_BASES
+    for suffix, platform in _RESTART_PLATFORM_SUFFIXES.items()
+}

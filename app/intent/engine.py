@@ -50,6 +50,53 @@ _COLOR_WORDS = (
 _NEW_WORDS = ("全新", "未拆封")
 _USED_WORDS = ("二手",)
 
+# ── 平台限定词预提取 ─────────────────────────────────────────────────────────
+# 在 LLM/启发式解析之前从原文剥离：平台名不是商品词，留在关键词里会污染
+# 各平台搜索（实证：「RTX 5060 Ti 显卡，淘宝平台」整句被打进闲鱼搜索框）。
+_PLATFORM_ALIASES: dict[str, str] = {
+    "淘宝": "taobao",
+    "taobao": "taobao",
+    "闲鱼": "goofish",
+    "咸鱼": "goofish",  # 常见别写
+    "goofish": "goofish",
+}
+# 匹配形态：「，淘宝平台」「在淘宝搜」「闲鱼上的」「帮我在淘宝找」等。
+# 平台名前必须是句首/分隔符 + 可选引导短语，后必须走完可选后缀链后到达
+# 分隔符或句尾——「闲鱼玩偶」这类把平台字当商品词一部分的输入不会命中。
+# 覆盖是 best-effort：漏匹配 = 维持现状（平台词进关键词、搜全平台），不致错。
+# 前导分隔符是消耗式匹配（非 lookbehind）：剥离中段平台词时把它前面的
+# 逗号/空格一并吃掉，避免留下「显卡，，全新」式的重复/悬空分隔符。
+_PLATFORM_RE = re.compile(
+    r"(?:^|[,，、;；\s])"
+    r"(?:请|麻烦)?(?:帮我|帮忙|替我)?(?:想?在|去|上)?"
+    r"(淘宝|闲鱼|咸鱼|taobao|goofish)"
+    r"(?:平台|网)?(?:上面|上|里)?(?:搜索|搜|找找|找|买|逛逛|看看)?(?:的)?"
+    r"(?=[,，、;；\s]|$)",
+    re.IGNORECASE,
+)
+
+
+def extract_platforms(text: str) -> tuple[str, tuple[str, ...]]:
+    """从需求原文剥离平台限定词，返回 (清理后文本, 平台约束)。
+
+    约束为空元组 = 未指定平台（下游搜全部启用平台）。整句只剩平台词时
+    保留原文作兜底关键词（搜索本身已无意义，但不至于空关键词报错）。
+    """
+    raw = str(text or "")
+    platforms: list[str] = []
+
+    def _record(match: re.Match[str]) -> str:
+        name = _PLATFORM_ALIASES.get(match.group(1).lower())
+        if name and name not in platforms:
+            platforms.append(name)
+        return ""
+
+    cleaned = _PLATFORM_RE.sub(_record, raw)
+    cleaned = " ".join(cleaned.split()).strip(" ，,、;；").strip()
+    if not cleaned:
+        cleaned = raw.strip()
+    return cleaned, tuple(platforms)
+
 
 @dataclass(slots=True)
 class DegradationLevel:
@@ -68,6 +115,8 @@ class PurchaseIntent:
     budget_max: float | None = None
     condition: str | None = None       # 全新/二手/不限
     degradation: list[DegradationLevel] = field(default_factory=list)
+    # 用户点名的平台约束（("taobao",) 等）；空元组 = 未指定，搜全部。
+    platforms: tuple[str, ...] = ()
 
 
 async def parse_intent(
@@ -76,13 +125,23 @@ async def parse_intent(
     llm_call=None,
     timeout_sec: int = 12,
 ) -> PurchaseIntent:
-    """解析购物需求。LLM 优先，任何失败回退启发式；保证 degradation 非空。"""
+    """解析购物需求。LLM 优先，任何失败回退启发式；保证 degradation 非空。
+
+    平台限定词在进入任一解析路径前统一剥离（确定性正则，不依赖 LLM），
+    平台约束记录在 intent.platforms，raw_query 保留真实原文。
+    """
     raw = (text or "").strip()
-    if llm_call is not None and raw:
-        intent = await _parse_with_llm(raw, llm_call=llm_call, timeout_sec=timeout_sec)
-        if intent is not None:
-            return intent
-    return _parse_heuristic(raw)
+    cleaned, platforms = extract_platforms(raw)
+    intent: PurchaseIntent | None = None
+    if llm_call is not None and cleaned:
+        intent = await _parse_with_llm(
+            cleaned, llm_call=llm_call, timeout_sec=timeout_sec
+        )
+    if intent is None:
+        intent = _parse_heuristic(cleaned)
+    intent.raw_query = raw
+    intent.platforms = platforms
+    return intent
 
 
 # ── LLM 路径 ─────────────────────────────────────────────────────────────────

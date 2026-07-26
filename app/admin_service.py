@@ -27,6 +27,8 @@ from .config import (
     save_runtime_overrides,
 )
 from .platforms.registry import (
+    PLATFORM_GOOFISH,
+    PLATFORM_TAOBAO,
     PlatformUnavailableError,
     platform_display_name,
     split_item_id,
@@ -512,7 +514,29 @@ class AdminService:
         details["storage_state"] = storage_state
         details.setdefault("provider", self.settings.provider_mode)
         details.setdefault("ok", self.plugin._provider_error is None)
+        platforms = self._per_platform_auth_details()
+        if platforms:
+            details["platforms"] = platforms
         return details
+
+    def _per_platform_auth_details(self) -> dict[str, Any]:
+        """本地模式下逐平台登录态（顶层 auth/storage_state 字段仅覆盖 goofish）。"""
+        if self.settings.provider_mode != PROVIDER_MODE_PLAYWRIGHT_LOCAL:
+            return {}
+        platform_names = [PLATFORM_GOOFISH]
+        if self.settings.taobao_enabled:
+            platform_names.append(PLATFORM_TAOBAO)
+        platforms: dict[str, Any] = {}
+        for platform in platform_names:
+            state_path = self.settings.storage_state_path_for(platform)
+            exists = bool(state_path and state_path.exists())
+            platforms[platform] = {
+                "display_name": platform_display_name(platform),
+                "storage_state": exists,
+                "storage_state_path": str(state_path) if state_path else None,
+                "auth": "本地登录态已就绪" if exists else "本地登录态缺失",
+            }
+        return platforms
 
     async def get_config(self) -> dict[str, Any]:
         schema = self._load_config_schema()
