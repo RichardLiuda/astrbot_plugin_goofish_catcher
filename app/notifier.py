@@ -11,8 +11,9 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context
 
 from .detector import EventPayload
+from .platforms import platform_display_name, split_item_id
 from .reply_favorite import recommendation_reply_hint
-from .types import NormalizedItem, RecommendationResult
+from .types import DEFAULT_PLATFORM, NormalizedItem, RecommendationResult
 
 
 class Notifier:
@@ -48,7 +49,7 @@ class Notifier:
     ) -> bool:
         publish_time_text = _format_time(item.publish_time or observed_at)
         text = (
-            f"🆕【闲鱼上新】关键词：{keyword}\n"
+            f"🆕【{_platform_display_from_item_id(item.item_id)}上新】关键词：{keyword}\n"
             f"{item.title}\n"
             f"价格：¥{item.price:.2f}\n"
             f"时间：{publish_time_text}\n"
@@ -80,7 +81,7 @@ class Notifier:
         observed_at: int,
     ) -> bool:
         text = (
-            f"📉【闲鱼降价】关键词：{keyword}\n"
+            f"📉【{_platform_display_from_item_id(item.item_id)}降价】关键词：{keyword}\n"
             f"{item.title}\n"
             f"现价：¥{item.price:.2f}（上次：¥{last_price:.2f}）\n"
             f"降幅：¥{drop_abs:.2f}（{drop_pct:.1%}）\n"
@@ -135,8 +136,10 @@ class Notifier:
         umo: str,
         recommendation: RecommendationResult,
     ) -> bool:
+        # RecommendationResult 不携带平台字段，从首个推荐项的 item_id 推断；top 为空默认闲鱼
+        top_item_id = recommendation.top[0].item_id if recommendation.top else ""
         lines = [
-            f"【闲鱼建议】关键词：{recommendation.keyword}",
+            f"【{_platform_display_from_item_id(top_item_id)}建议】关键词：{recommendation.keyword}",
             f"候选数：{recommendation.total_candidates} | 推荐数：{len(recommendation.top)}",
             f"分析方式：{'LLM' if recommendation.used_llm else 'Heuristic'}",
             f"总体建议：{recommendation.summary}",
@@ -150,7 +153,9 @@ class Notifier:
             lines.extend(_render_recommendation_item_lines(idx, item))
 
         lines.append(recommendation_reply_hint())
-        lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
+        # /闲鱼 明细 只查 goofish 订阅，对其他平台是死胡同，不输出该提示
+        if split_item_id(top_item_id)[0] == DEFAULT_PLATFORM:
+            lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
         text = "\n".join(lines)
         sent = await self._send_chain_to_umo(
             umo,
@@ -275,6 +280,12 @@ class Notifier:
             logger.warning("[goofish_catcher] webhook post failed: %s", exc)
 
 
+def _platform_display_from_item_id(item_id: str | None) -> str:
+    """从 item_id 推断平台中文显示名；空或未知一律按闲鱼处理。"""
+    platform, _ = split_item_id(item_id or "")
+    return platform_display_name(platform)
+
+
 def _is_valid_unified_msg_origin(umo: str) -> bool:
     if not isinstance(umo, str):
         return False
@@ -338,13 +349,11 @@ def _build_recommendation_chain(
         else:
             text_lines.append(f"链接：{item.url}")
             chain_parts.append(Plain("\n".join(text_lines) + "\n"))
-    chain_parts.append(
-        Plain(
-            "\n"
-            + recommendation_reply_hint()
-            + f"\n查看逐条请用 /闲鱼 明细 {recommendation.keyword}"
-        )
-    )
+    tail = "\n" + recommendation_reply_hint()
+    # /闲鱼 明细 只查 goofish 订阅，对其他平台是死胡同，不输出该提示
+    if split_item_id(recommendation.top[0].item_id)[0] == DEFAULT_PLATFORM:
+        tail += f"\n查看逐条请用 /闲鱼 明细 {recommendation.keyword}"
+    chain_parts.append(Plain(tail))
     return MessageChain(chain_parts)
 
 

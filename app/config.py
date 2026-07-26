@@ -204,6 +204,12 @@ class PluginSettings:
     admin_webui_host: str = DEFAULT_ADMIN_WEBUI_HOST
     admin_webui_port: int = DEFAULT_ADMIN_WEBUI_PORT
     admin_webui_api_key: str | None = None
+    # 多平台开关：开启后本地 playwright 模式额外为淘宝构建独立 provider
+    # （远程 worker 模式暂不支持淘宝，开启也会被跳过并打 warning）。
+    taobao_enabled: bool = False
+    # 淘宝订阅轮询间隔下限（秒）。淘宝风控激进，过低频率易触发 punish；
+    # 创建/更新淘宝订阅时统一兜底，默认 1800（30 分钟），可按需调低但自担风险。
+    taobao_min_interval_sec: int = 1800
 
 
 def get_runtime_override_path(plugin_data_dir: Path) -> Path:
@@ -392,4 +398,8 @@ def load_plugin_settings(
         admin_webui_host=admin_webui_host,
         admin_webui_port=admin_webui_port,
         admin_webui_api_key=admin_webui_api_key,
+        taobao_enabled=_as_bool(raw.get("taobao_enabled"), False),
+        taobao_min_interval_sec=max(
+            300, _as_int(raw.get("taobao_min_interval_sec"), 1800)
+        ),
     )

@@ -9,7 +9,7 @@
 | 工具 | 作用 | 关键参数 |
 |------|------|---------|
 | `goofish_list_subscriptions` | 查看所有订阅 | `keyword`（关键词过滤）, `status`（all/enabled/paused） |
-| `goofish_create_subscription` | 新建订阅 | `keyword`（必填）, `interval_sec`, `pages`, `price_min`, `price_max` |
+| `goofish_create_subscription` | 新建订阅 | `keyword`（必填）, `platform`（goofish/taobao）, `interval_sec`, `pages`, `price_min`, `price_max` |
 | `goofish_update_subscription` | 修改订阅 | `sub_id`（必填），只传需改的字段 |
 | `goofish_delete_subscription` | 删除订阅 | `sub_id` |
 | `goofish_pause_subscription` | 暂停订阅 | `sub_id` |
@@ -27,6 +27,15 @@
 - `-1` = 不修改该字段（仅 price_min/price_max 支持）
 - `0` = 清除该限制（price_min/price_max 设为 NULL）
 - 不传 keyword/interval_sec/pages 时保持原值
+- `platform` 不可修改（要换平台请删除后重建）
+
+## 多平台订阅（淘宝）
+
+- 创建时传 `platform="taobao"` 即订阅淘宝；不传默认闲鱼。同一关键词可在两个平台各建一条订阅（数据库按 `(umo, platform, keyword)` 唯一）
+- **淘宝间隔下限**：`interval_sec` 最小为 `taobao_min_interval_sec`（默认 1800 秒/30 分钟，配置可改；淘宝风控激进，不建议调低）
+- 淘宝订阅触发 `AUTH_REQUIRED` 时自动推送**淘宝**二维码，用户用手机淘宝 App 扫码后**只恢复淘宝订阅**
+- 淘宝商品**不支持收藏**（回复收藏会提示并跳过）；淘宝详情分析可用（店铺信用 + SKU 全档真实价）
+- 机制细节见 [platforms.md](platforms.md)
 
 ## 人工确认规则
 

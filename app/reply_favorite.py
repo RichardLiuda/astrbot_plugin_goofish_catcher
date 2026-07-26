@@ -9,7 +9,7 @@ _INDEX_LINE_RE = re.compile(r"^(\d+)\.\s+\[[^\]]+\]\s+(.+)$")
 _LINK_LINE_RE = re.compile(r"^链接：\s*(https?://\S+)\s*$")
 _SELECTION_RE = re.compile(r"^\s*\d+(?:[\s,，、]+\d+)*\s*$")
 _RECOMMENDATION_HINT = "引用本消息回复序号可收藏，支持 1 或 1 3"
-_SUPPORTED_HEADERS = ("【闲鱼建议】", "【查询推荐】", "【立即检查】")
+_SUPPORTED_HEADERS = ("【闲鱼建议】", "【淘宝建议】", "【查询推荐】", "【立即检查】")
 
 
 @dataclass(slots=True)

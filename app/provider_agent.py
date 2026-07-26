@@ -21,6 +21,13 @@ try:
 except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
+from .platforms.base import SiteProfile
+from .platforms.registry import (
+    PLATFORM_GOOFISH,
+    build_item_url,
+    make_item_id,
+    platform_display_name,
+)
 from .types import NormalizedItem
 
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
@@ -180,12 +187,12 @@ def _parse_price(value: Any) -> float | None:
     return float(m.group(1))
 
 
-def _resolve_url(raw: str) -> str:
+def _resolve_url(raw: str, base_url: str = _BASE_URL) -> str:
     raw = str(raw or "").strip()
     if raw.startswith("//"):
         return "https:" + raw
     if raw.startswith("/"):
-        return _BASE_URL + raw
+        return base_url + raw
     return raw
 
 
@@ -202,8 +209,19 @@ def _item_id_from_url(url: str) -> str:
     return ""
 
 
-def normalize_llm_items(raw_list: list[Any]) -> list[NormalizedItem]:
-    """Convert a list of LLM-extracted dicts into NormalizedItem objects."""
+def normalize_llm_items(
+    raw_list: list[Any],
+    *,
+    profile: SiteProfile | None = None,
+) -> list[NormalizedItem]:
+    """Convert a list of LLM-extracted dicts into NormalizedItem objects.
+
+    ``profile`` 提供平台上下文：item_id 经 make_item_id 前缀化（goofish 保持
+    裸 ID）、URL 兜底走 build_item_url、platform 字段随平台落库，避免非闲鱼
+    平台的兜底产物以裸 ID + 闲鱼 URL 污染 ID 命名空间。缺省为闲鱼语义。
+    """
+    platform = profile.platform if profile is not None else PLATFORM_GOOFISH
+    base_url = profile.base_url if profile is not None else _BASE_URL
     results: list[NormalizedItem] = []
     seen: set[str] = set()
     for item in raw_list:
@@ -215,17 +233,18 @@ def normalize_llm_items(raw_list: list[Any]) -> list[NormalizedItem]:
         price = _parse_price(item.get("price"))
         if price is None:
             continue
-        url = _resolve_url(item.get("url") or "")
-        item_id = str(item.get("item_id") or "").strip()
-        if not item_id and url:
-            item_id = _item_id_from_url(url)
-        if not item_id:
+        url = _resolve_url(item.get("url") or "", base_url)
+        raw_id = str(item.get("item_id") or "").strip()
+        if not raw_id and url:
+            raw_id = _item_id_from_url(url)
+        if not raw_id:
             continue
+        item_id = make_item_id(platform, raw_id)
         if item_id in seen:
             continue
         seen.add(item_id)
         if not url:
-            url = f"{_BASE_URL}/item?id={item_id}"
+            url = build_item_url(item_id)
         results.append(
             NormalizedItem(
                 item_id=item_id,
@@ -234,6 +253,7 @@ def normalize_llm_items(raw_list: list[Any]) -> list[NormalizedItem]:
                 url=url,
                 publish_time=None,
                 raw=item,
+                platform=platform,
             )
         )
     return results
@@ -246,7 +266,7 @@ _SEARCH_EXTRACT_SYSTEM = (
 )
 
 _SEARCH_EXTRACT_PROMPT = """\
-以下是闲鱼搜索页面的无障碍树（Accessibility Tree）。
+以下是{display_name}搜索页面的无障碍树（Accessibility Tree）。
 搜索关键词：{keyword}
 
 请提取页面中所有商品卡片，每个商品包含：
@@ -256,7 +276,7 @@ _SEARCH_EXTRACT_PROMPT = """\
 - item_id: 商品 ID（url 里的 id 参数，若能找到）
 
 输出格式：只输出一个 JSON 数组，例如：
-[{{"title":"iPhone 15","price":4200,"url":"https://www.goofish.com/item?id=123","item_id":"123"}}]
+[{{"title":"iPhone 15","price":4200,"url":"{base_url}/item?id=123","item_id":"123"}}]
 
 页面无障碍树：
 {ax_text}
@@ -305,10 +325,14 @@ async def extract_items_via_llm(
     keyword: str,
     llm_call,          # async callable(prompt, system_prompt) -> str
     timeout_sec: int = 20,
+    profile: SiteProfile | None = None,
 ) -> list[NormalizedItem]:
     """
     Snapshot the page's AX tree, ask the LLM to extract product items,
     and return a list of NormalizedItem.
+
+    ``profile`` 提供平台上下文（提示词措辞 / ID 前缀 / URL 兜底），
+    缺省为闲鱼语义。
 
     ``llm_call`` signature::
 
@@ -326,7 +350,18 @@ async def extract_items_via_llm(
         logger.info("[goofish_catcher][agent] ax snapshot empty")
         return []
 
-    prompt = _SEARCH_EXTRACT_PROMPT.format(keyword=keyword, ax_text=ax_text)
+    display_name = (
+        profile.display_name
+        if profile is not None
+        else platform_display_name(PLATFORM_GOOFISH)
+    )
+    base_url = profile.base_url if profile is not None else _BASE_URL
+    prompt = _SEARCH_EXTRACT_PROMPT.format(
+        keyword=keyword,
+        ax_text=ax_text,
+        display_name=display_name,
+        base_url=base_url,
+    )
     logger.info(
         "[goofish_catcher][agent] extract_items_via_llm: ax_nodes=%d ax_chars=%d",
         ax_text.count("\n") + 1,
@@ -346,7 +381,7 @@ async def extract_items_via_llm(
         return []
 
     raw_list = _extract_json_array(response)
-    items = normalize_llm_items(raw_list)
+    items = normalize_llm_items(raw_list, profile=profile)
     logger.info(
         "[goofish_catcher][agent] extract_items_via_llm: raw=%d normalized=%d",
         len(raw_list),

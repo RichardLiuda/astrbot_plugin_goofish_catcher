@@ -6,43 +6,49 @@ import unittest
 from types import SimpleNamespace
 
 
-astrbot_module = types.ModuleType("astrbot")
-astrbot_api_module = types.ModuleType("astrbot.api")
-astrbot_api_module.logger = SimpleNamespace(
-    warning=lambda *args, **kwargs: None,
-    info=lambda *args, **kwargs: None,
-    error=lambda *args, **kwargs: None,
-    debug=lambda *args, **kwargs: None,
-)
-astrbot_api_star_module = types.ModuleType("astrbot.api.star")
-astrbot_api_star_module.Context = object
-astrbot_api_star_module.StarTools = object
-astrbot_api_event_module = types.ModuleType("astrbot.api.event")
-astrbot_api_event_module.MessageChain = object
-astrbot_api_message_components_module = types.ModuleType("astrbot.api.message_components")
-astrbot_api_message_components_module.Image = object
-astrbot_api_message_components_module.Plain = object
+# 真实 astrbot 可导入时不装桩：直接赋值会顶掉真模块，污染全量 discover 中
+# 后续加载的测试（如 test_reply_favorite）。仅裸环境装桩，且一律 setdefault。
+try:
+    import astrbot.api.message_components  # noqa: F401
+except ImportError:
+    astrbot_module = types.ModuleType("astrbot")
+    astrbot_api_module = types.ModuleType("astrbot.api")
+    astrbot_api_module.logger = SimpleNamespace(
+        warning=lambda *args, **kwargs: None,
+        info=lambda *args, **kwargs: None,
+        error=lambda *args, **kwargs: None,
+        debug=lambda *args, **kwargs: None,
+    )
+    astrbot_api_star_module = types.ModuleType("astrbot.api.star")
+    astrbot_api_star_module.Context = object
+    astrbot_api_star_module.StarTools = object
+    astrbot_api_event_module = types.ModuleType("astrbot.api.event")
+    astrbot_api_event_module.MessageChain = object
+    astrbot_api_message_components_module = types.ModuleType("astrbot.api.message_components")
+    astrbot_api_message_components_module.Image = object
+    astrbot_api_message_components_module.Plain = object
 
+    class _Reply:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
-class _Reply:
-    def __init__(self, **kwargs):
-        for key, value in kwargs.items():
-            setattr(self, key, value)
+    astrbot_api_message_components_module.Reply = _Reply
 
+    sys.modules.setdefault("astrbot", astrbot_module)
+    sys.modules.setdefault("astrbot.api", astrbot_api_module)
+    sys.modules.setdefault("astrbot.api.star", astrbot_api_star_module)
+    sys.modules.setdefault("astrbot.api.event", astrbot_api_event_module)
+    sys.modules.setdefault(
+        "astrbot.api.message_components", astrbot_api_message_components_module
+    )
 
-astrbot_api_message_components_module.Reply = _Reply
 try:
     import httpx as _httpx  # noqa: F401
 except ModuleNotFoundError:
     httpx_module = types.ModuleType("httpx")
     httpx_module.AsyncClient = object
     sys.modules.setdefault("httpx", httpx_module)
-
-sys.modules.setdefault("astrbot", astrbot_module)
-sys.modules["astrbot.api"] = astrbot_api_module
-sys.modules["astrbot.api.star"] = astrbot_api_star_module
-sys.modules["astrbot.api.event"] = astrbot_api_event_module
-sys.modules["astrbot.api.message_components"] = astrbot_api_message_components_module
 
 from app.detector import should_recover_unsent_new_event
 from app.recommender import GoofishRecommender

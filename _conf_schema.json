@@ -9,6 +9,18 @@
     ],
     "default": "playwright_local"
   },
+  "taobao_enabled": {
+    "type": "bool",
+    "description": "启用淘宝平台适配（仅本地模式生效）",
+    "hint": "开启后可创建淘宝订阅（platform=taobao）；远程 Worker 模式下不生效",
+    "default": false
+  },
+  "taobao_min_interval_sec": {
+    "type": "int",
+    "description": "淘宝订阅轮询间隔下限（秒）",
+    "hint": "淘宝风控激进，过低频率易触发滑块/punish；创建/更新淘宝订阅时统一兜底，默认 1800（30 分钟），最低 300。想每天查一次可填 86400",
+    "default": 1800
+  },
   "remote_base_url": {
     "type": "string",
     "description": "远程地址",
