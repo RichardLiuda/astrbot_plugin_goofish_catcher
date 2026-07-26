@@ -8,21 +8,26 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-astrbot_module = types.ModuleType("astrbot")
-astrbot_api_module = types.ModuleType("astrbot.api")
-astrbot_api_module.logger = SimpleNamespace(
-    warning=lambda *args, **kwargs: None,
-    info=lambda *args, **kwargs: None,
-    error=lambda *args, **kwargs: None,
-    debug=lambda *args, **kwargs: None,
-)
-astrbot_api_star_module = types.ModuleType("astrbot.api.star")
-astrbot_api_star_module.Context = object
-astrbot_api_star_module.StarTools = object
+# 真实 astrbot 可导入时不装桩：直接赋值会顶掉真模块，污染全量 discover 中
+# 后续加载的测试（如 test_reply_favorite）。仅裸环境装桩，且一律 setdefault。
+try:
+    import astrbot.api.star  # noqa: F401
+except ImportError:
+    astrbot_module = types.ModuleType("astrbot")
+    astrbot_api_module = types.ModuleType("astrbot.api")
+    astrbot_api_module.logger = SimpleNamespace(
+        warning=lambda *args, **kwargs: None,
+        info=lambda *args, **kwargs: None,
+        error=lambda *args, **kwargs: None,
+        debug=lambda *args, **kwargs: None,
+    )
+    astrbot_api_star_module = types.ModuleType("astrbot.api.star")
+    astrbot_api_star_module.Context = object
+    astrbot_api_star_module.StarTools = object
 
-sys.modules.setdefault("astrbot", astrbot_module)
-sys.modules["astrbot.api"] = astrbot_api_module
-sys.modules["astrbot.api.star"] = astrbot_api_star_module
+    sys.modules.setdefault("astrbot", astrbot_module)
+    sys.modules.setdefault("astrbot.api", astrbot_api_module)
+    sys.modules.setdefault("astrbot.api.star", astrbot_api_star_module)
 
 import aiosqlite
 
@@ -132,6 +137,35 @@ class StoragePlatformTests(unittest.IsolatedAsyncioTestCase):
         assert default_mp2 is not None
         self.assertEqual(default_mp2.ema_price, 110.0)
 
+    async def test_pause_all_enabled_subscriptions_platform_filter(self) -> None:
+        umo = "umo-1"
+        await self.storage.upsert_subscription(
+            umo=umo, keyword="macmini", platform="goofish", **_UPSERT_KWARGS
+        )
+        await self.storage.upsert_subscription(
+            umo=umo, keyword="iphone", platform="taobao", **_UPSERT_KWARGS
+        )
+
+        paused = await self.storage.pause_all_enabled_subscriptions(
+            "AUTH_REQUIRED", platform="goofish"
+        )
+
+        self.assertEqual(paused, 1)
+        goofish_sub = await self.storage.get_subscription(umo, "macmini")
+        taobao_sub = await self.storage.get_subscription(umo, "iphone", "taobao")
+        self.assertFalse(goofish_sub.enabled)
+        self.assertEqual(goofish_sub.paused_reason, "AUTH_REQUIRED")
+        # goofish 登录态失效不能连坐暂停淘宝订阅（扫码恢复只恢复 goofish）
+        self.assertTrue(taobao_sub.enabled)
+        self.assertIsNone(taobao_sub.paused_reason)
+
+        # 不传 platform = 旧行为：全平台暂停
+        paused_all = await self.storage.pause_all_enabled_subscriptions("CAPTCHA")
+        self.assertEqual(paused_all, 1)
+        taobao_after = await self.storage.get_subscription(umo, "iphone", "taobao")
+        self.assertFalse(taobao_after.enabled)
+        self.assertEqual(taobao_after.paused_reason, "CAPTCHA")
+
     async def test_migration_from_v6(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "v6.db"
@@ -226,6 +260,96 @@ class StoragePlatformTests(unittest.IsolatedAsyncioTestCase):
                         await conn.execute("SELECT COUNT(*) FROM subscriptions")
                     ).fetchone()
                     self.assertEqual(int(row[0]), 2)
+            finally:
+                await storage.close()
+
+    @staticmethod
+    async def _create_interrupted_v7_db(db_path: Path, *, dropped: bool) -> None:
+        """构造 v7 迁移中断现场：market_price_new 已建且已拷数据，
+        dropped=False 时旧表还在（INSERT 后被杀），True 时旧表已删（DROP 后被杀）。"""
+        async with aiosqlite.connect(db_path.as_posix()) as conn:
+            await conn.executescript(
+                """
+                CREATE TABLE subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    umo TEXT NOT NULL,
+                    keyword TEXT NOT NULL
+                );
+
+                CREATE TABLE market_price (
+                    keyword       TEXT PRIMARY KEY,
+                    ema_price     REAL NOT NULL,
+                    sample_count  INTEGER NOT NULL DEFAULT 0,
+                    updated_at    INTEGER NOT NULL
+                );
+                INSERT INTO market_price (keyword, ema_price, sample_count, updated_at)
+                    VALUES ('RTX 5090', 110.0, 3, 1);
+
+                CREATE TABLE market_price_new (
+                    platform      TEXT NOT NULL DEFAULT 'goofish',
+                    keyword       TEXT NOT NULL,
+                    ema_price     REAL NOT NULL,
+                    sample_count  INTEGER NOT NULL DEFAULT 0,
+                    updated_at    INTEGER NOT NULL,
+                    PRIMARY KEY (platform, keyword)
+                );
+                INSERT INTO market_price_new (platform, keyword, ema_price, sample_count, updated_at)
+                    SELECT 'goofish', keyword, ema_price, sample_count, updated_at FROM market_price;
+
+                PRAGMA user_version = 6;
+                """
+            )
+            if dropped:
+                await conn.execute("DROP TABLE market_price")
+            await conn.commit()
+
+    async def _assert_v7_converged(self, db_path: Path) -> None:
+        async with aiosqlite.connect(db_path.as_posix()) as conn:
+            row = await (await conn.execute("PRAGMA user_version")).fetchone()
+            self.assertEqual(int(row[0]), 7)
+            mp_cols = {
+                r[1]
+                for r in await (
+                    await conn.execute("PRAGMA table_info(market_price)")
+                ).fetchall()
+            }
+            self.assertIn("platform", mp_cols)
+            row = await (
+                await conn.execute(
+                    "SELECT platform, ema_price, sample_count FROM market_price WHERE keyword = 'RTX 5090'"
+                )
+            ).fetchone()
+            self.assertEqual(row[0], "goofish")
+            self.assertEqual(float(row[1]), 110.0)
+            self.assertEqual(int(row[2]), 3)
+            leftover = await (
+                await conn.execute("PRAGMA table_info(market_price_new)")
+            ).fetchall()
+            self.assertEqual(leftover, [])
+
+    async def test_migration_v7_rerun_after_insert_interrupt(self) -> None:
+        """INSERT SELECT 之后、DROP 之前被杀：重跑 v7 不得撞主键。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "v7_insert_interrupt.db"
+            await self._create_interrupted_v7_db(db_path, dropped=False)
+
+            storage = SubscriptionStorage(db_path)
+            await storage.initialize()
+            try:
+                await self._assert_v7_converged(db_path)
+            finally:
+                await storage.close()
+
+    async def test_migration_v7_rerun_after_drop_interrupt(self) -> None:
+        """DROP TABLE 之后、RENAME 之前被杀：重跑 v7 直接改名新表收敛。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "v7_drop_interrupt.db"
+            await self._create_interrupted_v7_db(db_path, dropped=True)
+
+            storage = SubscriptionStorage(db_path)
+            await storage.initialize()
+            try:
+                await self._assert_v7_converged(db_path)
             finally:
                 await storage.close()
 

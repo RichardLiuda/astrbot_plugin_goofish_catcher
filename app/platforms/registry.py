@@ -29,6 +29,14 @@ _PLATFORM_DISPLAY_NAMES: dict[str, str] = {
     PLATFORM_TAOBAO: "淘宝",
 }
 
+
+class PlatformUnavailableError(RuntimeError):
+    """订阅/商品所属平台当前没有可用 provider（未启用或运行模式不支持）。
+
+    独立类型是为了让调用方能精确捕获「平台不可用」而不吞掉其他
+    RuntimeError（如 provider 初始化失败需向框架层冒泡的场景）。
+    """
+
 _KNOWN_PLATFORMS = frozenset(_ITEM_URL_TEMPLATES)
 
 

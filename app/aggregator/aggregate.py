@@ -75,7 +75,7 @@ def cluster_same_shop(candidates: list[DecisionItem]) -> list[DecisionItem]:
     DecisionItem 归并为一个。保留分数最高者为代表，把归并数记进
     representative.item.raw['cluster_count']（同时保留被归并者的最低价
     记进 raw['cluster_price_min']）。空 shopName 或不同店各自独立，不受影响。
-    标题主键：去空格/标点后的前 12 个字符（空主键不参与聚类）。
+    标题主键：去空格/标点后的完整标题（空主键不参与聚类）。
 
     保序：代表出现在原最高分成员的位置；不改动被保留者的 score/risk_tags；
     raw 复制后再改（NormalizedItem.raw 可能被多处引用），代表是新对象。
@@ -111,8 +111,12 @@ def cluster_same_shop(candidates: list[DecisionItem]) -> list[DecisionItem]:
 
 
 def _title_key(title: str | None) -> str:
-    """标题主键：去空格/标点（含下划线）后的前 12 个字符。"""
-    return re.sub(r"[\W_]+", "", title or "")[:12]
+    """标题主键：去空格/标点（含下划线）后的完整标题。
+
+    不截断：截断会把 "…RTX5090显卡" 与 "…RTX5080显卡" 这类相邻型号误并，
+    宁可漏聚类，不可误并。
+    """
+    return re.sub(r"[\W_]+", "", title or "")
 
 
 def risk_tags_for(item: NormalizedItem) -> list[str]:
@@ -167,7 +171,8 @@ async def rank_items(
     """候选排序：LLM 重排优先，失败回退按 score 启发式排序。
 
     返回 (排序后列表, 总结文本, used_llm)。LLM 路径会回填 score/reason/risk；
-    回退路径保留调用方已算好的启发式 score。
+    回退路径保留调用方已算好的启发式 score。LLM 返回合法 JSON 且 top 为空数组
+    属"宁缺毋滥"的有效结果（推荐列表为空），不算失败、不回退。
     """
     if not candidates:
         return [], "本次无候选商品。", False
@@ -235,25 +240,36 @@ async def _rank_with_llm(
 
     by_id = {c.item.item_id: c for c in candidates}
     ranked: list[DecisionItem] = []
+    seen_ids: set[str] = set()
     for row in top_raw:
         if not isinstance(row, dict):
             continue
         item_id = str(row.get("item_id") or "").strip()
+        # 重复 item_id 只占一个推荐位，首次出现优先。
+        if not item_id or item_id in seen_ids:
+            continue
         cand = by_id.get(item_id)
         if cand is None:
             continue
+        seen_ids.add(item_id)
         cand.score = _clamp_score(row.get("score"), default=cand.score)
         cand.reason = str(row.get("reason") or "").strip()
         cand.risk = str(row.get("risk") or "").strip()
         ranked.append(cand)
         if len(ranked) >= top_k:
             break
-    if not ranked:
+    if not ranked and top_raw:
+        # top 非空却全部对不上候选（幻觉 item_id）才算无效输出；
+        # 空 top 是模型"宁缺毋滥"的有效判断，不回退启发式强行凑数。
         return None
 
     summary = str(parsed.get("summary") or "").strip()
     if not summary:
-        summary = f"共 {len(candidates)} 个候选，模型推荐前 {len(ranked)} 个。"
+        summary = (
+            f"共 {len(candidates)} 个候选，模型推荐前 {len(ranked)} 个。"
+            if ranked
+            else f"共 {len(candidates)} 个候选，模型判断均不符合需求，未推荐。"
+        )
     return ranked, summary, True
 
 

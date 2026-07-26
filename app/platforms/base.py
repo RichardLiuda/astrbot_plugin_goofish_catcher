@@ -47,6 +47,10 @@ class SiteProfile:
     # 访客可用平台（淘宝）应关闭：次要接口的 SESSION_EXPIRED 不代表搜索被墙，
     # 只认 login.* 重定向才是真登录墙。
     auth_on_payload_markers: bool = True
+    # 硬编码启发式全部落空后，是否再用 LLM 兜底判定登录墙
+    # （provider_agent.check_login_via_llm）。访客可搜索的平台（淘宝）必须关闭：
+    # 页头常驻「登录」按钮，LLM 如实答未登录会把合法的访客搜索判成 AUTH_REQUIRED。
+    llm_login_check_enabled: bool = True
     # 可选：详情页解析钩子（html, payloads, item) -> DeepAnalysisResult。
     # 设置后引擎的 analyze_item_detail 直接使用其结果（不再走闲鱼默认 payload 解析）；
     # 解析失败也应返回保守结果而不是 None。淘宝 SSR 页面走此路径（1.3 起）。

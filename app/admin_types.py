@@ -46,6 +46,7 @@ class SubscriptionSummary:
     id: int
     umo: str
     keyword: str
+    platform: str
     interval_sec: int
     pages: int
     recommend_max_price: float | None

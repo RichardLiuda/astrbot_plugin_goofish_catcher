@@ -150,6 +150,33 @@ class ParseIntentHeuristicTest(unittest.IsolatedAsyncioTestCase):
         intent = await parse_intent("红色 RTX 5090，8000元以内", llm_call=None)
         self.assertEqual(intent.budget_max, 8000.0)
 
+    async def test_heuristic_bare_wan_is_not_budget(self) -> None:
+        # 回归：无锚点的裸"N万/NW"是型号或参数（850W 电源、5000万像素、
+        # RTX 5090 White），不作预算；同句里带锚点的真实预算必须胜出。
+        for text, expected in (
+            ("850W电源 预算400元", 400.0),
+            ("RTX 5090 White 预算2万", 20000.0),
+            ("5000万像素手机 预算2000", 2000.0),
+        ):
+            intent = await parse_intent(text, llm_call=None)
+            self.assertEqual(intent.budget_max, expected, text)
+        for text in ("850W电源", "5000万像素手机", "RTX 5090 White"):
+            intent = await parse_intent(text, llm_call=None)
+            self.assertIsNone(intent.budget_max, text)
+
+    async def test_heuristic_wan_tail_adjacency_and_lead_priority(self) -> None:
+        # 回归：万形式尾数必须紧贴（"预算2万 850W电源" 不吞 850）；
+        # 前置引导词优先于后置限定（"850W以内" 的瓦数不压过 "预算400元"）。
+        for text, expected in (
+            ("预算2万 850W电源", 20000.0),
+            ("预算1万 4060显卡", 10000.0),
+            ("电源850W以内 预算400元", 400.0),
+            ("预算1万5", 15000.0),
+            ("13700K 2万以内", 20000.0),
+        ):
+            intent = await parse_intent(text, llm_call=None)
+            self.assertEqual(intent.budget_max, expected, text)
+
     async def test_heuristic_levels_and_attributes(self) -> None:
         intent = await parse_intent("想买红色RTX5090显卡，预算1万5", llm_call=None)
         self.assertEqual(intent.raw_query, "想买红色RTX5090显卡，预算1万5")
@@ -214,6 +241,22 @@ class ParseIntentLlmTest(unittest.IsolatedAsyncioTestCase):
         intent = await parse_intent("RTX5090 预算15000", llm_call=slow, timeout_sec=1)
         self.assertEqual(intent.budget_max, 15000.0)
 
+    async def test_llm_scalar_require_terms_ignored(self) -> None:
+        # 回归：require_terms 为标量 int 时不允许 TypeError 冒泡到用户，
+        # 该字段忽略、其余 LLM 结果照常使用。
+        payload = json.loads(json.dumps(INTENT_LLM_PAYLOAD))
+        payload["degradation"][0]["require_terms"] = 5
+        intent = await parse_intent("红色RTX5090", llm_call=make_llm(payload))
+        self.assertEqual(intent.keyword, "RTX5090")
+        self.assertEqual(intent.degradation[0].require_terms, ())
+
+    async def test_llm_string_require_terms_kept_whole(self) -> None:
+        # 回归：require_terms 为字符串时整串当一个词，不能逐字符拆散。
+        payload = json.loads(json.dumps(INTENT_LLM_PAYLOAD))
+        payload["degradation"][0]["require_terms"] = "红色"
+        intent = await parse_intent("红色RTX5090", llm_call=make_llm(payload))
+        self.assertEqual(intent.degradation[0].require_terms, ("红色",))
+
 
 # ── ③ 降级循环 / ④ require_terms / 预算过滤 ──────────────────────────────────
 
@@ -276,6 +319,32 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
             len(report.items) + len(report.other_items),
             report.platform_counts[PLATFORM_GOOFISH],
         )
+
+    async def test_error_cleared_when_later_level_succeeds(self) -> None:
+        # 回归：平台在 L0 失败、降级级成功后，errors 不得保留旧错误
+        # （否则卡片同时展示该平台商品和"失败平台"）；两级都失败的平台仍保留。
+        l1_item = make_item("g1", "RTX5090 显卡", 12999.0)
+
+        class FlakyProvider(FakeProvider):
+            async def search(self, *, keyword, pages, timeout_sec, filters=None,
+                             price_lower=None, price_upper=None):
+                self.calls.append(keyword)
+                if keyword == "红色RTX5090":
+                    raise RuntimeError("CAPTCHA: 滑块")
+                return [l1_item]
+
+        providers = {
+            PLATFORM_GOOFISH: FlakyProvider(),
+            PLATFORM_TAOBAO: FakeProvider(error=RuntimeError("AUTH_REQUIRED: 需要登录")),
+        }
+        service = PurchaseDecisionService(
+            providers=providers, llm_call=make_llm(INTENT_LLM_PAYLOAD)
+        )
+        report = await service.run("想买红色RTX5090，预算1万5")
+        self.assertEqual(report.level_used, 1)
+        self.assertEqual([d.item.item_id for d in report.items], ["g1"])
+        self.assertNotIn(PLATFORM_GOOFISH, report.errors)
+        self.assertIn(PLATFORM_TAOBAO, report.errors)
 
     async def test_all_levels_empty(self) -> None:
         providers = {PLATFORM_GOOFISH: FakeProvider({})}
@@ -439,6 +508,44 @@ class RankItemsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ranked, [])
         self.assertFalse(used_llm)
 
+    async def test_llm_empty_top_is_valid_no_recommendation(self) -> None:
+        # 回归：LLM 遵照"宁缺毋滥"返回空 top 是有效结果——推荐为空、
+        # used_llm=True、summary 用 LLM 的，不回退启发式强行凑数。
+        payload = {"summary": "没有一条符合需求", "top": []}
+        ranked, summary, used_llm = await rank_items(
+            self._candidates(), requirement="买RTX5090", llm_call=make_llm(payload)
+        )
+        self.assertTrue(used_llm)
+        self.assertEqual(ranked, [])
+        self.assertEqual(summary, "没有一条符合需求")
+
+    async def test_llm_unknown_ids_fall_back(self) -> None:
+        # top 非空但 item_id 全部对不上候选（幻觉输出）：仍回退启发式。
+        payload = {"summary": "s", "top": [{"item_id": "不存在", "score": 90}]}
+        ranked, summary, used_llm = await rank_items(
+            self._candidates(), requirement="买RTX5090", llm_call=make_llm(payload)
+        )
+        self.assertFalse(used_llm)
+        self.assertEqual([d.item.item_id for d in ranked], ["a", "b"])
+
+    async def test_llm_duplicate_item_id_takes_one_slot(self) -> None:
+        # 回归：LLM top 里重复 item_id 只占一个推荐位，首次出现优先。
+        payload = {
+            "summary": "s",
+            "top": [
+                {"item_id": "b", "score": 92, "reason": "箱说全", "risk": ""},
+                {"item_id": "b", "score": 40, "reason": "重复条目", "risk": ""},
+                {"item_id": "a", "score": 80, "reason": "便宜", "risk": ""},
+            ],
+        }
+        ranked, summary, used_llm = await rank_items(
+            self._candidates(), requirement="买RTX5090", llm_call=make_llm(payload)
+        )
+        self.assertTrue(used_llm)
+        self.assertEqual([d.item.item_id for d in ranked], ["b", "a"])
+        self.assertEqual(ranked[0].score, 92.0)
+        self.assertEqual(ranked[0].reason, "箱说全")
+
 
 # ── ⑦ render_decision_card ───────────────────────────────────────────────────
 
@@ -578,9 +685,10 @@ def _tb_decision(
 
 class ClusterSameShopTest(unittest.TestCase):
     def test_three_same_shop_links_merge_into_one(self) -> None:
+        # 同店同款：标题仅空格/标点不同（规范化后同键）才归并。
         a = _tb_decision("t1", "iPhone17 Pro 手机 白色 全新", 100.0, 80.0)
-        b = _tb_decision("t2", "iPhone17 Pro 手机 黑色", 90.0, 70.0)
-        c = _tb_decision("t3", "iPhone17 Pro 手机 白色 官方预购", 95.0, 60.0)
+        b = _tb_decision("t2", "iPhone17Pro手机白色全新", 90.0, 70.0)
+        c = _tb_decision("t3", "iPhone17-Pro 手机_白色（全新）", 95.0, 60.0)
         out = cluster_same_shop([a, b, c])
         self.assertEqual(len(out), 1)
         rep = out[0]
@@ -599,12 +707,22 @@ class ClusterSameShopTest(unittest.TestCase):
         solo1 = _tb_decision("s1", "别的商品A", 10.0, 50.0, shop="甲店")
         a = _tb_decision("t1", "iPhone17 Pro 手机 白色", 100.0, 60.0)
         solo2 = _tb_decision("s2", "别的商品B", 20.0, 55.0, shop="乙店")
-        b = _tb_decision("t2", "iPhone17 Pro 手机 黑色", 90.0, 80.0)
+        b = _tb_decision("t2", "iPhone17Pro手机白色", 90.0, 80.0)
         out = cluster_same_shop([solo1, a, solo2, b])
         # 代表 b 出现在它原来的位置（原最高分成员处），整体保序
         self.assertEqual([d.item.item_id for d in out], ["s1", "s2", "t2"])
         self.assertEqual(out[2].item.raw["cluster_count"], 2)
         self.assertEqual(out[2].item.raw["cluster_price_min"], 100.0)
+
+    def test_adjacent_models_same_shop_not_merged(self) -> None:
+        # 回归：同店相邻型号（5090/5080）标题仅个别字符不同，规范化后
+        # 全文比对键不同，不得误并——两条都必须保留。
+        a = _tb_decision("t1", "华硕ROG玩家国度RTX5090显卡", 20000.0, 80.0)
+        b = _tb_decision("t2", "华硕ROG玩家国度RTX5080显卡", 12000.0, 70.0)
+        out = cluster_same_shop([a, b])
+        self.assertEqual([d.item.item_id for d in out], ["t1", "t2"])
+        for cand in out:
+            self.assertNotIn("cluster_count", cand.item.raw)
 
     def test_no_cluster_when_shop_empty_differs_or_platform_differs(self) -> None:
         no_shop_a = _tb_decision("n1", "iPhone17 Pro 手机", 100.0, 80.0, shop=None)
@@ -624,8 +742,8 @@ class ClusterSameShopTest(unittest.TestCase):
 
     def test_card_shows_cluster_annotations(self) -> None:
         a = _tb_decision("t1", "iPhone17 Pro 手机 白色 全新", 100.0, 80.0)
-        b = _tb_decision("t2", "iPhone17 Pro 手机 黑色", 90.0, 70.0)
-        c = _tb_decision("t3", "iPhone17 Pro 手机 白色 官方预购", 95.0, 60.0)
+        b = _tb_decision("t2", "iPhone17Pro手机白色全新", 90.0, 70.0)
+        c = _tb_decision("t3", "iPhone17-Pro 手机_白色（全新）", 95.0, 60.0)
         rep = cluster_same_shop([a, b, c])[0]
         report = DecisionReport(
             intent=PurchaseIntent(raw_query="iPhone17", keyword="iPhone17", attributes={}),
@@ -647,7 +765,7 @@ class ClusterSameShopTest(unittest.TestCase):
     def test_card_omits_cluster_min_when_not_lower(self) -> None:
         # 代表本身就是同店最低价时，不追加"同店最低"。
         a = _tb_decision("t1", "iPhone17 Pro 手机 白色", 90.0, 80.0)
-        b = _tb_decision("t2", "iPhone17 Pro 手机 黑色", 100.0, 70.0)
+        b = _tb_decision("t2", "iPhone17Pro手机白色", 100.0, 70.0)
         rep = cluster_same_shop([a, b])[0]
         report = DecisionReport(
             intent=PurchaseIntent(raw_query="iPhone17", keyword="iPhone17", attributes={}),
@@ -677,8 +795,8 @@ class ClusterIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
         items = [
             tb("t1", "iPhone17 Pro 手机 白色 全新", 100.0, "Apple旗舰店"),
-            tb("t2", "iPhone17 Pro 手机 黑色", 90.0, "Apple旗舰店"),
-            tb("t3", "iPhone17 Pro 手机 白色 官方预购", 95.0, "Apple旗舰店"),
+            tb("t2", "iPhone17Pro手机白色全新", 90.0, "Apple旗舰店"),
+            tb("t3", "iPhone17-Pro 手机_白色（全新）", 95.0, "Apple旗舰店"),
             tb("t4", "iPhone17 Pro Max 手机 全新", 120.0, "小王数码店"),
         ]
         providers = {PLATFORM_TAOBAO: FakeProvider({"iPhone17": items})}
@@ -699,6 +817,33 @@ class ClusterIntegrationTest(unittest.IsolatedAsyncioTestCase):
         card = render_decision_card(report)
         self.assertIn("同店同款 ×3", card)
         self.assertIn("同店最低 ¥90", card)
+
+    async def test_clustered_members_remain_in_other_items(self) -> None:
+        # 回归：被聚类归并掉的同店链接不能凭空消失——不进 top，
+        # 但必须留在 other_items 未推荐池里供追问。
+        def tb(item_id: str, title: str, price: float, shop: str) -> NormalizedItem:
+            return make_item(
+                item_id, title, price, platform=PLATFORM_TAOBAO,
+                raw={"shopName": shop},
+            )
+
+        items = [
+            tb("t1", "iPhone17 Pro 手机 白色 全新", 100.0, "Apple旗舰店"),
+            tb("t2", "iPhone17Pro手机白色全新", 90.0, "Apple旗舰店"),
+            tb("t3", "iPhone17-Pro 手机_白色（全新）", 95.0, "Apple旗舰店"),
+        ]
+        providers = {PLATFORM_TAOBAO: FakeProvider({"iPhone17": items})}
+        service = PurchaseDecisionService(providers=providers, llm_call=None, top_k=2)
+        report = await service.run("iPhone17")
+
+        self.assertEqual(len(report.items), 1)  # 聚类后只剩 1 个代表
+        self.assertEqual(report.items[0].item.raw["cluster_count"], 3)
+        self.assertEqual({d.item.item_id for d in report.other_items}, {"t2", "t3"})
+        # 总数守恒：top + other = 聚类前的去重总数
+        self.assertEqual(
+            len(report.items) + len(report.other_items),
+            report.platform_counts[PLATFORM_TAOBAO],
+        )
 
 
 if __name__ == "__main__":

@@ -26,7 +26,11 @@ from .config import (
     load_plugin_settings,
     save_runtime_overrides,
 )
-from .platforms.registry import platform_display_name
+from .platforms.registry import (
+    PlatformUnavailableError,
+    platform_display_name,
+    split_item_id,
+)
 from .types import (
     NormalizedItem,
     ProviderError,
@@ -359,6 +363,15 @@ class AdminService:
             raise KeyError("item not found")
         if self.plugin._provider_error:
             raise RuntimeError(self.plugin._provider_error)
+        # 详情页归属按 item_id 前缀路由，绝不硬用 goofish provider
+        # 打开其他平台详情页（解析钩子不匹配会产出错误结果入库）
+        item_platform = split_item_id(item_id)[0]
+        provider = (self.plugin.providers or {}).get(item_platform)
+        if provider is None:
+            raise RuntimeError(
+                f"平台「{platform_display_name(item_platform)}」当前不可用"
+                "（未启用或当前运行模式不支持），无法深度搜索该商品。"
+            )
         activity_id = await self.activity_monitor.start_task(
             source="deep_search",
             keyword=summary.title[:40],
@@ -376,7 +389,7 @@ class AdminService:
                 url=summary.url,
                 publish_time=summary.publish_time,
             )
-            analysis = await self.provider.analyze_item_detail(
+            analysis = await provider.analyze_item_detail(
                 item=item,
                 timeout_sec=max(8, self.settings.fetch_timeout_sec),
             )
@@ -689,6 +702,14 @@ class AdminService:
     async def _run_manual_subscription_check(self, sub: Subscription) -> dict[str, Any]:
         if self.plugin._provider_error:
             raise RuntimeError(self.plugin._provider_error)
+        # 平台无 provider 时与 scheduler 的 PLATFORM_UNAVAILABLE 语义对齐：
+        # 明确报错，绝不回退 goofish（回退会把闲鱼结果写进其他平台订阅）
+        provider = (self.plugin.providers or {}).get(sub.platform)
+        if provider is None:
+            raise PlatformUnavailableError(
+                f"PLATFORM_UNAVAILABLE：平台「{platform_display_name(sub.platform)}」"
+                "当前不可用（未启用或当前运行模式不支持），无法立即检查。"
+            )
         await self.plugin._ensure_scheduler_started()
         acquired = await self.scheduler.try_acquire_subscription(sub.id)
         if not acquired:
@@ -697,7 +718,6 @@ class AdminService:
                 "status": "running",
                 "message": "该订阅正在执行查询，无需重复触发，结果出来后会自动推送。",
             }
-        provider = (self.plugin.providers or {}).get(sub.platform) or self.provider
         activity_id = await self.activity_monitor.start_task(
             source="manual_check",
             keyword=sub.keyword,
@@ -883,6 +903,7 @@ class AdminService:
             id=sub.id,
             umo=sub.umo,
             keyword=sub.keyword,
+            platform=sub.platform,
             interval_sec=sub.interval_sec,
             pages=sub.pages,
             recommend_max_price=sub.recommend_max_price,

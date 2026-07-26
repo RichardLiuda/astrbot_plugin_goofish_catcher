@@ -6,8 +6,9 @@
 
 阶段 0.3b 行为保持型重构：闲鱼详情页解析（_build_deep_analysis_result 及其
 专用辅助函数）逐字搬自 app/provider_playwright.py，接成
-GOOFISH_PROFILE.parse_detail_page；_payload_indicates_captcha 统一为
-8 标记共享版（app/login_session.py 删除私有 3 标记版，改用此实现）。
+GOOFISH_PROFILE.parse_detail_page；_payload_indicates_captcha 为搜索路径的
+8 标记共享版（登录校验 app/login_session.py 用私有 3 标记窄口径，
+避免 mtop 限流被误判 CAPTCHA）。
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import json
 import logging
 import re
 import time
+from html import unescape
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -635,10 +637,12 @@ def _safe_jsonable(value: Any) -> Any:
 def _parse_goofish_detail_page(html, payloads, item) -> DeepAnalysisResult:
     # page_title 原由引擎传入 await page.title()（经 _normalize_item_page_title
     # 归一化）；搬家后改为从 html 提取 <title>，经同一归一化钩子处理，保持输出一致。
+    # page.title() 返回的是已解码文本，正则截取到的是原始实体（&amp; 等），
+    # 须 unescape 才与 master 输出一致。
     title = ""
     match = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.IGNORECASE | re.DOTALL)
     if match:
-        title = match.group(1)
+        title = unescape(match.group(1))
     return _build_deep_analysis_result(
         item=item,
         payloads=payloads,

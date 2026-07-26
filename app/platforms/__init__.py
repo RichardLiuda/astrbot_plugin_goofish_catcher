@@ -10,6 +10,7 @@ from .base import SiteProfile
 from .goofish import GOOFISH_PROFILE
 from .registry import (
     PLATFORM_TAOBAO,
+    PlatformUnavailableError,
     build_item_url,
     make_item_id,
     platform_display_name,
@@ -20,6 +21,7 @@ from .taobao import TAOBAO_PROFILE
 __all__ = [
     "GOOFISH_PROFILE",
     "PLATFORM_TAOBAO",
+    "PlatformUnavailableError",
     "SiteProfile",
     "TAOBAO_PROFILE",
     "build_item_url",

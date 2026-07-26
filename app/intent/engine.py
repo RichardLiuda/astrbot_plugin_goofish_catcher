@@ -24,15 +24,22 @@ logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 _SYSTEM_PROMPT = "你是购物意图解析器，只输出 JSON"
 
-# 预算：1万5 / 1.5万 / 1w5 → 15000；万后面跟的数字按千位补足。
-_BUDGET_WAN_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[万wW]\s*(\d+)?")
-# 预算必须有上下文锚点，否则 "RTX 5090" 里的 5090 会被误吞：
-# ① 预算/以内/不超过 等引导词后跟数字；② 数字后跟 元/块。
-_BUDGET_CONTEXT_RE = re.compile(
-    r"(?:预算|限价|不超过|以内|之内|左右|上下|封顶|至多|最多|小于|低于|≤|大概|约)"
-    r"\s*(?:是|为|等于|:|：)?\s*(\d{3,}(?:\.\d+)?)"
+# 预算解析：任何形式（含万形式）都必须带上下文锚点，否则 "RTX 5090"/
+# "850W电源"/"5000万像素" 里的型号、参数数字会被误吞。锚点分两类：
+# ① 前置引导词（预算2万 / ￥2000）；② 后置单位或限定词（2万以内 / 8000元）。
+# 万形式数值体："1万5 / 1.5万 / 1w5"，万后面跟的数字按千位补足。
+# 尾数必须紧贴 万/w：允许空格会把 "预算2万 850W电源" 的 850 吞进预算。
+_WAN_BODY = r"(\d+(?:\.\d+)?)\s*[万wW](\d+)?"
+_PLAIN_BODY = r"(\d{3,}(?:\.\d+)?)"
+_LEAD_ANCHOR = (
+    r"(?:预算|限价|不超过|至多|最多|小于|低于|≤|大概|约|￥|¥)"
+    r"\s*(?:是|为|等于|:|：)?\s*"
 )
-_BUDGET_UNIT_RE = re.compile(r"(\d{3,}(?:\.\d+)?)\s*(?:元|块)")
+_TAIL_ANCHOR = r"\s*(?:元|块|以内|之内|以下|左右|上下|封顶)"
+_BUDGET_WAN_LEAD_RE = re.compile(_LEAD_ANCHOR + _WAN_BODY)
+_BUDGET_WAN_TAIL_RE = re.compile(_WAN_BODY + _TAIL_ANCHOR)
+_BUDGET_PLAIN_LEAD_RE = re.compile(_LEAD_ANCHOR + _PLAIN_BODY)
+_BUDGET_PLAIN_TAIL_RE = re.compile(_PLAIN_BODY + _TAIL_ANCHOR)
 
 # 启发式属性词表：目前只收颜色（示例需求的主轴），命中即进 require_terms。
 _COLOR_WORDS = (
@@ -112,11 +119,16 @@ async def _parse_with_llm(
         logger.warning("[goofish_catcher] intent llm failed: %s", exc)
         return None
 
-    parsed = _extract_json_object(str(resp or ""))
-    if not parsed:
-        logger.warning("[goofish_catcher] intent llm output not usable json")
+    try:
+        parsed = _extract_json_object(str(resp or ""))
+        if not parsed:
+            logger.warning("[goofish_catcher] intent llm output not usable json")
+            return None
+        return _intent_from_parsed(raw, parsed)
+    except Exception as exc:
+        # LLM 输出结构不可控：解析期任何异常只回退启发式，不冒泡给用户。
+        logger.warning("[goofish_catcher] intent llm output unusable: %s", exc)
         return None
-    return _intent_from_parsed(raw, parsed)
 
 
 def _intent_from_parsed(raw: str, parsed: dict[str, Any]) -> PurchaseIntent | None:
@@ -161,8 +173,15 @@ def _levels_from_parsed(raw_levels: Any) -> list[DegradationLevel]:
             continue
         note = str(row.get("note") or "").strip() or "放宽条件"
         hint = str(row.get("hint") or "").strip() or None
+        raw_terms = row.get("require_terms")
+        if isinstance(raw_terms, str):
+            # 整串是一个词，不能逐字符拆散。
+            raw_terms = [raw_terms]
+        elif not isinstance(raw_terms, (list, tuple)):
+            # 其他标量（如 int）不是词表，忽略。
+            raw_terms = []
         require_terms = tuple(
-            t for t in (str(x).strip() for x in row.get("require_terms") or []) if t
+            t for t in (str(x).strip() for x in raw_terms) if t
         )
         try:
             level_no = int(row.get("level", idx))
@@ -247,20 +266,29 @@ def _parse_heuristic(raw: str) -> PurchaseIntent:
     )
 
 
+def _wan_value(match: re.Match[str]) -> float:
+    base = float(match.group(1)) * 10000.0
+    tail = match.group(2)
+    if tail:
+        # "1万5" 的 5 是千位：值不足千时按千位补，否则原样加。
+        tail_value = float(tail)
+        base += tail_value * 1000.0 if tail_value < 1000 else tail_value
+    return base
+
+
 def _parse_budget(text: str) -> float | None:
-    match = _BUDGET_WAN_RE.search(text)
-    if match:
-        base = float(match.group(1)) * 10000.0
-        tail = match.group(2)
-        if tail:
-            # "1万5" 的 5 是千位：值不足千时按千位补，否则原样加。
-            tail_value = float(tail)
-            base += tail_value * 1000.0 if tail_value < 1000 else tail_value
-        return base
-    for pattern in (_BUDGET_CONTEXT_RE, _BUDGET_UNIT_RE):
+    # 前置引导词（预算X）先于后置限定（X以内）：瓦数 "850W以内" 会被万形式
+    # 误读，同句真实预算 "预算400元" 必须赢。同级内万形式先于纯数字；
+    # 无锚点的裸 "N万/NW" 一律不作预算。
+    for pattern, is_wan in (
+        (_BUDGET_WAN_LEAD_RE, True),
+        (_BUDGET_PLAIN_LEAD_RE, False),
+        (_BUDGET_WAN_TAIL_RE, True),
+        (_BUDGET_PLAIN_TAIL_RE, False),
+    ):
         match = pattern.search(text)
         if match:
-            return float(match.group(1))
+            return _wan_value(match) if is_wan else float(match.group(1))
     return None
 
 

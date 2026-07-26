@@ -12,6 +12,18 @@
 
 ## [Unreleased]
 
+### Fixed（合入前集成评审修复）
+
+- 意图引擎：预算解析全部要求上下文锚点（预算/以内/元/￥ 等），「850W电源 预算400元」不再把功率误判为预算；`require_terms` 对 LLM 返回的标量/字符串健壮化，LLM 输出解析异常一律回退启发式而不再冒泡报错。
+- 聚合层：同店聚类改用完整规范化标题做键（不再截断 12 字符，同店 5090/5080 不同型号不再误并），被归并的商品保留在 `other_items` 中不再凭空消失；LLM 依「宁缺毋滥」返回空推荐时尊重该结论（不再回退启发式强行推荐），LLM top 中重复 item_id 去重。
+- 采购编排：平台在降级后成功时清除其早期级别的失败记录，决策卡片不再同时展示某平台的商品与「失败平台」警告。
+- 引擎（闲鱼行为回归修复）：恢复 `check_login_state` 的未初始化守卫并覆盖浏览器已死状态——心跳探测不再自动拉起被用户关闭的浏览器窗口（搜索路径的自动重拉保留）；`validate_login` 的验证码判定恢复 master 窄口径（3 标记、仅前 3 个 ret 项），mtop 限流不再把成功登录误判为 CAPTCHA；详情页标题回退提取补 HTML 实体反转义。
+- 引擎（平台化盲区）：URL 级登录墙/验证码判定改走注入档案的钩子（淘宝档案的 `is_auth_url`/`is_captcha_url` 不再是死代码）；`SiteProfile` 新增 `llm_login_check_enabled`（淘宝置 False，访客态搜索不再被 LLM 登录判定误杀为 AUTH_REQUIRED）；LLM 兜底提取与 payload 提取路径按平台前缀化 item_id、URL 经 `build_item_url` 构建（淘宝商品不再以裸 ID + 闲鱼 URL 入库）。
+- 集成层：批量『/闲鱼 立即检查』、WebUI 手动检查、深度分析兜底均按订阅/商品平台路由 provider，平台不可用时明确报错，绝不静默回退闲鱼搜索（消除跨平台数据污染）；心跳登录失败仅暂停 goofish 订阅（淘宝订阅不再被连坐后无法恢复）；自动快速登录成功仅恢复对应平台的暂停订阅；admin 订阅摘要新增 `platform` 字段；『/闲鱼 列表』纯闲鱼输出恢复 master 原格式（仅非闲鱼订阅行加平台前缀）；『/闲鱼 明细』提示仅对闲鱼订阅输出。
+- 存储：v7 迁移的 `market_price` 换表改为幂等（`INSERT OR IGNORE` + 覆盖中断窗口），迁移中途进程被杀后重启不再因主键冲突卡死。
+- 测试卫生：所有安装 astrbot 桩的测试文件改为「真实 astrbot 可导入时不装桩」，全量 `unittest discover` 在 AstrBot 环境不再互相污染。
+- 仓库卫生：移除贡献者个人 AI 工具链残留（`.kimi/`、`skills/neat/`、`pyproject.toml` 脚手架）。
+
 ### Changed
 
 - 多平台改造阶段 0.1（数据层平台维度）：`subscriptions` 表新增 `platform` 列（默认 `goofish`），唯一键由 `(umo, keyword)` 重建为 `(umo, platform, keyword)`；`market_price` 表主键重建为 `(platform, keyword)`，老数据自动归入 `goofish`（数据库迁移 v7，老库平滑升级，无需人工干预）。
@@ -35,13 +47,12 @@
 - 新增 `test_scheduler_platform_routing.py`（阶段 1.5b）：provider 路由表构建、淘宝深度分析短路、scheduler 双平台路由与 PLATFORM_UNAVAILABLE 暂停。
 - 新增 2.x 采购决策管线：`app/intent/engine.py`（LLM 意图解析 + 降级阶梯，启发式兜底）、`app/aggregator/aggregate.py`（去重/风险标签/LLM+启发式排序）、`app/reporter/card.py`（Markdown 决策卡片，含降级提示与"N 条未进推荐"平台露面）、`app/purchase.py`（编排服务：并发搜索→空结果逐级降级→聚合排序，单平台超时/异常隔离）；`main.py` 新 llm_tool `buyagent_purchase_decision`（自然语言→决策卡片，合并转发/纯文本发送）；`scripts/local_lab.py` 新增 `decide` 命令（支持 `LAB_LLM_*` 环境变量接任意 OpenAI 兼容 LLM，无配置走启发式）。配套 `test_purchase_decision.py`（31 用例）。
 - 新增 `test_taobao_detail.py`（阶段 1.3，31 用例）：淘宝详情解析（店铺类型/DSR/SKU 价目/价差风险/烂结构兜底）；local_lab 新增 `probe-detail`（详情页结构侦察）与 `detail-taobao`（详情分析验证）命令。
-- skills 文档多平台化：新增 `skills/purchase.md`（决策卡片工具说明）与 `skills/platforms.md`（多平台机制/能力矩阵/淘宝数据真相，吸收 TAOBAO_GUIDE 内容）；`skills/README.md` 决策树与工具表覆盖全部 18 个工具；subscribe/favorite/search/data-and-status 四篇补充平台参数与淘宝边界。
+- skills 文档多平台化：新增 `skills/purchase.md`（决策卡片工具说明）与 `skills/platforms.md`（多平台机制/能力矩阵/淘宝数据真相，含淘宝使用流程与数据流说明）；`skills/README.md` 决策树与工具表覆盖全部 18 个工具；subscribe/favorite/search/data-and-status 四篇补充平台参数与淘宝边界。
 - 决策报告新增 `other_items`（未进 top_k 的候选简表），`buyagent_purchase_decision` 返回给 LLM 的摘要附带该简表——用户追问"未进推荐的都有啥"时 LLM 可直接回答（此前摘要只有数量，LLM 只能重新搜索）。
 - 新增 `app/platforms/registry.py`（阶段 0.2）：item_id 平台归属规则（裸 ID 视为 goofish 以兼容存量，新平台必须带 `{platform}:` 前缀）与商品 URL 构建的唯一收口；`make_item_id` / `split_item_id` / `build_item_url` / `platform_display_name`。配套 `test_platform_registry.py`。
 - 新增 `app/platforms/base.py` 与 `app/platforms/goofish.py`（阶段 0.3a）：`SiteProfile` 站点档案数据类（21 个数据字段 + 4 个钩子函数）与闲鱼档案实例，为未来淘宝等档案的接入点。
 - 新增 `app/platforms/taobao.py`（阶段 1.1）：淘宝档案与 DOM 提取钩子；配套 `test_taobao_profile.py`；`scripts/local_lab.py` 新增 `search-taobao` 命令与 sso 探针自动轮询过验证能力。
-- 新增 `TAOBAO_GUIDE.md`：淘宝功能使用指南（使用流程 + 每步数据流解析 + 新平台接入手册 + 故障排查），面向使用者与开发者。
-- 新增 `.kimi/` 项目知识库（架构与数据流、开发注意事项、改造 roadmap）与 `scripts/local_lab.py` 本地实验台（登录/搜索/SSO 探针）。
+- 新增 `scripts/local_lab.py` 本地实验台（登录/搜索/SSO 探针）。
 
 ---
 

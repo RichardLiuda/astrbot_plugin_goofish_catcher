@@ -10,9 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from .platforms.base import SiteProfile
-# 0.3b：_payload_indicates_captcha 统一为 8 标记共享版（与 provider_playwright
-# 同一份实现），私有 3 标记版已删除。
-from .platforms.goofish import GOOFISH_PROFILE, _payload_indicates_captcha
+from .platforms.goofish import GOOFISH_PROFILE
 
 try:
     from astrbot.api import logger
@@ -471,6 +469,15 @@ def _payload_requires_login(payload: dict[str, Any]) -> bool:
             "need_login",
         )
     )
+
+
+def _payload_indicates_captcha(payload: dict[str, Any]) -> bool:
+    # 登录校验专用窄口径：只认 3 个硬标记、只扫前 3 个 ret 项
+    # （_payload_ret_summary 截断）。搜索路径的共享 8 标记版
+    # （app/platforms/goofish.py，含 rgv587_error/被挤爆等）在这里会把
+    # mtop 限流（RGV587_ERROR::SM）误判成 CAPTCHA、逼已登录用户重扫码。
+    ret_text = _payload_ret_summary(payload).lower()
+    return any(marker in ret_text for marker in ("captcha", "验证码", "滑块"))
 
 
 # 谓词实现与 provider_playwright 版逐字一致，已收口至 GOOFISH_PROFILE

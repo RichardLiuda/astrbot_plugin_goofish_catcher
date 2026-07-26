@@ -132,16 +132,23 @@ class PurchaseDecisionService:
         ]
         # 同店同款聚类：需在 DecisionItem 组装（拿到 shopName 与 score）之后、
         # rank_items 之前；platform_counts 保持聚类前的去重总数不变。
-        candidates = cluster_same_shop(candidates)
+        clustered = cluster_same_shop(candidates)
+        clustered_keys = {(d.item.platform, d.item.item_id) for d in clustered}
+        # 被聚类归并的成员不参与排序，但不能凭空消失：留在未推荐池供追问。
+        absorbed = [
+            d
+            for d in candidates
+            if (d.item.platform, d.item.item_id) not in clustered_keys
+        ]
         ranked, summary, used_llm = await rank_items(
-            candidates,
+            clustered,
             requirement=requirement,
             llm_call=self._llm_call,
             top_k=self._top_k,
         )
         ranked_ids = {d.item.item_id for d in ranked}
         other_items = sorted(
-            (d for d in candidates if d.item.item_id not in ranked_ids),
+            (d for d in clustered + absorbed if d.item.item_id not in ranked_ids),
             key=lambda d: d.score,
             reverse=True,
         )
@@ -169,7 +176,7 @@ class PurchaseDecisionService:
 
         async def _one(name: str, provider: "SearchProvider") -> list[NormalizedItem]:
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     provider.search(
                         keyword=keyword,
                         pages=1,
@@ -185,6 +192,10 @@ class PurchaseDecisionService:
                     errors[name],
                 )
                 return []
+            # errors 跨降级级别复用：本级成功须清掉该平台早前级别的失败记录，
+            # 否则卡片会同时展示该平台商品和"失败平台"。
+            errors.pop(name, None)
+            return result
 
         results = await asyncio.gather(
             *(_one(name, provider) for name, provider in self._providers.items()),

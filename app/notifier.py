@@ -13,7 +13,7 @@ from astrbot.api.star import Context
 from .detector import EventPayload
 from .platforms import platform_display_name, split_item_id
 from .reply_favorite import recommendation_reply_hint
-from .types import NormalizedItem, RecommendationResult
+from .types import DEFAULT_PLATFORM, NormalizedItem, RecommendationResult
 
 
 class Notifier:
@@ -153,7 +153,9 @@ class Notifier:
             lines.extend(_render_recommendation_item_lines(idx, item))
 
         lines.append(recommendation_reply_hint())
-        lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
+        # /闲鱼 明细 只查 goofish 订阅，对其他平台是死胡同，不输出该提示
+        if split_item_id(top_item_id)[0] == DEFAULT_PLATFORM:
+            lines.append(f"查看逐条请用 /闲鱼 明细 {recommendation.keyword}")
         text = "\n".join(lines)
         sent = await self._send_chain_to_umo(
             umo,
@@ -347,13 +349,11 @@ def _build_recommendation_chain(
         else:
             text_lines.append(f"链接：{item.url}")
             chain_parts.append(Plain("\n".join(text_lines) + "\n"))
-    chain_parts.append(
-        Plain(
-            "\n"
-            + recommendation_reply_hint()
-            + f"\n查看逐条请用 /闲鱼 明细 {recommendation.keyword}"
-        )
-    )
+    tail = "\n" + recommendation_reply_hint()
+    # /闲鱼 明细 只查 goofish 订阅，对其他平台是死胡同，不输出该提示
+    if split_item_id(recommendation.top[0].item_id)[0] == DEFAULT_PLATFORM:
+        tail += f"\n查看逐条请用 /闲鱼 明细 {recommendation.keyword}"
+    chain_parts.append(Plain(tail))
     return MessageChain(chain_parts)
 
 

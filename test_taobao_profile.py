@@ -110,6 +110,10 @@ class TaobaoProfileHooksTest(unittest.TestCase):
         # 选择器要求 href 含 item.htm，广告 cc_im 链接在选择器层就被排除
         self.assertIn("item.htm", TAOBAO_PROFILE.dom_card_link_selector)
 
+    def test_llm_login_check_disabled_for_guest_searchable_platform(self) -> None:
+        # 淘宝访客可搜索但页头常驻「登录」按钮，LLM 登录判定兜底必须禁用
+        self.assertFalse(TAOBAO_PROFILE.llm_login_check_enabled)
+
 
 if __name__ == "__main__":
     unittest.main()

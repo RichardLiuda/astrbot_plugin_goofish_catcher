@@ -26,6 +26,15 @@ from types import SimpleNamespace
 
 
 def _install_astrbot_stubs() -> None:
+    # 真实 astrbot 可导入时不装桩：直接赋值会顶掉真模块，污染全量 discover 中
+    # 后续加载的测试（如 test_reply_favorite）。仅裸环境装桩，且一律 setdefault。
+    try:
+        import astrbot.api.message_components  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+
     class _MessageChain:
         def __init__(self) -> None:
             self.texts: list[str] = []
@@ -73,15 +82,27 @@ def _install_astrbot_stubs() -> None:
     astrbot_api_message_components_module.Reply = Reply
 
     sys.modules.setdefault("astrbot", astrbot_module)
-    sys.modules["astrbot.api"] = astrbot_api_module
-    sys.modules["astrbot.api.star"] = astrbot_api_star_module
-    sys.modules["astrbot.api.event"] = astrbot_api_event_module
-    sys.modules["astrbot.api.message_components"] = (
-        astrbot_api_message_components_module
+    sys.modules.setdefault("astrbot.api", astrbot_api_module)
+    sys.modules.setdefault("astrbot.api.star", astrbot_api_star_module)
+    sys.modules.setdefault("astrbot.api.event", astrbot_api_event_module)
+    sys.modules.setdefault(
+        "astrbot.api.message_components", astrbot_api_message_components_module
     )
 
 
 _install_astrbot_stubs()
+
+
+def _chain_plain_texts(chain) -> list[str]:
+    """兼容桩 MessageChain（.texts）与真实 MessageChain（.chain 内 Plain 组件）。"""
+    texts = getattr(chain, "texts", None)
+    if texts is not None:
+        return list(texts)
+    return [
+        part.text
+        for part in getattr(chain, "chain", [])
+        if getattr(part, "text", None)
+    ]
 
 from app.auth_session import LocalAuthSessionController
 from app.config import PluginSettings
@@ -403,7 +424,7 @@ class CoordinatorPlatformFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(context.sent), 1)
         umo, chain = context.sent[0]
         self.assertEqual(umo, "umo-1")
-        chain_text = "\n".join(chain.texts)
+        chain_text = "\n".join(_chain_plain_texts(chain))
         self.assertIn("检测到需要重新登录淘宝。", chain_text)
         self.assertNotIn("/闲鱼 登录", chain_text)
         self.assertIn("淘宝登录工具", chain_text)

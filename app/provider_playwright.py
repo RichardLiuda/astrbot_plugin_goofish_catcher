@@ -35,7 +35,9 @@ from .platforms.goofish import (
     _payload_indicates_captcha,
 )
 from .platforms.registry import (
+    build_item_url as _build_item_url,
     extract_item_id_from_url as _extract_item_id_from_url,
+    make_item_id as _make_item_id,
     normalize_url as _normalize_url,
 )
 from .provider import ProviderConfigurationError
@@ -268,8 +270,16 @@ class PlaywrightSearchProvider:
                     "Run: uv run python -m playwright install",
                     retry_after_sec=1800,
                 ) from exc
-            except Exception:
-                await playwright.stop()
+            except BaseException:
+                # 覆盖 asyncio.CancelledError（非 Exception 子类）：心跳被
+                # asyncio.wait_for 取消或插件重载 cancel 时，若不 stop driver，
+                # 半启动的 Chromium 会一直持有 user_data_dir 的 ProcessSingleton
+                # 锁，此后所有拉起都报 DEPENDENCY_MISSING。stop 会连带回收
+                # driver 子进程拉起的浏览器。
+                try:
+                    await playwright.stop()
+                except Exception:
+                    pass
                 raise
 
             self._playwright = playwright
@@ -346,6 +356,14 @@ class PlaywrightSearchProvider:
                                 "uv run python -m playwright install",
                                 retry_after_sec=1800,
                             ) from fallback_exc
+                        except BaseException:
+                            # 同 _ensure_persistent_context：兜底 launch 期间被
+                            # 取消也要 stop driver，否则 node 子进程泄漏。
+                            try:
+                                await playwright.stop()
+                            except Exception:
+                                pass
+                            raise
                     else:
                         await playwright.stop()
                         raise ProviderError(
@@ -362,8 +380,13 @@ class PlaywrightSearchProvider:
                         "Run: uv run python -m playwright install",
                         retry_after_sec=1800,
                     ) from exc
-            except Exception:
-                await playwright.stop()
+            except BaseException:
+                # BaseException 覆盖 asyncio.CancelledError：launch 期被取消时
+                # 同样要 stop driver（见 _ensure_persistent_context 的说明）。
+                try:
+                    await playwright.stop()
+                except Exception:
+                    pass
                 raise
             self._playwright = playwright
             self._browser = browser
@@ -446,9 +469,9 @@ class PlaywrightSearchProvider:
             async def on_response(response) -> None:
                 url = response.url.lower()
                 content_type = (response.headers.get("content-type") or "").lower()
-                if _is_auth_url(url):
+                if self._profile.is_auth_url(url):
                     error_flags.add("auth")
-                if _is_captcha_url(url):
+                if self._profile.is_captcha_url(url):
                     error_flags.add("captcha")
                 if "json" not in content_type:
                     return
@@ -794,7 +817,7 @@ class PlaywrightSearchProvider:
 
             if "captcha" in url:
                 error_flags.add("captcha")
-            if _is_auth_url(url):
+            if self._profile.is_auth_url(url):
                 error_flags.add("auth")
             # Only treat auth as failure when main document is redirected to login.
             # Static subresources from passport domains are common even in valid sessions.
@@ -1134,7 +1157,7 @@ class PlaywrightSearchProvider:
                 auth_frames = [
                     str(getattr(f, "url", "") or "")
                     for f in frames
-                    if _is_auth_url(str(getattr(f, "url", "") or ""))
+                    if self._profile.is_auth_url(str(getattr(f, "url", "") or ""))
                 ]
                 logger.debug(
                     "[goofish_catcher] _try_quick_login: poll %dms/%dms, auth_frames=%s",
@@ -1238,8 +1261,18 @@ class PlaywrightSearchProvider:
         checks URL / HTML markers (no CSS selectors, no LLM), and closes the
         page immediately.  Safe to call from a periodic heartbeat task.
         """
-        # 不再在浏览器未初始化时直接报 error：_open_operation_context 会顺带
-        # 初始化浏览器/持久 profile，首次调用或浏览器被回收后也能真实探测。
+        # 心跳只探测、不拉起浏览器：未初始化或已被用户手动关闭（已死）时直接
+        # 返回 error。否则本地有头模式下，用户关掉窗口后 30 分钟一次的心跳会
+        # 经 _open_operation_context 把浏览器凭空弹回来；搜索/收藏等操作路径
+        # 的自动重拉不受影响。
+        if self._persistent_context is None and self._browser is None:
+            return "error"
+        if self._persistent_context is not None:
+            if not self._browser_alive(self._persistent_context.browser):
+                return "error"
+        elif not self._browser_alive(self._browser):
+            return "error"
+
         timeout_ms = max(5, timeout_sec) * 1000
         try:
             context, should_close = await self._open_operation_context()
@@ -1447,13 +1480,13 @@ class PlaywrightSearchProvider:
 
         def _on_frame_navigated(frame) -> None:
             frame_url = str(getattr(frame, "url", "") or "")
-            if _is_auth_url(frame_url):
+            if self._profile.is_auth_url(frame_url):
                 error_flags.add("auth")
                 logger.info(
                     "[goofish_catcher] detected auth frame navigation: %s",
                     frame_url,
                 )
-            if _is_captcha_url(frame_url):
+            if self._profile.is_captcha_url(frame_url):
                 error_flags.add("captcha")
                 logger.info(
                     "[goofish_catcher] detected captcha frame navigation: %s",
@@ -1462,14 +1495,14 @@ class PlaywrightSearchProvider:
 
         async def _on_response(response) -> None:
             url = str(getattr(response, "url", "") or "")
-            if _is_auth_url(url):
+            if self._profile.is_auth_url(url):
                 error_flags.add("auth")
                 logger.info(
                     "[goofish_catcher] detected auth response: status=%s url=%s",
                     getattr(response, "status", "?"),
                     url,
                 )
-            if _is_captcha_url(url):
+            if self._profile.is_captcha_url(url):
                 error_flags.add("captcha")
                 logger.info(
                     "[goofish_catcher] detected captcha response: status=%s url=%s",
@@ -1547,12 +1580,12 @@ class PlaywrightSearchProvider:
             current_url = str(getattr(page, "url", "") or "").lower()
         except Exception:
             current_url = ""
-        if _is_auth_url(current_url):
+        if self._profile.is_auth_url(current_url):
             return ProviderError(
                 ProviderErrorCode.AUTH_REQUIRED,
                 f"{self._profile.display_name} redirected to login page",
             )
-        if _is_captcha_url(current_url):
+        if self._profile.is_captcha_url(current_url):
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
                 f"captcha detected on {self._profile.display_name} page",
@@ -1567,12 +1600,12 @@ class PlaywrightSearchProvider:
                 frame_url = str(getattr(frame, "url", "") or "").lower()
             except Exception:
                 frame_url = ""
-            if _is_auth_url(frame_url):
+            if self._profile.is_auth_url(frame_url):
                 return ProviderError(
                     ProviderErrorCode.AUTH_REQUIRED,
                     f"{self._profile.display_name} showed embedded login prompt",
                 )
-            if _is_captcha_url(frame_url):
+            if self._profile.is_captcha_url(frame_url):
                 return ProviderError(
                     ProviderErrorCode.CAPTCHA,
                     f"captcha detected on {self._profile.display_name} page",
@@ -1605,7 +1638,9 @@ class PlaywrightSearchProvider:
         # Ask the LLM to visually interpret the AX tree as a last-resort check.
         # Only fires when all hard-coded URL / HTML markers have missed, so it
         # adds no latency to the normal (logged-in) path.
-        if self._llm_call is not None:
+        # 访客可搜索的平台（llm_login_check_enabled=False）跳过：页头常驻
+        # 「登录」按钮会让 LLM 如实报未登录，把合法访客搜索判成 AUTH_REQUIRED。
+        if self._llm_call is not None and self._profile.llm_login_check_enabled:
             logged_in = await check_login_via_llm(
                 page,
                 llm_call=self._llm_call,
@@ -1690,6 +1725,7 @@ class PlaywrightSearchProvider:
                 keyword=keyword,
                 llm_call=self._llm_call,
                 timeout_sec=max(10, (timeout_ms // 1000) - 2),
+                profile=self._profile,
             )
             if llm_items:
                 logger.info(
@@ -1737,21 +1773,24 @@ class PlaywrightSearchProvider:
             self._profile.base_url,
         )
 
-        item_id = _pick_first_text(
+        raw_id = _pick_first_text(
             data,
             ("item_id", "itemId", "id", "auctionId", "targetId", "itemid"),
         )
-        if not item_id and url:
-            item_id = _extract_item_id_from_url(url)
-        if not item_id:
+        if not raw_id and url:
+            raw_id = _extract_item_id_from_url(url)
+        if not raw_id:
             return None
 
         price = _extract_price(data)
         if price is None:
             return None
 
+        # item_id 经注册表前缀化（goofish 保持裸 ID），URL 兜底按平台模板构建，
+        # 避免非闲鱼平台的 payload 产物污染闲鱼 ID 命名空间。
+        item_id = _make_item_id(self._profile.platform, raw_id)
         if not url:
-            url = f"{self._profile.base_url}/item?id={item_id}"
+            url = _build_item_url(item_id)
 
         publish_time = _extract_publish_time(data)
         return NormalizedItem(
@@ -1761,17 +1800,21 @@ class PlaywrightSearchProvider:
             url=url,
             publish_time=publish_time,
             raw=data,
+            platform=self._profile.platform,
         )
 
 
 def _is_auth_url(url: str) -> bool:
     # 兼容委托：实现已逐字搬至 GOOFISH_PROFILE.is_auth_url
     # （app/platforms/goofish.py）；保留函数名，既有 import 不受影响。
+    # 引擎实例方法内的 URL 判定一律走 self._profile.is_auth_url，
+    # 本函数仅供无 profile 上下文的模块级调用方使用（闲鱼语义）。
     return GOOFISH_PROFILE.is_auth_url(url)
 
 
 def _is_captcha_url(url: str) -> bool:
     # 兼容委托：实现已逐字搬至 GOOFISH_PROFILE.is_captcha_url。
+    # 同 _is_auth_url：引擎实例方法内一律走 self._profile.is_captcha_url。
     return GOOFISH_PROFILE.is_captcha_url(url)
 
 

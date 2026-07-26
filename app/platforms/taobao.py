@@ -1,6 +1,6 @@
 """淘宝站点档案：平台特数据与钩子实现（阶段 1.1 起；1.3 接入详情页解析）。
 
-实证来源（2026-07-20/21 本地实验，见 .kimi/gotchas.md 与 local_data/sso_taobao.html）：
+实证来源（2026-07-20/21 本地实验，页面快照存 local_data/sso_taobao.html）：
 - 淘宝搜索是 SSR 页面，XHR 只有埋点/监控，商品数据在 DOM 里 → 提取主路径是 DOM 层，
   本档案提供 dom_card_extractor_js + parse_dom_card 两个定制钩子。
 - 卡片结构：a[href*='item.htm'] 包裹整卡；标题在 div[class*='title--'] 的 title 属性
@@ -556,4 +556,7 @@ TAOBAO_PROFILE = SiteProfile(
     # 淘宝访客搜索合法：次要接口（getusersimple 等）的 SESSION_EXPIRED 不代表被墙，
     # payload 登录标记不判 AUTH_REQUIRED，只认 login.taobao.com 重定向。
     auth_on_payload_markers=False,
+    # 淘宝页头永远有「登录」按钮，LLM 登录判定兜底会把访客态如实答成未登录，
+    # 导致合法的访客搜索被 AUTH_REQUIRED 暂停——整体禁用。
+    llm_login_check_enabled=False,
 )

@@ -51,7 +51,12 @@ from .app.reply_favorite import (
 )
 from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator, AUTH_PAUSE_REASONS, AUTO_LOGIN_DONE_SENTINEL
 from .app.reporter.card import render_decision_card
-from .app.platforms import build_item_url, platform_display_name, split_item_id
+from .app.platforms import (
+    PlatformUnavailableError,
+    build_item_url,
+    platform_display_name,
+    split_item_id,
+)
 from .app.platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
 from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
@@ -380,6 +385,16 @@ class GoofishCatcherPlugin(Star):
         if self.scheduler is None:
             raise RuntimeError("调度器未启动。")
 
+        # 与 scheduler 的 PLATFORM_UNAVAILABLE 语义对齐：平台无 provider 时
+        # 明确报错跳过，绝不回退 goofish（回退会把闲鱼结果写进其他平台订阅）
+        platform = getattr(sub, "platform", None) or PLATFORM_GOOFISH
+        provider = self.providers.get(platform)
+        if provider is None:
+            raise PlatformUnavailableError(
+                f"平台「{platform_display_name(platform)}」当前不可用"
+                "（未启用或当前运行模式不支持），已跳过该订阅。"
+            )
+
         acquired = await self.scheduler.try_acquire_subscription(sub.id)
         if not acquired:
             raise RuntimeError("该订阅当前正在执行，请稍后重试。")
@@ -389,6 +404,7 @@ class GoofishCatcherPlugin(Star):
                 self._search_with_captcha_retry(
                     keyword=sub.keyword,
                     pages=max(1, min(sub.pages, self.settings.max_pages)),
+                    provider=provider,
                 ),
                 timeout=self._search_operation_timeout_sec(),
             )
@@ -588,7 +604,11 @@ class GoofishCatcherPlugin(Star):
         if self.storage is None or self.remote_auth_coordinator is None:
             return
 
-        paused = await self.storage.pause_all_enabled_subscriptions(state.upper())
+        # 心跳只探测 goofish 登录态，只暂停 goofish 订阅——扫码恢复也只按
+        # 平台恢复，全平台暂停会让其他平台订阅永久卡死
+        paused = await self.storage.pause_all_enabled_subscriptions(
+            state.upper(), platform=PLATFORM_GOOFISH
+        )
         logger.warning(
             "[goofish_catcher] heartbeat: detected %s, paused %d subscriptions",
             state,
@@ -613,12 +633,21 @@ class GoofishCatcherPlugin(Star):
                     umos: list[str] = []
                     if self.storage is not None:
                         umos = await self.storage.get_all_subscriber_umos()
-                    await self.notifier.broadcast_alert(
-                        code="AUTH_REQUIRED",
-                        message=(
+                    # 多平台开启时只暂停了闲鱼订阅，文案随之收窄；
+                    # 纯闲鱼部署保持 master 原文案逐字节不变。
+                    if self.settings is not None and self.settings.taobao_enabled:
+                        alert_message = (
+                            "闲鱼登录态已过期（心跳检测），"
+                            "闲鱼订阅已暂停。请发送 /闲鱼 登录 重新扫码。"
+                        )
+                    else:
+                        alert_message = (
                             "登录态已过期（心跳检测），"
                             "所有订阅已暂停。请发送 /闲鱼 登录 重新扫码。"
-                        ),
+                        )
+                    await self.notifier.broadcast_alert(
+                        code="AUTH_REQUIRED",
+                        message=alert_message,
                         umos=umos,
                     )
                 except Exception as exc:
@@ -675,6 +704,7 @@ class GoofishCatcherPlugin(Star):
         *,
         umo: str,
         sub_id: int | None = None,
+        platform: str = PLATFORM_GOOFISH,
     ) -> str | None:
         if self.remote_auth_coordinator is None:
             return None
@@ -682,9 +712,10 @@ class GoofishCatcherPlugin(Star):
             result = await self.remote_auth_coordinator.handle_provider_auth_failure(
                 umo=umo,
                 sub_id=sub_id,
+                platform=platform,
             )
             if result == AUTO_LOGIN_DONE_SENTINEL:
-                return await self._resume_subs_after_auto_login()
+                return await self._resume_subs_after_auto_login(platform=platform)
             return result
         except ProviderError as exc:
             logger.warning(
@@ -709,13 +740,17 @@ class GoofishCatcherPlugin(Star):
                 "可稍后发送 /闲鱼 登录 重试。"
             )
 
-    async def _resume_subs_after_auto_login(self) -> str:
+    async def _resume_subs_after_auto_login(
+        self, *, platform: str = PLATFORM_GOOFISH
+    ) -> str:
         """Resume paused subscriptions after an automatic quick login."""
         if self.storage is None:
             return "已自动快速登录。"
         now_ts = int(time.time())
+        # 快速登录只证明本平台登录态有效，只恢复同平台订阅
+        # （与扫码路径 complete_login 的平台过滤语义一致）
         resumed = await self.storage.resume_subscriptions_by_pause_reasons(
-            AUTH_PAUSE_REASONS, now_ts=now_ts
+            AUTH_PAUSE_REASONS, now_ts=now_ts, platform=platform
         )
         enqueued = 0
         if self.scheduler is not None:
@@ -735,11 +770,15 @@ class GoofishCatcherPlugin(Star):
         filters: SearchFilters | None = None,
         price_lower: float | None = None,
         price_upper: float | None = None,
+        provider: SearchProvider | None = None,
     ) -> list[NormalizedItem]:
-        if self.provider is None:
+        # provider 缺省 = goofish 单例；跨平台调用方必须显式传入目标平台 provider
+        if provider is None:
+            provider = self.provider
+        if provider is None:
             raise RuntimeError("抓取组件不可用")
         return await search_with_captcha_retry(
-            self.provider,
+            provider,
             keyword=keyword,
             pages=pages,
             timeout_sec=self.settings.fetch_timeout_sec,
@@ -1722,7 +1761,9 @@ class GoofishCatcherPlugin(Star):
         import json as _json
         try:
             data = await self._admin_service.check_subscription(sub_id)
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, PlatformUnavailableError) as exc:
+            # 只吃「平台不可用」这类明确错误；其余 RuntimeError（如 provider
+            # 初始化失败）保持 master 语义向框架层冒泡
             return f"立即检查失败：{exc}"
         return _json.dumps(data, ensure_ascii=False)[:2000]
 
@@ -1887,6 +1928,15 @@ class GoofishCatcherPlugin(Star):
                 text = _json.dumps(result, ensure_ascii=False)
                 return text[:4000] if len(text) > 4000 else text
 
+        # 详情页归属按 item_id 前缀路由，绝不硬用 goofish provider
+        # 打开其他平台详情页（解析钩子不匹配会产出错误结果入库）
+        item_platform = split_item_id(resolved_id)[0]
+        detail_provider = self.providers.get(item_platform)
+        if detail_provider is None:
+            return (
+                f"{platform_display_name(item_platform)}平台当前不可用"
+                "（未启用或当前运行模式不支持），无法深度分析该商品。"
+            )
         try:
             item = NormalizedItem(
                 item_id=resolved_id,
@@ -1895,7 +1945,7 @@ class GoofishCatcherPlugin(Star):
                 url=resolved_url,
                 publish_time=summary.publish_time if summary else None,
             )
-            analysis = await self.provider.analyze_item_detail(
+            analysis = await detail_provider.analyze_item_detail(
                 item=item,
                 timeout_sec=max(8, self.settings.fetch_timeout_sec),
             )
@@ -2004,7 +2054,7 @@ class GoofishCatcherPlugin(Star):
                 platform=platform,
             )
             if result == AUTO_LOGIN_DONE_SENTINEL:
-                return await self._resume_subs_after_auto_login()
+                return await self._resume_subs_after_auto_login(platform=platform)
             return result or "登录流程已启动。"
         except ProviderError as exc:
             return f"启动登录失败：{exc.code.value} - {exc.message}"
@@ -2127,9 +2177,16 @@ class GoofishCatcherPlugin(Star):
         for sub in subscriptions:
             status = "启用" if sub.enabled else f"暂停({sub.paused_reason or 'manual'})"
             next_run = _format_ts(sub.next_run_at)
-            platform_label = platform_display_name(getattr(sub, "platform", None) or "goofish")
+            # goofish 行保持 master 原格式（纯闲鱼用户输出零变化），
+            # 仅非闲鱼平台的行加平台前缀
+            platform = getattr(sub, "platform", None) or PLATFORM_GOOFISH
+            prefix = (
+                ""
+                if platform == PLATFORM_GOOFISH
+                else f"[{platform_display_name(platform)}] "
+            )
             lines.append(
-                f"- [{platform_label}] {sub.keyword} | {status} | 每{sub.interval_sec}s | pages={sub.pages} | "
+                f"- {prefix}{sub.keyword} | {status} | 每{sub.interval_sec}s | pages={sub.pages} | "
                 f"推荐价≤{f'￥{sub.recommend_max_price:.2f}' if sub.recommend_max_price is not None else '不限'} | "
                 f"下次={next_run}"
             )
@@ -2235,6 +2292,7 @@ class GoofishCatcherPlugin(Star):
                     login_hint = await self._trigger_remote_auth_recovery(
                         umo=event.unified_msg_origin,
                         sub_id=sub.id,
+                        platform=getattr(sub, "platform", None) or PLATFORM_GOOFISH,
                     )
                     if login_hint:
                         extra_hint = f"\n{login_hint}"
@@ -2285,6 +2343,7 @@ class GoofishCatcherPlugin(Star):
                     login_hint = await self._trigger_remote_auth_recovery(
                         umo=event.unified_msg_origin,
                         sub_id=sub.id,
+                        platform=getattr(sub, "platform", None) or PLATFORM_GOOFISH,
                     )
                     if login_hint:
                         extra_hint = f"\n{login_hint}"

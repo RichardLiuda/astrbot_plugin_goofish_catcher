@@ -312,21 +312,42 @@ class SubscriptionStorage:
                 DROP INDEX IF EXISTS idx_subscriptions_umo_keyword;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_umo_platform_keyword
                     ON subscriptions (umo, platform, keyword);
-
-                CREATE TABLE IF NOT EXISTS market_price_new (
-                    platform      TEXT NOT NULL DEFAULT 'goofish',
-                    keyword       TEXT NOT NULL,
-                    ema_price     REAL NOT NULL,
-                    sample_count  INTEGER NOT NULL DEFAULT 0,
-                    updated_at    INTEGER NOT NULL,
-                    PRIMARY KEY (platform, keyword)
-                );
-                INSERT INTO market_price_new (platform, keyword, ema_price, sample_count, updated_at)
-                    SELECT 'goofish', keyword, ema_price, sample_count, updated_at FROM market_price;
-                DROP TABLE market_price;
-                ALTER TABLE market_price_new RENAME TO market_price;
                 """
             )
+            # market_price 换表：executescript 各语句自动提交，任意两步之间
+            # 进程被杀后重跑必须能收敛——INSERT OR IGNORE 防主键冲突；
+            # DROP 与 RENAME 之间中断时旧表已不在，按实际状态直接改名。
+            mp_cols = {
+                row[1]
+                for row in await (
+                    await conn.execute("PRAGMA table_info(market_price)")
+                ).fetchall()
+            }
+            if mp_cols and "platform" not in mp_cols:
+                await conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_price_new (
+                        platform      TEXT NOT NULL DEFAULT 'goofish',
+                        keyword       TEXT NOT NULL,
+                        ema_price     REAL NOT NULL,
+                        sample_count  INTEGER NOT NULL DEFAULT 0,
+                        updated_at    INTEGER NOT NULL,
+                        PRIMARY KEY (platform, keyword)
+                    );
+                    INSERT OR IGNORE INTO market_price_new (platform, keyword, ema_price, sample_count, updated_at)
+                        SELECT 'goofish', keyword, ema_price, sample_count, updated_at FROM market_price;
+                    DROP TABLE market_price;
+                    ALTER TABLE market_price_new RENAME TO market_price;
+                    """
+                )
+            elif not mp_cols:
+                mp_new_cols = await (
+                    await conn.execute("PRAGMA table_info(market_price_new)")
+                ).fetchall()
+                if mp_new_cols:
+                    await conn.execute(
+                        "ALTER TABLE market_price_new RENAME TO market_price"
+                    )
             await conn.execute("PRAGMA user_version = 7;")
             await conn.commit()
 
@@ -585,21 +606,33 @@ class SubscriptionStorage:
             )
             await conn.commit()
 
-    async def pause_all_enabled_subscriptions(self, reason: str) -> int:
+    async def pause_all_enabled_subscriptions(
+        self,
+        reason: str,
+        *,
+        platform: str | None = None,
+    ) -> int:
         """Pause every currently-enabled subscription.  Returns the number
         of rows updated (i.e. subscriptions that were actually running)."""
         conn = self._conn_or_raise()
         now_ts = int(time.time())
+        # 可选平台过滤：单平台登录态失效只暂停同平台订阅（扫码恢复也只恢复
+        # 同平台，否则其他平台订阅会被永久卡死）；缺省 None = 不过滤。
+        platform_clause = ""
+        params: list = [reason, now_ts]
+        if platform is not None and str(platform).strip():
+            platform_clause = " AND platform = ?"
+            params.append(str(platform).strip())
         async with self._write_lock:
             cursor = await conn.execute(
-                """
+                f"""
                 UPDATE subscriptions
                 SET enabled = 0,
                     paused_reason = ?,
                     updated_at = ?
-                WHERE enabled = 1
+                WHERE enabled = 1{platform_clause}
                 """,
-                (reason, now_ts),
+                tuple(params),
             )
             await conn.commit()
             return cursor.rowcount if cursor.rowcount is not None else 0
