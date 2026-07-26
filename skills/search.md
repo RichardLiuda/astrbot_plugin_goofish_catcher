@@ -3,6 +3,10 @@
 **工具**：`goofish_search_live`  
 **场景**：用户询问某类商品的闲鱼行情、价格区间，或想看看现有挂单情况。
 
+> **平台边界**：本工具只搜闲鱼。多平台比价/模糊需求（颜色/预算/成色）请用
+> `buyagent_purchase_decision`（见 [purchase.md](purchase.md)）；
+> 淘宝机制见 [platforms.md](platforms.md)。
+
 ## 工具参数
 
 | 参数 | 类型 | 默认 | 说明 |

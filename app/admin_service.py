@@ -26,6 +26,7 @@ from .config import (
     load_plugin_settings,
     save_runtime_overrides,
 )
+from .platforms.registry import platform_display_name
 from .types import (
     NormalizedItem,
     ProviderError,
@@ -142,7 +143,19 @@ class AdminService:
         }
 
     async def create_subscription(self, payload: dict[str, Any]) -> dict[str, Any]:
+        platform = str(payload.get("platform", "goofish") or "goofish").strip().lower()
+        if platform not in {"goofish", "taobao"}:
+            raise ValueError(f"不支持的平台：{platform}（仅支持 goofish/taobao）")
+        if platform == "taobao" and not getattr(
+            self.plugin.settings, "taobao_enabled", False
+        ):
+            raise ValueError("淘宝平台未启用：请在配置中开启 taobao_enabled 后重载")
         values = self._normalize_subscription_payload(payload)
+        if platform == "taobao":
+            # 淘宝风控更激进，轮询间隔有下限（可配置，默认 30 分钟）
+            min_interval = getattr(self.settings, "taobao_min_interval_sec", 1800)
+            values["interval_sec"] = max(values["interval_sec"], min_interval)
+        values["platform"] = platform
         subscription, created = await self.storage.upsert_subscription(**values)
         await self.plugin._ensure_scheduler_started()
         if self.plugin.scheduler is not None:
@@ -156,7 +169,16 @@ class AdminService:
         current = await self.storage.get_subscription_by_id(sub_id)
         if current is None:
             raise KeyError("subscription not found")
+        if "platform" in payload:
+            new_platform = str(payload.get("platform") or "goofish").strip().lower()
+            if new_platform != current.platform:
+                raise ValueError("订阅平台不可修改，请删除后重建")
         values = self._normalize_subscription_payload(payload, current=current)
+        if current.platform == "taobao":
+            # 与创建一致：淘宝订阅轮询间隔有下限（可配置）
+            min_interval = getattr(self.settings, "taobao_min_interval_sec", 1800)
+            if values.get("interval_sec") is not None:
+                values["interval_sec"] = max(values["interval_sec"], min_interval)
         try:
             updated = await self.storage.update_subscription(
                 sub_id=sub_id,
@@ -670,7 +692,12 @@ class AdminService:
         await self.plugin._ensure_scheduler_started()
         acquired = await self.scheduler.try_acquire_subscription(sub.id)
         if not acquired:
-            raise RuntimeError("subscription is already running")
+            # 调度器正在跑这条订阅：手动触发不是错误，是重复触发
+            return {
+                "status": "running",
+                "message": "该订阅正在执行查询，无需重复触发，结果出来后会自动推送。",
+            }
+        provider = (self.plugin.providers or {}).get(sub.platform) or self.provider
         activity_id = await self.activity_monitor.start_task(
             source="manual_check",
             keyword=sub.keyword,
@@ -678,10 +705,10 @@ class AdminService:
             provider_mode=self.settings.provider_mode,
             page_count=max(1, min(sub.pages, self.settings.max_pages)),
             sub_id=sub.id,
-            message="正在抓取闲鱼结果",
+            message=f"正在抓取{platform_display_name(sub.platform)}结果",
         )
         try:
-            items = await self.provider.search(
+            items = await provider.search(
                 keyword=sub.keyword,
                 pages=max(1, min(sub.pages, self.settings.max_pages)),
                 timeout_sec=self.settings.fetch_timeout_sec,
@@ -880,6 +907,10 @@ class AdminService:
         settings = self.settings
         return {
             "provider_mode": settings.provider_mode,
+            "taobao_enabled": getattr(settings, "taobao_enabled", False),
+            "taobao_min_interval_sec": getattr(
+                settings, "taobao_min_interval_sec", 1800
+            ),
             "remote_base_url": settings.remote_base_url or "",
             "remote_headers": self._remote_headers_to_list(settings.remote_headers_json),
             "remote_api_key": settings.remote_api_key or "",
@@ -994,6 +1025,8 @@ class AdminService:
                 "title": "抓取模式",
                 "fields": [
                     "provider_mode",
+                    "taobao_enabled",
+                    "taobao_min_interval_sec",
                     "playwright_executable_path",
                     "playwright_block_assets",
                     "playwright_force_direct",

@@ -44,15 +44,19 @@ goofish_get_item_detail(item_id="12345678")
 
 ### `goofish_check_login`
 
-检查当前闲鱼会话状态。返回值：
+检查会话状态。返回值：
 - `"ok"` — 会话有效
 - `"auth_required"` — 需要重新登录
 - `"captcha"` — 遇到验证码
 - `"error: ..."` — 其他错误
 
+**`platform` 参数**（默认 `goofish`）：检查淘宝会话传 `platform="taobao"`。
+
 ### `goofish_start_login`
 
 启动登录流程，返回二维码或登录链接供用户扫码/点击。
+
+**`platform` 参数**（默认 `goofish`）：淘宝登录传 `platform="taobao"`——推送淘宝二维码（落地页 login.taobao.com），需用**手机淘宝 App** 扫码；成功后只恢复淘宝侧被暂停的订阅。
 
 ## 典型场景
 

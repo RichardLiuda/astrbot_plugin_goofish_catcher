@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+# 平台标识。现有数据全部属于闲鱼；多平台改造（阶段 0 起）逐步引入 "taobao" 等。
+DEFAULT_PLATFORM = "goofish"
+
 
 @dataclass(slots=True)
 class SearchFilters:
@@ -101,6 +104,7 @@ class Subscription:
     free_shipping: bool = False
     new_publish_option: str | None = None
     region: str | None = None
+    platform: str = DEFAULT_PLATFORM
 
     def search_filters(self) -> SearchFilters:
         return SearchFilters(
@@ -133,6 +137,7 @@ class NormalizedItem:
     url: str
     publish_time: int | None = None
     raw: dict[str, Any] | None = None
+    platform: str = DEFAULT_PLATFORM
 
 
 @dataclass(slots=True)
@@ -143,6 +148,7 @@ class MarketPrice:
     ema_price: float       # 指数移动均价（平滑后的市场参考价）
     sample_count: int      # 累计参与计算的样本数（价格点数）
     updated_at: int        # 最后一次更新的 Unix 时间戳
+    platform: str = DEFAULT_PLATFORM
 
 
 @dataclass(slots=True)

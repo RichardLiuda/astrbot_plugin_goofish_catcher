@@ -20,6 +20,7 @@ from .detector import (
 )
 from .notifier import Notifier
 from .activity_monitor import ActivityMonitor
+from .platforms.registry import platform_display_name, split_item_id
 from .provider import SearchProvider
 from .provider_retry import (
     estimate_captcha_retry_timeout_sec,
@@ -28,6 +29,7 @@ from .provider_retry import (
 from .recommender import GoofishRecommender
 from .storage import SubscriptionStorage
 from .types import (
+    DEFAULT_PLATFORM,
     DeepAnalysisResult,
     NormalizedItem,
     ProviderError,
@@ -99,7 +101,7 @@ class MonitoringScheduler:
         context: Context,
         settings: PluginSettings,
         storage: SubscriptionStorage,
-        provider: SearchProvider,
+        provider: SearchProvider | dict[str, SearchProvider],
         notifier: Notifier,
         recommender: GoofishRecommender,
         activity_monitor: ActivityMonitor,
@@ -108,7 +110,13 @@ class MonitoringScheduler:
         self.context = context
         self.settings = settings
         self.storage = storage
-        self.provider = provider
+        # 平台路由表：单 provider（旧用法）归一成 {"goofish": provider}。
+        if isinstance(provider, dict):
+            self._providers: dict[str, SearchProvider] = dict(provider)
+        else:
+            self._providers = {DEFAULT_PLATFORM: provider}
+        # 兼容旧访问点：self.provider 指向 goofish provider。
+        self.provider = self._providers.get(DEFAULT_PLATFORM)
         self.notifier = notifier
         self.recommender = recommender
         self.activity_monitor = activity_monitor
@@ -244,6 +252,14 @@ class MonitoringScheduler:
             if candidate not in selected:
                 kept.append(candidate)
                 continue
+            provider = self._providers.get(split_item_id(candidate.item_id)[0])
+            if not getattr(
+                getattr(provider, "_profile", None), "supports_item_detail", True
+            ):
+                # 平台不支持详情分析：跳过节流 sleep 与占位缓存写入，候选保留
+                candidate.deep_analysis = None
+                kept.append(candidate)
+                continue
             analysis = cached.get(candidate.item_id)
             analysis_age = now_ts - analysis.analyzed_at if analysis is not None else None
             incomplete_retry = (
@@ -332,8 +348,16 @@ class MonitoringScheduler:
         candidate: RecommendationCandidate,
         now_ts: int,
     ) -> DeepAnalysisResult | None:
-        analyze = getattr(self.provider, "analyze_item_detail", None)
+        platform = split_item_id(candidate.item_id)[0]
+        provider = self._providers.get(platform)
+        analyze = getattr(provider, "analyze_item_detail", None) if provider else None
         if not callable(analyze):
+            if provider is None:
+                logger.info(
+                    "[goofish_catcher] deep analysis skipped item_id=%s: no provider for platform=%s",
+                    candidate.item_id,
+                    platform,
+                )
             return None
         try:
             elapsed = time.monotonic() - self._last_deep_analysis_at
@@ -522,9 +546,40 @@ class MonitoringScheduler:
         )
 
         try:
+            provider = self._providers.get(sub.platform)
+            if provider is None:
+                now_ts = int(time.time())
+                await self.storage.finish_fetch_run(
+                    run_id,
+                    finished_at=now_ts,
+                    status="failed",
+                    err_type="PLATFORM_UNAVAILABLE",
+                    err_msg=f"no provider available for platform {sub.platform}",
+                    items_count=0,
+                )
+                await self.storage.pause_subscription(sub.id, "PLATFORM_UNAVAILABLE")
+                await self.notifier.send_alert(
+                    umo=sub.umo,
+                    keyword=sub.keyword,
+                    code="PLATFORM_UNAVAILABLE",
+                    message=(
+                        f"平台「{platform_display_name(sub.platform)}」当前不可用"
+                        "（未启用或当前运行模式不支持），该订阅已暂停。"
+                    ),
+                    action_hint=(
+                        "如需监控该平台，请在插件配置中启用对应平台并重启插件后，"
+                        "重新启用该订阅。"
+                    ),
+                )
+                logger.warning(
+                    "[goofish_catcher] sub=%s paused: no provider for platform=%s",
+                    sub.id,
+                    sub.platform,
+                )
+                return
             raw_items = await asyncio.wait_for(
                 search_with_captcha_retry(
-                    self.provider,
+                    provider,
                     keyword=sub.keyword,
                     pages=max(1, min(sub.pages, self.settings.max_pages)),
                     timeout_sec=self.settings.fetch_timeout_sec,
@@ -553,7 +608,7 @@ class MonitoringScheduler:
                 raw_prices = [item.price for item in raw_items if item.price > 0]
                 try:
                     mp = await self.storage.upsert_market_price(
-                        sub.keyword, raw_prices, now_ts
+                        sub.keyword, raw_prices, now_ts, platform=sub.platform
                     )
                     market_snapshot = mp.ema_price
                     logger.debug(
@@ -688,20 +743,30 @@ class MonitoringScheduler:
                     ProviderErrorCode.AUTH_REQUIRED,
                     ProviderErrorCode.CAPTCHA,
                 } and self.remote_auth_coordinator is not None:
+                    if sub.platform == DEFAULT_PLATFORM:
+                        start_hint = "已尝试启动登录恢复流程"
+                        recovery_hint = "可发送 /闲鱼 登录"
+                        retry_hint = "可稍后发送 /闲鱼 登录 重试"
+                    else:
+                        display_name = platform_display_name(sub.platform)
+                        start_hint = f"已尝试启动{display_name}登录恢复流程"
+                        recovery_hint = f"请使用{display_name}登录工具重新发起登录"
+                        retry_hint = f"可稍后使用{display_name}登录工具重试"
                     try:
                         await self.remote_auth_coordinator.handle_provider_auth_failure(
                             umo=sub.umo,
                             sub_id=sub.id,
+                            platform=sub.platform,
                         )
                         action_hint = (
-                            "已暂停该订阅，并已尝试启动登录恢复流程。"
-                            "扫码完成后会自动恢复；如未收到二维码，可发送 /闲鱼 登录。"
+                            f"已暂停该订阅，并{start_hint}。"
+                            f"扫码完成后会自动恢复；如未收到二维码，{recovery_hint}。"
                         )
                     except ProviderError as recovery_exc:
                         action_hint = (
                             "已暂停该订阅，但自动启动登录恢复失败。"
                             f"{recovery_exc.code.value}: {recovery_exc.message}。"
-                            "可稍后发送 /闲鱼 登录 重试。"
+                            f"{retry_hint}。"
                         )
                         logger.warning(
                             "[goofish_catcher] failed to trigger auth recovery for sub=%s: %s",
@@ -712,7 +777,7 @@ class MonitoringScheduler:
                     except Exception as recovery_exc:
                         action_hint = (
                             "已暂停该订阅，但自动启动登录恢复失败。"
-                            f"{recovery_exc}。可稍后发送 /闲鱼 登录 重试。"
+                            f"{recovery_exc}。{retry_hint}。"
                         )
                         logger.warning(
                             "[goofish_catcher] failed to trigger auth recovery for sub=%s: %s",

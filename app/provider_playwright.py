@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
@@ -9,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import (
     Browser,
@@ -26,6 +25,19 @@ except ModuleNotFoundError:
     logger = logging.getLogger("astrbot_plugin_goofish_catcher")
 
 from .config import PluginSettings
+from .platforms.base import SiteProfile
+from .platforms.goofish import (
+    GOOFISH_PROFILE,
+    # 0.3b：闲鱼详情解析与 captcha 判定已逐字搬入平台档案
+    # （app/platforms/goofish.py）；此处以别名 re-export，既有 import 路径
+    # （test_provider_playwright_detail_analysis 及本文件内部调用）不受影响。
+    _build_deep_analysis_result,
+    _payload_indicates_captcha,
+)
+from .platforms.registry import (
+    extract_item_id_from_url as _extract_item_id_from_url,
+    normalize_url as _normalize_url,
+)
 from .provider import ProviderConfigurationError
 from .provider_agent import (
     extract_items_via_llm,
@@ -42,20 +54,19 @@ from .types import (
 )
 
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
-_DETAIL_FAVORITE_BUTTON_SELECTOR = "div[class*='buttons--'] div[class*='right--']"
-_FAVORITE_HINT_TEXT = "收藏"
-_FAVORITED_HINT_TEXT = "已收藏"
-_EMBEDDED_LOGIN_MARKERS = (
-    "passport.goofish.com/mini_login.htm",
-    "alibaba-login-box",
-)
 
 
 class PlaywrightSearchProvider:
-    BASE_URL = "https://www.goofish.com"
-
-    def __init__(self, settings: PluginSettings, *, llm_call=None) -> None:
+    def __init__(
+        self,
+        settings: PluginSettings,
+        *,
+        llm_call=None,
+        profile: SiteProfile | None = None,
+    ) -> None:
         self.settings = settings
+        # 平台站点档案：缺省为闲鱼档案，未来新平台经此注入，引擎零改动。
+        self._profile = profile or GOOFISH_PROFILE
         # Optional: async callable(prompt: str, system_prompt: str) -> str
         # Injected by the plugin main to enable AX-tree-based LLM fallback
         # when CSS selectors break after a Goofish frontend update.
@@ -181,9 +192,37 @@ class PlaywrightSearchProvider:
             "[goofish_catcher] adopted live login browser session into provider"
         )
 
+    @staticmethod
+    def _browser_alive(browser) -> bool:
+        try:
+            return browser is not None and bool(browser.is_connected())
+        except Exception:
+            return False
+
+    async def _reset_dead_browser_state(self) -> None:
+        """浏览器被用户手动关闭（或崩溃）后重置引用，下次操作时重新拉起。
+
+        用户直接关掉有头浏览器窗口是常见动作（登录后被收养的常驻浏览器
+        也会被关），不能因此让后续所有操作永久失败。
+        """
+        playwright = self._playwright
+        self._browser = None
+        self._persistent_context = None
+        self._playwright = None
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
+
     async def _ensure_persistent_context(self) -> BrowserContext:
         if self._persistent_context is not None:
-            return self._persistent_context
+            if self._browser_alive(self._persistent_context.browser):
+                return self._persistent_context
+            logger.warning(
+                "[goofish_catcher] persistent browser was closed, relaunching"
+            )
+            await self._reset_dead_browser_state()
 
         user_data_dir = self.settings.playwright_user_data_dir
         if user_data_dir is None:
@@ -191,7 +230,9 @@ class PlaywrightSearchProvider:
 
         async with self._init_lock:
             if self._persistent_context is not None:
-                return self._persistent_context
+                if self._browser_alive(self._persistent_context.browser):
+                    return self._persistent_context
+                await self._reset_dead_browser_state()
             playwright = await async_playwright().start()
             if playwright is None:
                 raise ProviderError(
@@ -248,11 +289,18 @@ class PlaywrightSearchProvider:
                 )
             return browser
         if self._browser is not None:
-            return self._browser
+            if self._browser_alive(self._browser):
+                return self._browser
+            logger.warning(
+                "[goofish_catcher] browser was closed, relaunching"
+            )
+            await self._reset_dead_browser_state()
 
         async with self._init_lock:
             if self._browser is not None:
-                return self._browser
+                if self._browser_alive(self._browser):
+                    return self._browser
+                await self._reset_dead_browser_state()
             playwright = await async_playwright().start()
             if playwright is None:
                 raise ProviderError(
@@ -372,6 +420,21 @@ class PlaywrightSearchProvider:
         item: NormalizedItem,
         timeout_sec: int,
     ) -> DeepAnalysisResult:
+        # 平台不支持详情深度分析时直接短路返回保守结果，不启动浏览器。
+        # seller_name 置占位值：避免被 scheduler._deep_analysis_incomplete
+        # 判定为不完整（seller_name 为空会触发 10 分钟级无意义重试）。
+        if not self._profile.supports_item_detail:
+            return DeepAnalysisResult(
+                item_id=item.item_id,
+                analyzed_at=int(time.time()),
+                status="ok",
+                credit_status="unknown",
+                credit_reason="该平台暂未支持深度分析",
+                summary=f"{self._profile.display_name}商品详情深度分析将在后续版本提供",
+                risk="",
+                image_urls=[],
+                seller_name="未知",
+            )
         async with self._operation_lock:
             timeout_ms = max(5, timeout_sec) * 1000
             context, should_close_context = await self._open_operation_context()
@@ -407,11 +470,17 @@ class PlaywrightSearchProvider:
                 )
                 if page_error is not None:
                     raise page_error
-                detail = _build_deep_analysis_result(
-                    item=item,
-                    payloads=captured_payloads,
-                    page_title=_normalize_item_page_title(await page.title()),
-                )
+                # 详情解析统一走平台档案钩子（闲鱼/淘宝均已接入 parse_detail_page）：
+                # 钩子必须总是返回结果（失败时给保守结果）；
+                # 引擎不再保留闲鱼默认 payload 解析路径（0.3b 已搬入 GOOFISH_PROFILE）。
+                parse_detail_page = self._profile.parse_detail_page
+                if parse_detail_page is None:
+                    raise ProviderError(
+                        ProviderErrorCode.PARSE_ERROR,
+                        f"{self._profile.display_name} profile does not provide parse_detail_page",
+                    )
+                html = await page.content()
+                detail = parse_detail_page(html, captured_payloads, item)
                 await self._persist_context_storage_state(context)
                 return detail
             except TimeoutError as exc:
@@ -575,7 +644,7 @@ class PlaywrightSearchProvider:
                           return text.includes("已收藏");
                         }
                         """,
-                        arg=_DETAIL_FAVORITE_BUTTON_SELECTOR,
+                        arg=self._profile.favorite_button_selector,
                         timeout=max(2500, min(timeout_ms, 8_000)),
                     )
                 except TimeoutError as exc:
@@ -758,7 +827,10 @@ class PlaywrightSearchProvider:
                 return
 
             if isinstance(payload, dict):
-                if _payload_requires_login(payload):
+                if (
+                    self._profile.auth_on_payload_markers
+                    and _payload_requires_login(payload)
+                ):
                     error_flags.add("auth")
                 if _payload_indicates_captcha(payload):
                     error_flags.add("captcha")
@@ -860,7 +932,7 @@ class PlaywrightSearchProvider:
             if not items and "rate_limited" in error_flags:
                 raise ProviderError(
                     ProviderErrorCode.RATE_LIMITED,
-                    "goofish rate limited current request",
+                    f"{self._profile.display_name} rate limited current request",
                     retry_after_sec=60,
                 )
 
@@ -970,14 +1042,14 @@ class PlaywrightSearchProvider:
                 return False
 
         if filters.new_publish_option:
-            if await _click_text("新发布"):
+            if await _click_text(self._profile.filter_label_new_publish):
                 await _click_text(filters.new_publish_option, exact=False)
 
         if filters.personal_only:
-            await _click_text("个人闲置")
+            await _click_text(self._profile.filter_label_personal_only)
 
         if filters.free_shipping:
-            await _click_text("包邮")
+            await _click_text(self._profile.filter_label_free_shipping)
 
         if filters.region:
             await self._apply_region_filter(page, filters.region, captured_payloads, timeout)
@@ -995,7 +1067,7 @@ class PlaywrightSearchProvider:
         if not parts:
             return
         try:
-            trigger = page.get_by_text("区域", exact=True).first
+            trigger = page.get_by_text(self._profile.filter_label_region, exact=True).first
             if await trigger.count() <= 0:
                 return
             await trigger.click(timeout=timeout_ms)
@@ -1026,6 +1098,10 @@ class PlaywrightSearchProvider:
         2. 浏览器凭已有 cookie 自动通过 iframe 完成认证，按钮未出现但
            mini_login iframe 已经自行消失（无需点击）。
         """
+        # 档案禁用 quick-login 捷径的平台（如淘宝）：访客态下 iframe-gone
+        # 启发式会误判成功，直接返回 False 走手动登录流程。
+        if not self._profile.quick_login_enabled:
+            return False
         # 分支 1：等待「快速进入」按钮出现并点击
         try:
             btn = page.get_by_role("button", name="快速进入").first
@@ -1099,10 +1175,10 @@ class PlaywrightSearchProvider:
         wait_timeout_ms = max(2500, min(timeout_ms, 10_000))
         try:
             await page.wait_for_selector(
-                _DETAIL_FAVORITE_BUTTON_SELECTOR,
+                self._profile.favorite_button_selector,
                 timeout=wait_timeout_ms,
             )
-            return page.locator(_DETAIL_FAVORITE_BUTTON_SELECTOR).first
+            return page.locator(self._profile.favorite_button_selector).first
         except TimeoutError:
             # ── Agent fallback: CSS class-based selector timed out (likely a
             # frontend update changed the class names).  Ask the LLM to find
@@ -1162,9 +1238,8 @@ class PlaywrightSearchProvider:
         checks URL / HTML markers (no CSS selectors, no LLM), and closes the
         page immediately.  Safe to call from a periodic heartbeat task.
         """
-        if self._persistent_context is None and self._browser is None:
-            return "error"
-
+        # 不再在浏览器未初始化时直接报 error：_open_operation_context 会顺带
+        # 初始化浏览器/持久 profile，首次调用或浏览器被回收后也能真实探测。
         timeout_ms = max(5, timeout_sec) * 1000
         try:
             context, should_close = await self._open_operation_context()
@@ -1181,7 +1256,7 @@ class PlaywrightSearchProvider:
             self._attach_page_state_watchers(page, error_flags)
 
             await page.goto(
-                self.BASE_URL,
+                self._profile.base_url,
                 wait_until="domcontentloaded",
                 timeout=timeout_ms,
             )
@@ -1219,12 +1294,8 @@ class PlaywrightSearchProvider:
         price_lower: float | None = None,
         price_upper: float | None = None,
     ) -> str:
-        url = f"{self.BASE_URL}/search?q={quote(keyword)}"
-        if price_lower is not None and price_lower > 0:
-            url += f"&priceLower={int(price_lower)}"
-        if price_upper is not None and price_upper > 0:
-            url += f"&priceUpper={int(price_upper)}"
-        return url
+        # 实现已逐字搬至平台档案（app/platforms/goofish.py），此处仅委托。
+        return self._profile.build_search_url(keyword, price_lower, price_upper)
 
     async def _navigate_to_page_index(
         self,
@@ -1237,13 +1308,13 @@ class PlaywrightSearchProvider:
         await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
         await page.wait_for_timeout(600)
         await page.wait_for_selector(
-            "div[class*='search-pagination-page-box'], "
-            "input[class*='search-pagination-to-page-input']",
+            f"{self._profile.pagination_box_selector}, "
+            f"{self._profile.pagination_input_selector}",
             timeout=pager_timeout_ms,
         )
 
         target_text = str(page_index)
-        page_boxes = page.locator("div[class*='search-pagination-page-box']")
+        page_boxes = page.locator(self._profile.pagination_box_selector)
         target = None
         for idx in range(await page_boxes.count()):
             candidate = page_boxes.nth(idx)
@@ -1261,22 +1332,22 @@ class PlaywrightSearchProvider:
             if available_pages and max(available_pages) < page_index:
                 return False
             page_input = page.locator(
-                "input[class*='search-pagination-to-page-input']"
+                self._profile.pagination_input_selector
             ).first
             confirm_button = page.locator(
-                "button[class*='search-pagination-to-page-confirm-button']"
+                self._profile.pagination_confirm_selector
             ).first
             await page_input.fill(target_text, timeout=pager_timeout_ms)
             await confirm_button.click(timeout=pager_timeout_ms)
 
         await page.wait_for_function(
-            """
-            (pageIndex) => {
+            f"""
+            (pageIndex) => {{
               const active = document.querySelector(
-                "div[class*='search-pagination-page-box-active']"
+                "{self._profile.pagination_active_selector}"
               );
               return active && active.innerText.trim() === String(pageIndex);
-            }
+            }}
             """,
             arg=page_index,
             timeout=pager_timeout_ms,
@@ -1297,11 +1368,7 @@ class PlaywrightSearchProvider:
             values.append(int(text))
         return values
 
-    async def _extract_items_from_dom(self, page) -> list[NormalizedItem]:
-        try:
-            cards = await page.eval_on_selector_all(
-                "a[href*='item']",
-                """
+    _DEFAULT_DOM_CARD_EXTRACTOR_JS = """
                 (nodes) => {
                   return nodes.slice(0, 80).map((node) => {
                     const href = node.href || node.getAttribute('href') || '';
@@ -1314,17 +1381,36 @@ class PlaywrightSearchProvider:
                     };
                   });
                 }
-                """,
+                """
+
+    async def _extract_items_from_dom(self, page) -> list[NormalizedItem]:
+        extractor_js = self._profile.dom_card_extractor_js or self._DEFAULT_DOM_CARD_EXTRACTOR_JS
+        try:
+            cards = await page.eval_on_selector_all(
+                self._profile.dom_card_link_selector,
+                extractor_js,
             )
         except Exception:
             return []
 
         items: list[NormalizedItem] = []
         seen: set[str] = set()
+        parse_dom_card = self._profile.parse_dom_card
         for card in cards:
             if not isinstance(card, dict):
                 continue
-            url = _normalize_url(card.get("href"), self.BASE_URL)
+            if parse_dom_card is not None:
+                # 平台定制解析（含广告过滤、ID 前缀化），失败/过滤返回 None
+                try:
+                    item = parse_dom_card(card, self._profile.base_url)
+                except Exception:
+                    continue
+                if item is None or item.item_id in seen:
+                    continue
+                seen.add(item.item_id)
+                items.append(item)
+                continue
+            url = _normalize_url(card.get("href"), self._profile.base_url)
             if not url:
                 continue
             item_id = _extract_item_id_from_url(url)
@@ -1420,7 +1506,10 @@ class PlaywrightSearchProvider:
                         _payload_requires_login(payload),
                         _payload_indicates_captcha(payload),
                     )
-                if _payload_requires_login(payload):
+                if (
+                    self._profile.auth_on_payload_markers
+                    and _payload_requires_login(payload)
+                ):
                     error_flags.add("auth")
                     logger.info(
                         "[goofish_catcher] payload requires login: url=%s ret=%s",
@@ -1447,12 +1536,12 @@ class PlaywrightSearchProvider:
         if error_flags and "auth" in error_flags:
             return ProviderError(
                 ProviderErrorCode.AUTH_REQUIRED,
-                "goofish showed embedded login prompt",
+                f"{self._profile.display_name} showed embedded login prompt",
             )
         if error_flags and "captcha" in error_flags:
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
-                "captcha detected on goofish page",
+                f"captcha detected on {self._profile.display_name} page",
             )
         try:
             current_url = str(getattr(page, "url", "") or "").lower()
@@ -1461,12 +1550,12 @@ class PlaywrightSearchProvider:
         if _is_auth_url(current_url):
             return ProviderError(
                 ProviderErrorCode.AUTH_REQUIRED,
-                "goofish redirected to login page",
+                f"{self._profile.display_name} redirected to login page",
             )
         if _is_captcha_url(current_url):
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
-                "captcha detected on goofish page",
+                f"captcha detected on {self._profile.display_name} page",
             )
 
         try:
@@ -1481,12 +1570,12 @@ class PlaywrightSearchProvider:
             if _is_auth_url(frame_url):
                 return ProviderError(
                     ProviderErrorCode.AUTH_REQUIRED,
-                    "goofish showed embedded login prompt",
+                    f"{self._profile.display_name} showed embedded login prompt",
                 )
             if _is_captcha_url(frame_url):
                 return ProviderError(
                     ProviderErrorCode.CAPTCHA,
-                    "captcha detected on goofish page",
+                    f"captcha detected on {self._profile.display_name} page",
                 )
 
         try:
@@ -1494,10 +1583,10 @@ class PlaywrightSearchProvider:
         except Exception:
             html = ""
         lowered = html.lower()
-        if any(marker in lowered for marker in _EMBEDDED_LOGIN_MARKERS):
+        if any(marker in lowered for marker in self._profile.embedded_login_markers):
             return ProviderError(
                 ProviderErrorCode.AUTH_REQUIRED,
-                "goofish showed embedded login prompt",
+                f"{self._profile.display_name} showed embedded login prompt",
             )
         if (
             "验证码" in html
@@ -1509,7 +1598,7 @@ class PlaywrightSearchProvider:
         ):
             return ProviderError(
                 ProviderErrorCode.CAPTCHA,
-                "captcha detected on goofish page",
+                f"captcha detected on {self._profile.display_name} page",
             )
 
         # ── Agent fallback: heuristic rules found nothing suspicious.
@@ -1528,7 +1617,7 @@ class PlaywrightSearchProvider:
                 )
                 return ProviderError(
                     ProviderErrorCode.AUTH_REQUIRED,
-                    "goofish login wall detected by LLM (heuristics missed)",
+                    f"{self._profile.display_name} login wall detected by LLM (heuristics missed)",
                 )
 
         return None
@@ -1645,7 +1734,7 @@ class PlaywrightSearchProvider:
 
         url = _normalize_url(
             _pick_first_text(data, ("url", "item_url", "detail_url", "jumpUrl")),
-            self.BASE_URL,
+            self._profile.base_url,
         )
 
         item_id = _pick_first_text(
@@ -1662,7 +1751,7 @@ class PlaywrightSearchProvider:
             return None
 
         if not url:
-            url = f"{self.BASE_URL}/item?id={item_id}"
+            url = f"{self._profile.base_url}/item?id={item_id}"
 
         publish_time = _extract_publish_time(data)
         return NormalizedItem(
@@ -1675,518 +1764,15 @@ class PlaywrightSearchProvider:
         )
 
 
-def _build_deep_analysis_result(
-    *,
-    item: NormalizedItem,
-    payloads: list[dict[str, Any] | list[Any]],
-    page_title: str,
-) -> DeepAnalysisResult:
-    detail_payload = _find_item_detail_payload(payloads)
-    detail_payload_found = detail_payload is not None
-    if detail_payload is not None:
-        item_do = detail_payload.get("itemDO")
-        seller_do = detail_payload.get("sellerDO")
-        if not isinstance(item_do, dict):
-            item_do = _find_first_nested_dict(
-                detail_payload, ("itemDO", "item", "itemInfo", "auction")
-            )
-        if not isinstance(seller_do, dict):
-            seller_do = _find_first_nested_dict(
-                detail_payload, ("sellerDO", "seller", "sellerInfo")
-            )
-    else:
-        merged = _merge_detail_payloads(payloads)
-        item_do = _find_first_nested_dict(merged, ("itemDO", "item", "itemInfo", "auction"))
-        # Avoid generic ``user`` here: detail pages also load recommendation feeds
-        # whose cardData.user is not the current item's seller.
-        seller_do = _find_first_nested_dict(merged, ("sellerDO", "seller", "sellerInfo"))
-
-    item_do = item_do if isinstance(item_do, dict) else None
-    seller_do = seller_do if isinstance(seller_do, dict) else None
-    detail_source: dict[str, Any] = {}
-    if isinstance(item.raw, dict):
-        detail_source.update(item.raw)
-    if item_do:
-        detail_source.update(item_do)
-    if seller_do:
-        detail_source["seller"] = seller_do
-
-    title = _pick_first_text(item_do or {}, ("title", "itemTitle", "subject")) if item_do else None
-    seller_name = _pick_first_text(
-        seller_do or {},
-        ("nick", "nickName", "sellerNick", "userNick", "nickname"),
-    ) if seller_do else None
-    seller_id = _pick_first_text(
-        seller_do or {},
-        ("sellerId", "userId", "id"),
-    ) if seller_do else None
-    seller_credit = _pick_first_text(
-        seller_do or {},
-        ("zhimaLevel", "zhimaLevelName", "levelName", "creditLevel", "creditText"),
-    ) if seller_do else None
-    if seller_do and not seller_credit:
-        zhima_info = seller_do.get("zhimaLevelInfo")
-        if isinstance(zhima_info, dict):
-            seller_credit = _pick_first_text(zhima_info, ("levelName", "name", "text"))
-    if seller_do:
-        structured_seller_credit = _extract_structured_seller_credit(seller_do)
-        if seller_credit and structured_seller_credit:
-            seller_credit = _join_unique_credit_parts(
-                seller_credit,
-                structured_seller_credit,
-            )
-        elif structured_seller_credit:
-            seller_credit = structured_seller_credit
-
-    image_urls = _extract_image_urls(detail_source)
-    want_count = _parse_optional_int(_pick_first_text(item_do or {}, ("wantCnt", "wantCount", "want_count"))) if item_do else None
-    browse_count = _parse_optional_int(_pick_first_text(item_do or {}, ("browseCnt", "browseCount", "browse_count"))) if item_do else None
-
-    credit_status, credit_reason = _classify_credit(
-        seller_credit=seller_credit,
-        seller_payload=seller_do or {},
-        item_payload=item_do or {},
-    )
-    logger.info(
-        "[goofish_catcher] detail parse item_id=%s payloads=%s detail_payload=%s item_do=%s item_do_item_id=%s seller_do=%s seller_keys=%s seller_name=%s seller_id=%s seller_credit=%s credit_status=%s credit_reason=%s want=%s browse=%s page_title=%r",
-        item.item_id,
-        len(payloads),
-        detail_payload_found,
-        bool(item_do),
-        _pick_first_text(item_do or {}, ("itemId", "item_id", "id", "auctionId", "targetId")),
-        bool(seller_do),
-        list((seller_do or {}).keys())[:25],
-        seller_name or "-",
-        seller_id or "-",
-        seller_credit or "-",
-        credit_status,
-        credit_reason,
-        want_count,
-        browse_count,
-        page_title,
-    )
-    status = "rejected" if credit_status == "bad" else "passed"
-    risk = "信用风险较高" if status == "rejected" else "未发现明确低信用风险"
-    summary_parts = [
-        f"信用：{seller_credit or credit_status}",
-        credit_reason,
-    ]
-    if want_count is not None:
-        summary_parts.append(f"想要 {want_count}")
-    if browse_count is not None:
-        summary_parts.append(f"浏览 {browse_count}")
-    if seller_name:
-        summary_parts.append(f"卖家 {seller_name}")
-
-    return DeepAnalysisResult(
-        item_id=item.item_id,
-        analyzed_at=int(time.time()),
-        status=status,
-        credit_status=credit_status,
-        credit_reason=credit_reason,
-        summary="；".join(part for part in summary_parts if part),
-        risk=risk,
-        image_urls=image_urls,
-        seller_name=seller_name,
-        seller_id=seller_id,
-        seller_credit=seller_credit,
-        want_count=want_count,
-        browse_count=browse_count,
-        raw={
-            "title": title or page_title or item.title,
-            "payload_count": len(payloads),
-            "item": _safe_jsonable(item_do or {}),
-            "seller": _safe_jsonable(seller_do or {}),
-        },
-    )
-
-
-def _merge_detail_payloads(payloads: list[dict[str, Any] | list[Any]]) -> dict[str, Any]:
-    return {"payloads": payloads}
-
-
-def _find_item_detail_payload(
-    payloads: list[dict[str, Any] | list[Any]],
-) -> dict[str, Any] | None:
-    """Return the data object from the current item's detail API response.
-
-    A detail page can load several unrelated JSON payloads after the item
-    response, especially recommendation feeds.  Those feeds contain
-    ``cardData.user`` objects for other sellers.  Deep analysis must bind seller
-    info to the mtop.taobao.idle.pc.detail payload instead of globally taking
-    the first nested seller/user-like object.
-    """
-
-    candidates: list[dict[str, Any]] = []
-    saw_detail_api = False
-    stack: list[Any] = list(payloads)
-    while stack:
-        current = stack.pop()
-        if isinstance(current, dict):
-            data = current.get("data")
-            if isinstance(data, dict):
-                api = str(current.get("api") or "").lower()
-                has_detail_shape = isinstance(data.get("itemDO"), dict) or isinstance(
-                    data.get("sellerDO"), dict
-                )
-                if api == "mtop.taobao.idle.pc.detail":
-                    saw_detail_api = True
-                    logger.info(
-                        "[goofish_catcher] detail payload candidate api=%s ret=%s has_detail_shape=%s data_keys=%s",
-                        current.get("api") or "-",
-                        _payload_ret_summary(current),
-                        has_detail_shape,
-                        list(data.keys())[:30],
-                    )
-                if api == "mtop.taobao.idle.pc.detail" and has_detail_shape:
-                    return data
-                if isinstance(data.get("itemDO"), dict) and isinstance(data.get("sellerDO"), dict):
-                    candidates.append(data)
-            stack.extend(value for value in current.values() if isinstance(value, (dict, list)))
-        elif isinstance(current, list):
-            stack.extend(value for value in current if isinstance(value, (dict, list)))
-    if candidates:
-        logger.info(
-            "[goofish_catcher] detail payload fallback using shaped candidate, count=%s",
-            len(candidates),
-        )
-        return candidates[0]
-    logger.info(
-        "[goofish_catcher] detail payload not found payloads=%s saw_detail_api=%s",
-        len(payloads),
-        saw_detail_api,
-    )
-    return None
-
-
-def _find_first_nested_dict(node: Any, keys: tuple[str, ...]) -> dict[str, Any] | None:
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, dict):
-            for key in keys:
-                value = current.get(key)
-                if isinstance(value, dict):
-                    return value
-            stack.extend(value for value in current.values() if isinstance(value, (dict, list)))
-        elif isinstance(current, list):
-            stack.extend(value for value in current if isinstance(value, (dict, list)))
-    return None
-
-
-def _extract_image_urls(node: Any, *, limit: int = 6) -> list[str]:
-    urls: list[str] = []
-    seen: set[str] = set()
-
-    def add_url(value: Any) -> None:
-        if len(urls) >= limit:
-            return
-        text = str(value or "").strip()
-        if not text:
-            return
-        if text.startswith("//"):
-            text = "https:" + text
-        if not (text.startswith("http://") or text.startswith("https://")):
-            return
-        lowered = text.lower()
-        if not any(marker in lowered for marker in (".jpg", ".jpeg", ".png", ".webp", "alicdn", "img")):
-            return
-        if text in seen:
-            return
-        seen.add(text)
-        urls.append(text)
-
-    def add_structured_image_list(value: Any) -> None:
-        if len(urls) >= limit or not isinstance(value, list):
-            return
-        image_entries = [entry for entry in value if isinstance(entry, dict)]
-        image_entries.sort(key=lambda entry: 0 if entry.get("major") is True else 1)
-        for entry in image_entries:
-            if len(urls) >= limit:
-                return
-            add_url(
-                entry.get("url")
-                or entry.get("image")
-                or entry.get("imageUrl")
-                or entry.get("picUrl")
-                or entry.get("src")
-            )
-
-    def add_priority_images(current: Any) -> None:
-        stack_for_priority = [current]
-        while stack_for_priority and len(urls) < limit:
-            node = stack_for_priority.pop()
-            if isinstance(node, dict):
-                for key, value in node.items():
-                    lowered_key = str(key).lower()
-                    if lowered_key in {"imageinfos", "image_infos", "images", "image_list"}:
-                        add_structured_image_list(value)
-                    if isinstance(value, (dict, list)):
-                        stack_for_priority.append(value)
-            elif isinstance(node, list):
-                stack_for_priority.extend(
-                    value for value in reversed(node) if isinstance(value, (dict, list))
-                )
-
-    add_priority_images(node)
-
-    stack = [node]
-    while stack and len(urls) < limit:
-        current = stack.pop()
-        if isinstance(current, dict):
-            for key, value in current.items():
-                lowered_key = str(key).lower()
-                if lowered_key in {"url", "image", "imageurl", "picurl", "src"} or "image" in lowered_key or "pic" in lowered_key:
-                    if isinstance(value, str):
-                        add_url(value)
-                if isinstance(value, (dict, list)):
-                    stack.append(value)
-        elif isinstance(current, list):
-            stack.extend(
-                value
-                for value in reversed(current)
-                if isinstance(value, (dict, list, str))
-            )
-        elif isinstance(current, str):
-            add_url(current)
-    return urls
-
-
-def _extract_structured_seller_credit(seller_payload: dict[str, Any]) -> str | None:
-    parts: list[str] = []
-
-    good_ratio = _pick_first_text(
-        seller_payload,
-        ("newGoodRatioRate", "goodRatioRate", "goodRate", "positiveRate", "goodRatio"),
-    )
-    if good_ratio:
-        parts.append(f"好评率{good_ratio}")
-
-    sold_count = _parse_optional_int(
-        _pick_first_text(
-            seller_payload,
-            ("hasSoldNumInteger", "soldCnt", "soldCount", "sellCount"),
-        )
-    )
-    if sold_count is not None:
-        parts.append(f"卖出{sold_count}件")
-
-    reg_days = _parse_optional_int(seller_payload.get("userRegDay"))
-    if reg_days:
-        if reg_days >= 365:
-            parts.append(f"来闲鱼{max(1, reg_days // 365)}年")
-        else:
-            parts.append(f"来闲鱼{reg_days}天")
-
-    level = _extract_seller_level(seller_payload)
-    if level is not None:
-        parts.append(f"闲鱼信用等级{level}")
-
-    if seller_payload.get("zhimaAuth") is True:
-        parts.append("已芝麻认证")
-
-    identity_tags = seller_payload.get("identityTags")
-    if isinstance(identity_tags, list):
-        for tag in identity_tags:
-            if not isinstance(tag, dict):
-                continue
-            text = _pick_first_text(tag, ("text", "title", "name"))
-            if text and "认证" in text:
-                parts.append(text)
-
-    return "，".join(parts) if parts else None
-
-
-def _join_unique_credit_parts(*values: str | None) -> str:
-    parts: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if not value:
-            continue
-        for part in re.split(r"[，,；;]", value):
-            normalized = part.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            parts.append(normalized)
-    return "，".join(parts)
-
-
-def _classify_credit(
-    *,
-    seller_credit: str | None,
-    seller_payload: dict[str, Any],
-    item_payload: dict[str, Any],
-) -> tuple[str, str]:
-    seller_text = " ".join(
-        str(value)
-        for value in (
-            seller_credit,
-            json.dumps(seller_payload, ensure_ascii=False)[:1200],
-        )
-        if value
-    )
-    item_text = json.dumps(item_payload, ensure_ascii=False)[:800].lower()
-    lowered = seller_text.lower()
-    bad_markers = (
-        "信用较差",
-        "信用差",
-        "芝麻较差",
-        "较差",
-        "差评很多",
-        "风险卖家",
-        "严重违规",
-        "骗子",
-        "诈骗",
-    )
-    good_markers = (
-        "信用极好",
-        "信用优秀",
-        "芝麻信用优秀",
-        "优秀",
-        "极好",
-        "良好",
-    )
-    severe_item_markers = ("风险卖家", "严重违规", "骗子", "诈骗")
-    if any(marker in lowered for marker in bad_markers) or any(
-        marker in item_text for marker in severe_item_markers
-    ):
-        return "bad", "检测到明确低信用或严重负面风险标记"
-    if any(marker in lowered for marker in good_markers):
-        return "good", "卖家信用信息良好"
-
-    seller_level = _extract_seller_level(seller_payload)
-    good_ratio = _parse_percent(
-        _pick_first_text(
-            seller_payload,
-            ("newGoodRatioRate", "goodRatioRate", "goodRate", "positiveRate", "goodRatio"),
-        )
-    )
-    sold_count = _parse_optional_int(
-        _pick_first_text(
-            seller_payload,
-            ("hasSoldNumInteger", "soldCnt", "soldCount", "sellCount"),
-        )
-    )
-    remark_do = seller_payload.get("remarkDO")
-    bad_remarks = None
-    good_remarks = None
-    if isinstance(remark_do, dict):
-        bad_remarks = _parse_optional_int(remark_do.get("sellerBadRemarkCnt"))
-        good_remarks = _parse_optional_int(remark_do.get("sellerGoodRemarkCnt"))
-
-    if seller_level is not None and seller_level <= 2:
-        return "bad", f"卖家闲鱼信用等级偏低：{seller_level}"
-    if (
-        good_ratio is not None
-        and good_ratio < 90
-        and (sold_count or 0) >= 10
-    ):
-        return "bad", f"卖家好评率偏低：{good_ratio:.0f}%"
-    if (
-        bad_remarks is not None
-        and bad_remarks >= 3
-        and bad_remarks > (good_remarks or 0)
-    ):
-        return "bad", "卖家负面评价数量偏高"
-
-    if seller_level is not None and seller_level >= 4:
-        return "good", f"卖家闲鱼信用等级较好：{seller_level}"
-    if good_ratio is not None and good_ratio >= 95:
-        return "good", f"卖家好评率较高：{good_ratio:.0f}%"
-    if (
-        good_ratio is not None
-        and good_ratio >= 90
-        and (sold_count or 0) >= 10
-    ):
-        return "good", f"卖家交易评价较稳定：好评率{good_ratio:.0f}%"
-
-    if seller_credit:
-        return "unknown", f"卖家信用信息：{seller_credit}"
-    return "unknown", "未获取到明确卖家信用信息，按保守规则不过滤"
-
-
-def _extract_seller_level(seller_payload: dict[str, Any]) -> int | None:
-    level_tag = seller_payload.get("idleFishCreditTag")
-    if isinstance(level_tag, dict):
-        track_params = level_tag.get("trackParams")
-        if isinstance(track_params, dict):
-            level = _parse_optional_int(track_params.get("sellerLevel"))
-            if level is not None:
-                return level
-
-    for tag in seller_payload.get("levelTags") or ():
-        if not isinstance(tag, dict):
-            continue
-        track_params = tag.get("trackParams")
-        if isinstance(track_params, dict):
-            level = _parse_optional_int(track_params.get("sellerLevel"))
-            if level is not None:
-                return level
-    return None
-
-
-def _parse_percent(value: Any) -> float | None:
-    if value is None:
-        return None
-    match = re.search(r"\d+(?:\.\d+)?", str(value))
-    if not match:
-        return None
-    try:
-        return float(match.group(0))
-    except ValueError:
-        return None
-
-
-def _parse_optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    match = re.search(r"\d+", str(value))
-    if not match:
-        return None
-    try:
-        return int(match.group(0))
-    except ValueError:
-        return None
-
-
-def _safe_jsonable(value: Any) -> Any:
-    try:
-        json.dumps(value, ensure_ascii=False)
-        return value
-    except Exception:
-        return str(value)
-
-
 def _is_auth_url(url: str) -> bool:
-    lowered = str(url or "").lower()
-    if not lowered:
-        return False
-    parsed = urlparse(lowered)
-    host = parsed.netloc
-    path = parsed.path or ""
-    if "passport.goofish.com" in host and (
-        "mini_login.htm" in path or path == "/login" or path.startswith("/login/")
-    ):
-        return True
-    if "goofish.com" in host and "mini_login.htm" in path:
-        return True
-    if "goofish.com" in host and "member/login" in path:
-        return True
-    return False
+    # 兼容委托：实现已逐字搬至 GOOFISH_PROFILE.is_auth_url
+    # （app/platforms/goofish.py）；保留函数名，既有 import 不受影响。
+    return GOOFISH_PROFILE.is_auth_url(url)
 
 
 def _is_captcha_url(url: str) -> bool:
-    lowered = str(url or "").lower()
-    if not lowered:
-        return False
-    parsed = urlparse(lowered)
-    host = parsed.netloc
-    path = parsed.path or ""
-    return bool(
-        ("cf.aliyun.com" in host and "nocaptcha" in path)
-        or "captcha" in path
-    )
+    # 兼容委托：实现已逐字搬至 GOOFISH_PROFILE.is_captcha_url。
+    return GOOFISH_PROFILE.is_captcha_url(url)
 
 
 def _payload_requires_login(payload: dict[str, Any]) -> bool:
@@ -2203,25 +1789,6 @@ def _payload_requires_login(payload: dict[str, Any]) -> bool:
     )
 
 
-def _payload_indicates_captcha(payload: dict[str, Any]) -> bool:
-    ret = payload.get("ret")
-    ret_text = " ".join(str(item) for item in ret) if isinstance(ret, list) else str(ret)
-    lowered = ret_text.lower()
-    return any(
-        marker in lowered
-        for marker in (
-            "captcha",
-            "验证码",
-            "滑块",
-            "fail_sys_user_validate",
-            "rgv587_error",
-            "被挤爆",
-            "punish",
-            "baxia",
-        )
-    )
-
-
 def _payload_ret_summary(payload: dict[str, Any]) -> str:
     ret = payload.get("ret")
     if isinstance(ret, list):
@@ -2231,17 +1798,12 @@ def _payload_ret_summary(payload: dict[str, Any]) -> str:
 
 
 def _should_log_response_url(url: str) -> bool:
+    # 模块级函数（无 self），暂直读 GOOFISH_PROFILE；
+    # 未来多平台时改为按 provider 的 profile 传入。
     lowered = str(url or "").lower()
     return any(
         marker in lowered
-        for marker in (
-            "mtop.taobao.idle.pc.detail",
-            "mtop.taobao.idlemessage.pc.loginuser.get",
-            "mtop.taobao.idle.collect.item",
-            "com.taobao.idle.unfavor.item",
-            "passport.goofish.com/mini_login.htm",
-            "mtop.idle.web.user.page.nav",
-        )
+        for marker in GOOFISH_PROFILE.log_response_url_markers
     )
 
 
@@ -2281,52 +1843,24 @@ def _pick_first_text(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return None
 
 
-def _normalize_url(url: Any, base_url: str) -> str | None:
-    if url is None:
-        return None
-    text = str(url).strip()
-    if not text:
-        return None
-    if text.startswith("//"):
-        return "https:" + text
-    if text.startswith("/"):
-        return base_url + text
-    return text
-
-
-def _extract_item_id_from_url(url: str) -> str | None:
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query)
-    for key in ("id", "item_id", "itemId", "auctionId"):
-        values = query.get(key)
-        if not values:
-            continue
-        value = str(values[0]).strip()
-        if value:
-            return value
-
-    match = re.search(r"item(?:_id)?[=/](\d+)", url)
-    if match:
-        return match.group(1)
-    return None
+# _normalize_url / _extract_item_id_from_url 已下沉到 app/platforms/registry.py，
+# 顶部以别名形式引入，本文件及 app/reply_favorite.py 的既有 import 路径不受影响。
 
 
 def _classify_favorite_button_text(text: str) -> str:
+    # 模块级函数（无 self），暂直读 GOOFISH_PROFILE；
+    # 未来多平台时改为按 provider 的 profile 传入。
     normalized = str(text or "").strip()
-    if _FAVORITED_HINT_TEXT in normalized:
+    if GOOFISH_PROFILE.favorited_hint_text in normalized:
         return "already_favorited"
-    if _FAVORITE_HINT_TEXT in normalized:
+    if GOOFISH_PROFILE.favorite_hint_text in normalized:
         return "favoritable"
     return "unknown"
 
 
 def _normalize_item_page_title(title: str) -> str:
-    text = str(title or "").strip()
-    if text.endswith("_闲鱼"):
-        text = text[: -len("_闲鱼")].strip()
-    if text.endswith(" - 闲不住？上闲鱼！"):
-        text = ""
-    return text
+    # 兼容委托：实现已逐字搬至 GOOFISH_PROFILE.normalize_item_page_title。
+    return GOOFISH_PROFILE.normalize_item_page_title(title)
 
 
 def _extract_price(data: dict[str, Any]) -> float | None:
