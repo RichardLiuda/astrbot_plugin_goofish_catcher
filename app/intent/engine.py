@@ -43,8 +43,20 @@ _BUDGET_PLAIN_TAIL_RE = re.compile(_PLAIN_BODY + _TAIL_ANCHOR)
 
 # 启发式属性词表：目前只收颜色（示例需求的主轴），命中即进 require_terms。
 _COLOR_WORDS = (
-    "红色", "黑色", "白色", "蓝色", "绿色", "黄色", "粉色", "紫色",
-    "灰色", "银色", "金色", "橙色", "棕色", "青色",
+    "红色",
+    "黑色",
+    "白色",
+    "蓝色",
+    "绿色",
+    "黄色",
+    "粉色",
+    "紫色",
+    "灰色",
+    "银色",
+    "金色",
+    "橙色",
+    "棕色",
+    "青色",
 )
 
 _NEW_WORDS = ("全新", "未拆封")
@@ -68,10 +80,15 @@ _PLATFORM_ALIASES: dict[str, str] = {
 # 逗号/空格一并吃掉，避免留下「显卡，，全新」式的重复/悬空分隔符。
 _PLATFORM_RE = re.compile(
     r"(?:^|[,，、;；\s])"
-    r"(?:请|麻烦)?(?:帮我|帮忙|替我)?(?:想?在|去|上)?"
+    r"(?:请|麻烦)?(?:帮我|帮忙|替我)?"
+    r"(?:想?在|去|上|订阅|监控|蹲)?"
     r"(淘宝|闲鱼|咸鱼|taobao|goofish)"
-    r"(?:平台|网)?(?:上面|上|里)?(?:搜索|搜|找找|找|买|逛逛|看看)?(?:的)?"
-    r"(?=[,，、;；\s]|$)",
+    r"(?:平台|网)?"
+    r"(?:"
+    r"(?:上面|上|里)?(?:搜索|搜|找找|找|买|逛逛|看看)?的"
+    r"|"
+    r"(?:上面|上|里)?(?:搜索|搜|找找|找|买|逛逛|看看)?(?=[,，、;；\s]|$)"
+    r")",
     re.IGNORECASE,
 )
 
@@ -102,18 +119,18 @@ def extract_platforms(text: str) -> tuple[str, tuple[str, ...]]:
 class DegradationLevel:
     level: int
     keyword: str
-    note: str                          # 这一级妥协了什么
-    hint: str | None = None            # 给用户的替代建议（如"可考虑黑色+RGB调红"）
+    note: str  # 这一级妥协了什么
+    hint: str | None = None  # 给用户的替代建议（如"可考虑黑色+RGB调红"）
     require_terms: tuple[str, ...] = ()  # 标题必须包含的词（精确级过滤用）
 
 
 @dataclass(slots=True)
 class PurchaseIntent:
     raw_query: str
-    keyword: str                       # 核心商品词（去修饰后）
-    attributes: dict[str, str]         # {"颜色": "红色"}
+    keyword: str  # 核心商品词（去修饰后）
+    attributes: dict[str, str]  # {"颜色": "红色"}
     budget_max: float | None = None
-    condition: str | None = None       # 全新/二手/不限
+    condition: str | None = None  # 全新/二手/不限
     degradation: list[DegradationLevel] = field(default_factory=list)
     # 用户点名的平台约束（("taobao",) 等）；空元组 = 未指定，搜全部。
     platforms: tuple[str, ...] = ()
@@ -146,6 +163,7 @@ async def parse_intent(
 
 # ── LLM 路径 ─────────────────────────────────────────────────────────────────
 
+
 async def _parse_with_llm(
     raw: str,
     *,
@@ -155,15 +173,15 @@ async def _parse_with_llm(
     prompt = (
         f"需求：{raw}\n\n"
         "请把上面的购物需求解析成 JSON，字段：\n"
-        '- keyword: 核心商品词（去掉颜色、成色等修饰）\n'
+        "- keyword: 核心商品词（去掉颜色、成色等修饰）\n"
         '- attributes: 属性键值对，如 {"颜色": "红色"}，无则 {}\n'
-        '- budget_max: 预算上限（元，数字），无则 null\n'
-        '- condition: 全新 / 二手 / 不限\n'
+        "- budget_max: 预算上限（元，数字），无则 null\n"
+        "- condition: 全新 / 二手 / 不限\n"
         "- degradation: 降级链 2-4 级，逐级放松，每级 "
         '{"level": 0, "keyword": "...", "note": "这一级妥协了什么", '
         '"hint": "可选，给用户的替代建议", "require_terms": ["标题必须包含的词"]}\n'
         '  示例（红色RTX5090）：L0 精确匹配（require_terms 含 "红色"）→ L1 去掉颜色 '
-        "→ L2 妥协成色 → L3 改色建议（hint 如 \"可考虑黑色+RGB调红\"）。\n"
+        '→ L2 妥协成色 → L3 改色建议（hint 如 "可考虑黑色+RGB调红"）。\n'
         "只输出 JSON，不要输出任何其他内容。"
     )
     try:
@@ -239,9 +257,7 @@ def _levels_from_parsed(raw_levels: Any) -> list[DegradationLevel]:
         elif not isinstance(raw_terms, (list, tuple)):
             # 其他标量（如 int）不是词表，忽略。
             raw_terms = []
-        require_terms = tuple(
-            t for t in (str(x).strip() for x in raw_terms) if t
-        )
+        require_terms = tuple(t for t in (str(x).strip() for x in raw_terms) if t)
         try:
             level_no = int(row.get("level", idx))
         except (TypeError, ValueError):
@@ -286,6 +302,7 @@ def _safe_positive_float(value: Any) -> float | None:
 
 
 # ── 启发式兜底 ───────────────────────────────────────────────────────────────
+
 
 def _parse_heuristic(raw: str) -> PurchaseIntent:
     """无 LLM 时的保底解析：整句当 keyword，正则抓预算与成色，颜色词进属性。

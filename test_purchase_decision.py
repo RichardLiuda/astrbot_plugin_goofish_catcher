@@ -27,10 +27,13 @@ from app.types import MarketPrice, NormalizedItem
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
+
 class FakeProvider:
     """按关键词返回预设结果；可注入异常或延迟（模拟卡死）。"""
 
-    def __init__(self, results=None, *, error: Exception | None = None, delay_sec: float = 0.0):
+    def __init__(
+        self, results=None, *, error: Exception | None = None, delay_sec: float = 0.0
+    ):
         self._results = results or {}
         self._error = error
         self._delay_sec = delay_sec
@@ -66,7 +69,11 @@ class FakeStorage:
         if ema is None:
             return None
         return MarketPrice(
-            keyword=keyword, ema_price=ema, sample_count=3, updated_at=0, platform=platform
+            keyword=keyword,
+            ema_price=ema,
+            sample_count=3,
+            updated_at=0,
+            platform=platform,
         )
 
 
@@ -125,6 +132,7 @@ INTENT_LLM_PAYLOAD = {
 
 
 # ── ① parse_intent 启发式兜底 ────────────────────────────────────────────────
+
 
 class ParseIntentHeuristicTest(unittest.IsolatedAsyncioTestCase):
     async def test_heuristic_budget_wan_notations(self) -> None:
@@ -198,6 +206,7 @@ class ParseIntentHeuristicTest(unittest.IsolatedAsyncioTestCase):
 
 # ── ② mock llm_call 合法 / 烂 JSON ──────────────────────────────────────────
 
+
 class ParseIntentLlmTest(unittest.IsolatedAsyncioTestCase):
     async def test_llm_valid_json(self) -> None:
         intent = await parse_intent(
@@ -213,7 +222,11 @@ class ParseIntentLlmTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_llm_fenced_json(self) -> None:
         async def fenced(prompt: str, system_prompt: str) -> str:
-            return "```json\n" + json.dumps(INTENT_LLM_PAYLOAD, ensure_ascii=False) + "\n```"
+            return (
+                "```json\n"
+                + json.dumps(INTENT_LLM_PAYLOAD, ensure_ascii=False)
+                + "\n```"
+            )
 
         intent = await parse_intent("红色RTX5090", llm_call=fenced)
         self.assertEqual(intent.keyword, "RTX5090")
@@ -260,6 +273,7 @@ class ParseIntentLlmTest(unittest.IsolatedAsyncioTestCase):
 
 # ── ③ 降级循环 / ④ require_terms / 预算过滤 ──────────────────────────────────
 
+
 class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
     async def test_degrade_to_l1_when_l0_empty(self) -> None:
         l1_item = make_item("g1", "RTX5090 显卡 全新", 12999.0)
@@ -277,9 +291,7 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.searched_platforms, [PLATFORM_GOOFISH, PLATFORM_TAOBAO])
         self.assertEqual(report.errors, {})
         # L0/L1 都搜过
-        self.assertEqual(
-            providers[PLATFORM_GOOFISH].calls, ["红色RTX5090", "RTX5090"]
-        )
+        self.assertEqual(providers[PLATFORM_GOOFISH].calls, ["红色RTX5090", "RTX5090"])
 
     async def test_require_terms_filter_triggers_degradation(self) -> None:
         # L0 有货但标题不含"红色" → 被 require_terms 滤掉 → 降级到 L1 命中。
@@ -300,8 +312,7 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
     async def test_other_items_contains_non_top_candidates(self) -> None:
         # other_items：聚类+排序后未进 top_k 的候选，供 LLM 回答"未进推荐的都有啥"
         items = [
-            make_item(f"g{i}", f"RTX5090 显卡 {i}", 9000.0 + i * 100)
-            for i in range(5)
+            make_item(f"g{i}", f"RTX5090 显卡 {i}", 9000.0 + i * 100) for i in range(5)
         ]
         providers = {PLATFORM_GOOFISH: FakeProvider({"RTX5090": items})}
         service = PurchaseDecisionService(providers=providers, llm_call=None, top_k=2)
@@ -309,9 +320,7 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(report.items), 2)
         self.assertEqual(len(report.other_items), 3)
         top_ids = {d.item.item_id for d in report.items}
-        self.assertTrue(
-            all(d.item.item_id not in top_ids for d in report.other_items)
-        )
+        self.assertTrue(all(d.item.item_id not in top_ids for d in report.other_items))
         scores = [d.score for d in report.other_items]
         self.assertEqual(scores, sorted(scores, reverse=True))
         # 总数不变：top_k + other = 去重后候选总数
@@ -326,8 +335,16 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
         l1_item = make_item("g1", "RTX5090 显卡", 12999.0)
 
         class FlakyProvider(FakeProvider):
-            async def search(self, *, keyword, pages, timeout_sec, filters=None,
-                             price_lower=None, price_upper=None):
+            async def search(
+                self,
+                *,
+                keyword,
+                pages,
+                timeout_sec,
+                filters=None,
+                price_lower=None,
+                price_upper=None,
+            ):
                 self.calls.append(keyword)
                 if keyword == "红色RTX5090":
                     raise RuntimeError("CAPTCHA: 滑块")
@@ -335,7 +352,9 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
 
         providers = {
             PLATFORM_GOOFISH: FlakyProvider(),
-            PLATFORM_TAOBAO: FakeProvider(error=RuntimeError("AUTH_REQUIRED: 需要登录")),
+            PLATFORM_TAOBAO: FakeProvider(
+                error=RuntimeError("AUTH_REQUIRED: 需要登录")
+            ),
         }
         service = PurchaseDecisionService(
             providers=providers, llm_call=make_llm(INTENT_LLM_PAYLOAD)
@@ -358,9 +377,7 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
     async def test_budget_filter(self) -> None:
         expensive = make_item("g3", "RTX5090 显卡", 18000.0)
         # 启发式 L0 用整句作关键词，fake provider 按整句给货。
-        providers = {
-            PLATFORM_GOOFISH: FakeProvider({"RTX5090 预算1万5": [expensive]})
-        }
+        providers = {PLATFORM_GOOFISH: FakeProvider({"RTX5090 预算1万5": [expensive]})}
         service = PurchaseDecisionService(providers=providers, llm_call=None)
         report = await service.run("RTX5090 预算1万5")
         self.assertEqual(report.intent.budget_max, 15000.0)
@@ -390,6 +407,7 @@ class PurchaseServiceDegradationTest(unittest.IsolatedAsyncioTestCase):
 
 
 # ── ⑤ risk_tags / 评分 ───────────────────────────────────────────────────────
+
 
 class RiskTagsTest(unittest.TestCase):
     def test_goofish_base_and_title_words(self) -> None:
@@ -445,11 +463,14 @@ class RiskTagsTest(unittest.TestCase):
 
 # ── ⑥ dedupe ─────────────────────────────────────────────────────────────────
 
+
 class DedupeTest(unittest.TestCase):
     def test_exact_and_fuzzy_dedupe(self) -> None:
         a = make_item("1", "RTX5090 显卡 全新未拆封", 100.0)
         dup_exact = make_item("1", "另一个标题", 200.0)  # 同 (platform, item_id)
-        dup_fuzzy = make_item("2", "RTX5090 显卡 全新未拆封", 100.0)  # 同标题前20字+价格
+        dup_fuzzy = make_item(
+            "2", "RTX5090 显卡 全新未拆封", 100.0
+        )  # 同标题前20字+价格
         other_price = make_item("3", "RTX5090 显卡 全新未拆封", 101.0)
         other_platform = make_item(
             "1", "RTX5090 显卡 全新未拆封", 100.0, platform=PLATFORM_TAOBAO
@@ -461,6 +482,7 @@ class DedupeTest(unittest.TestCase):
 
 
 # ── rank_items LLM / 回退 ────────────────────────────────────────────────────
+
 
 class RankItemsTest(unittest.IsolatedAsyncioTestCase):
     def _candidates(self) -> list[DecisionItem]:
@@ -549,12 +571,15 @@ class RankItemsTest(unittest.IsolatedAsyncioTestCase):
 
 # ── ⑦ render_decision_card ───────────────────────────────────────────────────
 
+
 class RenderCardTest(unittest.IsolatedAsyncioTestCase):
     async def test_card_with_degradation_and_error_section(self) -> None:
         l1_item = make_item("g9", "RTX5090 显卡 全新", 12999.0)
         providers = {
             PLATFORM_GOOFISH: FakeProvider({"红色RTX5090": [], "RTX5090": [l1_item]}),
-            PLATFORM_TAOBAO: FakeProvider(error=RuntimeError("AUTH_REQUIRED: 需要登录")),
+            PLATFORM_TAOBAO: FakeProvider(
+                error=RuntimeError("AUTH_REQUIRED: 需要登录")
+            ),
         }
         service = PurchaseDecisionService(
             providers=providers, llm_call=make_llm(INTENT_LLM_PAYLOAD)
@@ -567,7 +592,9 @@ class RenderCardTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("颜色=红色", card)
         self.assertIn("预算：≤15000 元", card)
         # 降级提示 + hint
-        self.assertIn("⚠️ 精确匹配（L0 红色RTX5090）无结果，已降级到 L1：放宽颜色限制", card)
+        self.assertIn(
+            "⚠️ 精确匹配（L0 红色RTX5090）无结果，已降级到 L1：放宽颜色限制", card
+        )
         # 平台分节与参考价（无 EMA → 本批中位数）
         self.assertIn("【闲鱼】1 条 · 参考价 12999 元（本批中位数）", card)
         self.assertIn("二手/无发票风险", card)
@@ -606,20 +633,20 @@ class RenderCardTest(unittest.IsolatedAsyncioTestCase):
         # 闲鱼有 3 条结果但评分都没进 top_k=1 时，卡片必须露个面，
         # 不能让用户以为该平台没搜到。
         goofish_items = [
-            make_item(f"g{i}", f"RTX5090 显卡 拆修 {i}", 9000.0 + i)
-            for i in range(3)
+            make_item(f"g{i}", f"RTX5090 显卡 拆修 {i}", 9000.0 + i) for i in range(3)
         ]
         taobao_item = make_item(
-            "t1", "RTX5090 显卡 全新", 11000.0, platform=PLATFORM_TAOBAO,
+            "t1",
+            "RTX5090 显卡 全新",
+            11000.0,
+            platform=PLATFORM_TAOBAO,
             raw={"shopName": "ROG旗舰店"},
         )
         providers = {
             PLATFORM_GOOFISH: FakeProvider({"RTX5090": goofish_items}),
             PLATFORM_TAOBAO: FakeProvider({"RTX5090": [taobao_item]}),
         }
-        service = PurchaseDecisionService(
-            providers=providers, llm_call=None, top_k=1
-        )
+        service = PurchaseDecisionService(providers=providers, llm_call=None, top_k=1)
         report = await service.run("RTX5090")
         self.assertEqual(report.platform_counts.get(PLATFORM_GOOFISH), 3)
         card = render_decision_card(report)
@@ -627,6 +654,7 @@ class RenderCardTest(unittest.IsolatedAsyncioTestCase):
 
 
 # ── ⑧ 单平台超时/异常不影响另一平台 ──────────────────────────────────────────
+
 
 class PlatformIsolationTest(unittest.IsolatedAsyncioTestCase):
     async def test_exception_isolated(self) -> None:
@@ -650,7 +678,9 @@ class PlatformIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(PLATFORM_TAOBAO, report.errors)
 
     async def test_timeout_isolated(self) -> None:
-        tb_item = make_item("taobao:2", "RTX5090 显卡", 11999.0, platform=PLATFORM_TAOBAO)
+        tb_item = make_item(
+            "taobao:2", "RTX5090 显卡", 11999.0, platform=PLATFORM_TAOBAO
+        )
         providers = {
             PLATFORM_GOOFISH: FakeProvider(delay_sec=5.0),  # 卡死
             PLATFORM_TAOBAO: FakeProvider({"RTX5090": [tb_item]}),
@@ -665,6 +695,7 @@ class PlatformIsolationTest(unittest.IsolatedAsyncioTestCase):
 
 
 # ── ⑥.5 同店同款聚类 ─────────────────────────────────────────────────────────
+
 
 def _tb_decision(
     item_id: str,
@@ -746,7 +777,9 @@ class ClusterSameShopTest(unittest.TestCase):
         c = _tb_decision("t3", "iPhone17-Pro 手机_白色（全新）", 95.0, 60.0)
         rep = cluster_same_shop([a, b, c])[0]
         report = DecisionReport(
-            intent=PurchaseIntent(raw_query="iPhone17", keyword="iPhone17", attributes={}),
+            intent=PurchaseIntent(
+                raw_query="iPhone17", keyword="iPhone17", attributes={}
+            ),
             level_used=0,
             level_note=None,
             level_hint=None,
@@ -768,7 +801,9 @@ class ClusterSameShopTest(unittest.TestCase):
         b = _tb_decision("t2", "iPhone17Pro手机白色", 100.0, 70.0)
         rep = cluster_same_shop([a, b])[0]
         report = DecisionReport(
-            intent=PurchaseIntent(raw_query="iPhone17", keyword="iPhone17", attributes={}),
+            intent=PurchaseIntent(
+                raw_query="iPhone17", keyword="iPhone17", attributes={}
+            ),
             level_used=0,
             level_note=None,
             level_hint=None,
@@ -789,7 +824,10 @@ class ClusterIntegrationTest(unittest.IsolatedAsyncioTestCase):
         # 同店 3 条近似链接 + 另一店 1 条；top_k=2 不应被同店占满。
         def tb(item_id: str, title: str, price: float, shop: str) -> NormalizedItem:
             return make_item(
-                item_id, title, price, platform=PLATFORM_TAOBAO,
+                item_id,
+                title,
+                price,
+                platform=PLATFORM_TAOBAO,
                 raw={"shopName": shop},
             )
 
@@ -823,7 +861,10 @@ class ClusterIntegrationTest(unittest.IsolatedAsyncioTestCase):
         # 但必须留在 other_items 未推荐池里供追问。
         def tb(item_id: str, title: str, price: float, shop: str) -> NormalizedItem:
             return make_item(
-                item_id, title, price, platform=PLATFORM_TAOBAO,
+                item_id,
+                title,
+                price,
+                platform=PLATFORM_TAOBAO,
                 raw={"shopName": shop},
             )
 
@@ -848,6 +889,7 @@ class ClusterIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
 # ── 平台限定词提取与平台约束 ─────────────────────────────────────────────────
 
+
 class ExtractPlatformsTest(unittest.TestCase):
     def test_suffix_qualifier_stripped(self) -> None:
         cleaned, platforms = extract_platforms("RTX 5060 Ti 显卡，淘宝平台")
@@ -865,6 +907,8 @@ class ExtractPlatformsTest(unittest.TestCase):
             ("请在闲鱼搜索 尼康Z9", "尼康Z9", "goofish"),
             ("去淘宝看看 5060ti", "5060ti", "taobao"),
             ("5060ti 淘宝上买", "5060ti", "taobao"),
+            ("订阅淘宝的 总统黄油", "总统黄油", "taobao"),
+            ("订阅淘宝的总统黄油", "总统黄油", "taobao"),
         ):
             cleaned, platforms = extract_platforms(text)
             self.assertEqual(cleaned, expect_kw, text)
@@ -957,9 +1001,7 @@ class PurchaseServicePlatformScopeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(taobao_provider.calls)
         self.assertEqual(report.searched_platforms, [PLATFORM_TAOBAO])
         self.assertTrue(report.items)
-        self.assertTrue(
-            all(d.item.platform == PLATFORM_TAOBAO for d in report.items)
-        )
+        self.assertTrue(all(d.item.platform == PLATFORM_TAOBAO for d in report.items))
         self.assertEqual(report.errors, {})
 
     async def test_named_platform_unavailable_reports_clearly(self) -> None:

@@ -7,7 +7,7 @@ from datetime import datetime
 from sys import maxsize
 from typing import Any
 
-from astrbot.api import AstrBotConfig, logger, llm_tool
+from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Node, Nodes, Plain
 from astrbot.api.provider import ProviderRequest
@@ -25,7 +25,21 @@ from .app.config import (
     PluginSettings,
     load_plugin_settings,
 )
+from .app.intent.subscribe import (
+    KIND_SUBSCRIBE,
+    KIND_UNKNOWN_PREFIX,
+    SubscribeIntent,
+    classify_goofish_message,
+    parse_subscribe_command,
+)
 from .app.notifier import Notifier
+from .app.platforms import (
+    PlatformUnavailableError,
+    build_item_url,
+    platform_display_name,
+    split_item_id,
+)
+from .app.platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
 from .app.provider import (
     ProviderConfigurationError,
     ProviderDependencyError,
@@ -37,7 +51,16 @@ from .app.provider_retry import (
     search_with_captcha_retry,
 )
 from .app.purchase import PurchaseDecisionService
+from .app.recommender import GoofishRecommender
+from .app.remote_auth_recovery import (
+    AUTH_PAUSE_REASONS,
+    AUTO_LOGIN_DONE_SENTINEL,
+    RemoteAuthRecoveryCoordinator,
+)
 from .app.reply_favorite import (
+    ReplyFavoriteItem,
+    ReplyFavoriteTarget,
+    _extract_item_id_from_url,
     extract_non_reply_text,
     extract_reply_context_from_outline,
     extract_reply_text,
@@ -45,20 +68,8 @@ from .app.reply_favorite import (
     parse_reply_selection,
     parse_reply_target,
     recommendation_reply_hint,
-    ReplyFavoriteItem,
-    ReplyFavoriteTarget,
-    _extract_item_id_from_url,
 )
-from .app.remote_auth_recovery import RemoteAuthRecoveryCoordinator, AUTH_PAUSE_REASONS, AUTO_LOGIN_DONE_SENTINEL
 from .app.reporter.card import render_decision_card
-from .app.platforms import (
-    PlatformUnavailableError,
-    build_item_url,
-    platform_display_name,
-    split_item_id,
-)
-from .app.platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
-from .app.recommender import GoofishRecommender
 from .app.scheduler import MonitoringScheduler
 from .app.storage import SubscriptionStorage
 from .app.types import (
@@ -219,8 +230,7 @@ class GoofishCatcherPlugin(Star):
         if not self.settings.admin_webui_enabled:
             return None
         return (
-            f"http://{self.settings.admin_webui_host}:"
-            f"{self.settings.admin_webui_port}"
+            f"http://{self.settings.admin_webui_host}:{self.settings.admin_webui_port}"
         )
 
     async def _configure_runtime(self) -> None:
@@ -254,7 +264,11 @@ class GoofishCatcherPlugin(Star):
                 self.provider,
                 self.settings,
             )
-        except (ProviderDependencyError, ProviderConfigurationError, ProviderError) as exc:
+        except (
+            ProviderDependencyError,
+            ProviderConfigurationError,
+            ProviderError,
+        ) as exc:
             self._provider_error = str(exc)
             await self._close_providers()
             self._ready = True
@@ -473,9 +487,7 @@ class GoofishCatcherPlugin(Star):
                 )
                 return (getattr(resp, "completion_text", "") or "").strip()
             except Exception as exc:
-                logger.warning(
-                    "[goofish_catcher][agent] llm_call failed: %s", exc
-                )
+                logger.warning("[goofish_catcher][agent] llm_call failed: %s", exc)
                 return ""
 
         return _llm_call
@@ -678,7 +690,9 @@ class GoofishCatcherPlugin(Star):
                 exc_info=True,
             )
 
-    async def _adopt_local_login_session(self, session, platform: str = "goofish") -> bool:
+    async def _adopt_local_login_session(
+        self, session, platform: str = "goofish"
+    ) -> bool:
         provider = self.providers.get(platform) or self.provider
         if provider is None:
             return False
@@ -729,9 +743,7 @@ class GoofishCatcherPlugin(Star):
                 exc_info=True,
             )
             return (
-                "自动启动登录恢复失败。\n"
-                f"{exc.code.value}: {exc.message}\n"
-                f"{retry_hint}"
+                f"自动启动登录恢复失败。\n{exc.code.value}: {exc.message}\n{retry_hint}"
             )
         except Exception as exc:
             logger.warning(
@@ -739,11 +751,7 @@ class GoofishCatcherPlugin(Star):
                 exc,
                 exc_info=True,
             )
-            return (
-                "自动启动登录恢复失败。\n"
-                f"{exc}\n"
-                f"{retry_hint}"
-            )
+            return f"自动启动登录恢复失败。\n{exc}\n{retry_hint}"
 
     async def _resume_subs_after_auto_login(
         self, *, platform: str = PLATFORM_GOOFISH
@@ -894,7 +902,9 @@ class GoofishCatcherPlugin(Star):
             extract_reply_text(messages),
             outline_reply_text,
         ]
-        reply_text = next((candidate for candidate in reply_candidates if candidate), None)
+        reply_text = next(
+            (candidate for candidate in reply_candidates if candidate), None
+        )
         if reply_text:
             logger.debug(
                 "[goofish_catcher] inspect reply favorite candidate: selection_candidates=%r raw_message_str=%r outline_selection_text=%r component_types=%s",
@@ -959,11 +969,12 @@ class GoofishCatcherPlugin(Star):
             max_index = max((item.index for item in target.items), default=0)
             invalid_text = "、".join(str(value) for value in invalid)
             return event.plain_result(
-                f"序号超出范围：{invalid_text}\n"
-                f"当前可选范围：1-{max_index}"
+                f"序号超出范围：{invalid_text}\n当前可选范围：1-{max_index}"
             )
         if not selected_items:
-            return event.plain_result("未识别到可收藏的商品序号，请重新引用推荐消息后再试。")
+            return event.plain_result(
+                "未识别到可收藏的商品序号，请重新引用推荐消息后再试。"
+            )
         if self._provider_error:
             return event.plain_result(
                 f"Provider 当前不可用，暂时无法执行收藏。\n原因：{self._provider_error}"
@@ -1042,6 +1053,86 @@ class GoofishCatcherPlugin(Star):
             lines.append(auth_hint)
         return event.plain_result("\n".join(lines))
 
+    async def _build_subscribe_intent_result(self, event: AstrMessageEvent):
+        """Handle explicit subscribe lines so they never fall through to the default LLM.
+
+        AstrBot command groups only activate exact subcommands. `/闲鱼 订阅淘宝的 xx`
+        (no space after 订阅) matches the group but no handler, then the main agent
+        answers in chat. Natural language 「订阅淘宝的 xx」 has the same leak.
+        """
+        classified = classify_goofish_message(event.get_message_str() or "")
+        if classified.kind == KIND_UNKNOWN_PREFIX:
+            return event.plain_result(_GOOFISH_USAGE)
+        if classified.kind != KIND_SUBSCRIBE or classified.intent is None:
+            return None
+        return await self._upsert_subscription_from_intent(event, classified.intent)
+
+    async def _upsert_subscription_from_intent(
+        self,
+        event: AstrMessageEvent,
+        intent: SubscribeIntent,
+    ):
+        if self.storage is None:
+            return event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+        platform = intent.platform or PLATFORM_GOOFISH
+        if platform == PLATFORM_TAOBAO and not self.settings.taobao_enabled:
+            return event.plain_result(self._platform_unavailable_message(platform))
+        if platform != PLATFORM_GOOFISH and platform not in (self.providers or {}):
+            return event.plain_result(self._platform_unavailable_message(platform))
+
+        interval = (
+            intent.interval_sec
+            if intent.interval_sec > 0
+            else self.settings.default_interval_sec
+        )
+        if platform == PLATFORM_TAOBAO:
+            interval = max(
+                interval,
+                int(getattr(self.settings, "taobao_min_interval_sec", 1800)),
+            )
+        interval = max(30, interval)
+        page_count = intent.pages if intent.pages > 0 else self.settings.default_pages
+        page_count = max(1, min(page_count, self.settings.max_pages))
+        umo = event.unified_msg_origin
+        current = await self.storage.get_subscription(
+            umo, intent.keyword, platform=platform
+        )
+        subscription, created = await self.storage.upsert_subscription(
+            umo=umo,
+            keyword=intent.keyword,
+            platform=platform,
+            interval_sec=interval,
+            pages=page_count,
+            recommend_max_price=(
+                current.recommend_max_price if current is not None else None
+            ),
+            drop_abs=self.settings.default_drop_abs,
+            drop_pct=self.settings.default_drop_pct,
+            new_window_sec=self.settings.default_new_window_sec,
+            cooldown_sec=self.settings.default_cooldown_sec,
+        )
+        await self._ensure_scheduler_started()
+        if self.scheduler is not None:
+            await self.scheduler.enqueue_manual_check(subscription.id)
+
+        action = "已创建" if created else "已更新"
+        display = platform_display_name(platform)
+        message = (
+            f"{action}{display}订阅：{intent.keyword}\n"
+            f"间隔：{interval}s，页数：{page_count}\n"
+            f"降价阈值：￥{subscription.drop_abs:.2f} 或 {subscription.drop_pct:.1%}"
+        )
+        if subscription.recommend_max_price is not None:
+            message += f"\n推荐价格阈值：≤￥{subscription.recommend_max_price:.2f}"
+        if platform == PLATFORM_TAOBAO:
+            message += "\n淘宝订阅如遇登录失效，请发送 /闲鱼 登录 淘宝"
+        if self._provider_error:
+            message += (
+                "\n⚠️ 当前 Provider 不可用，任务不会执行。"
+                f"\n原因：{self._provider_error}"
+            )
+        return event.plain_result(message)
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 21)
     async def favorite_recommendation_by_reply(self, event: AstrMessageEvent):
         if not await self._check_ready(event):
@@ -1052,23 +1143,40 @@ class GoofishCatcherPlugin(Star):
         yield result.stop_event()
         return
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 22)
+    async def intercept_subscribe_intent(self, event: AstrMessageEvent):
+        if not await self._check_ready(event):
+            return
+        result = await self._build_subscribe_intent_result(event)
+        if result is None:
+            return
+        yield result.stop_event()
+        return
+
     @filter.on_llm_request(priority=10000)
-    async def intercept_reply_favorite_before_llm(
+    async def intercept_plugin_intents_before_llm(
         self,
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
-        del req
         if not self._ready:
             return
         result = await self._build_reply_favorite_result(event)
         if result is None:
+            result = await self._build_subscribe_intent_result(event)
+        if result is not None:
+            logger.info("[goofish_catcher] intercept plugin intent before llm request")
+            await event.send(result)
+            event.should_call_llm(False)
+            event.stop_event()
             return
-        logger.info("[goofish_catcher] intercept reply favorite before llm request")
-        await event.send(result)
-        event.should_call_llm(False)
-        event.stop_event()
-        return
+        hint = (
+            "【闲鱼蹲蹲助手】用户明确要求订阅/监控/蹲某商品时必须调用 "
+            "goofish_create_subscription；点名淘宝则 platform=taobao，"
+            "不要用闲聊代替工具。搜索用 goofish_search_live，"
+            "比价用 buyagent_purchase_decision。"
+        )
+        req.system_prompt = f"{req.system_prompt or ''}\n{hint}\n"
 
     # ── LLM Tools ─────────────────────────────────────────────────────────────
     # 所有 @llm_tool 方法必须定义在 main.py（与插件主模块同 __module__），
@@ -1127,7 +1235,8 @@ class GoofishCatcherPlugin(Star):
 
         # Count how many agent tasks are already queued/running
         pending_agent_tasks = sum(
-            1 for t in asyncio.all_tasks()
+            1
+            for t in asyncio.all_tasks()
             if t.get_name() == "goofish-browser-agent" and not t.done()
         )
         sem_value = semaphore._value  # current free slots
@@ -1176,7 +1285,9 @@ class GoofishCatcherPlugin(Star):
                     )
                 except Exception as exc:
                     logger.warning(
-                        "[goofish_catcher][browser_agent] remote task failed: %s", exc, exc_info=True
+                        "[goofish_catcher][browser_agent] remote task failed: %s",
+                        exc,
+                        exc_info=True,
                     )
                     return f"浏览器任务执行失败：{exc}"
 
@@ -1205,7 +1316,9 @@ class GoofishCatcherPlugin(Star):
                         result = await agent.run(task, step_callback=_step_cb)
                 except Exception as exc:
                     logger.warning(
-                        "[goofish_catcher][browser_agent] task failed: %s", exc, exc_info=True
+                        "[goofish_catcher][browser_agent] task failed: %s",
+                        exc,
+                        exc_info=True,
                     )
                     result = f"浏览器任务执行失败：{exc}"
                 logger.info(
@@ -1332,7 +1445,9 @@ class GoofishCatcherPlugin(Star):
                     MessageChain([nodes]),
                 )
             except Exception as exc:
-                logger.warning("[goofish_catcher] goofish_search_live send forward failed: %s", exc)
+                logger.warning(
+                    "[goofish_catcher] goofish_search_live send forward failed: %s", exc
+                )
             self._forward_search_cache[event.unified_msg_origin] = ReplyFavoriteTarget(
                 source="recommendation",
                 items=[
@@ -1359,12 +1474,14 @@ class GoofishCatcherPlugin(Star):
                     MessageChain().message(rendered),
                 )
             except Exception as exc:
-                logger.warning("[goofish_catcher] goofish_search_live send failed: %s", exc)
+                logger.warning(
+                    "[goofish_catcher] goofish_search_live send failed: %s", exc
+                )
 
         shown = min(len(filtered), 20)
         prices = [i.price for i in items_to_show if i.price and i.price > 0]
         price_summary = (
-            f"，价格区间 ¥{min(prices):.0f}~¥{max(prices):.0f}，均价约 ¥{sum(prices)/len(prices):.0f}"
+            f"，价格区间 ¥{min(prices):.0f}~¥{max(prices):.0f}，均价约 ¥{sum(prices) / len(prices):.0f}"
             if prices
             else ""
         )
@@ -1375,7 +1492,11 @@ class GoofishCatcherPlugin(Star):
         )
         return (
             f"已搜索「{display_keyword}」，共 {len(items)} 件"
-            + (f"，价格过滤后 {len(filtered)} 件" if len(filtered) != len(items) else "")
+            + (
+                f"，价格过滤后 {len(filtered)} 件"
+                if len(filtered) != len(items)
+                else ""
+            )
             + f"，已展示前 {shown} 件{price_summary}。"
             + favorite_hint
         )
@@ -1429,7 +1550,8 @@ class GoofishCatcherPlugin(Star):
                 )
             except Exception as exc:
                 logger.warning(
-                    "[goofish_catcher] buyagent_purchase_decision send forward failed: %s", exc
+                    "[goofish_catcher] buyagent_purchase_decision send forward failed: %s",
+                    exc,
                 )
         else:
             try:
@@ -1444,12 +1566,17 @@ class GoofishCatcherPlugin(Star):
 
         platform_counts: dict[str, int] = {}
         for decision_item in report.items:
-            platform = getattr(getattr(decision_item, "item", None), "platform", "") or ""
+            platform = (
+                getattr(getattr(decision_item, "item", None), "platform", "") or ""
+            )
             platform_counts[platform] = platform_counts.get(platform, 0) + 1
-        counts_text = "、".join(
-            f"{platform_display_name(name)} {count} 条"
-            for name, count in sorted(platform_counts.items())
-        ) or "无结果"
+        counts_text = (
+            "、".join(
+                f"{platform_display_name(name)} {count} 条"
+                for name, count in sorted(platform_counts.items())
+            )
+            or "无结果"
+        )
         parts = [
             f"采购决策完成（匹配等级 L{report.level_used}）：搜索到 {counts_text}，"
             f"推荐 {len(report.items)} 条（top_k={top_k}）。"
@@ -1548,7 +1675,9 @@ class GoofishCatcherPlugin(Star):
             return f"推荐查询失败：{exc}"
 
         preview = data.get("preview") or {}
-        items = (preview.get("items") or [])[: max(1, min(int(top_k or self.settings.llm_top_k), 10))]
+        items = (preview.get("items") or [])[
+            : max(1, min(int(top_k or self.settings.llm_top_k), 10))
+        ]
         compact = {
             "keyword": preview.get("keyword", keyword),
             "raw_total": preview.get("raw_total"),
@@ -1572,9 +1701,14 @@ class GoofishCatcherPlugin(Star):
         if err := self._llm_tools_guard():
             return err
         import json as _json
+
         data = await self._admin_service.get_overview()
         # 精简：去掉 trends 和 recent_alerts 的详细内容
-        slim = {k: v for k, v in data.items() if k not in ("trends", "recent_alerts", "provider_health")}
+        slim = {
+            k: v
+            for k, v in data.items()
+            if k not in ("trends", "recent_alerts", "provider_health")
+        }
         slim["recent_alerts_count"] = len(data.get("recent_alerts") or [])
         return _json.dumps(slim, ensure_ascii=False)
 
@@ -1594,6 +1728,7 @@ class GoofishCatcherPlugin(Star):
         if err := self._llm_tools_guard():
             return err
         import json as _json
+
         data = await self._admin_service.list_subscriptions(
             keyword=keyword, status=status, limit=20
         )
@@ -1654,6 +1789,7 @@ class GoofishCatcherPlugin(Star):
         if err := self._llm_tools_guard():
             return err
         import json as _json
+
         payload: dict[str, Any] = {
             "keyword": keyword,
             "umo": event.unified_msg_origin,
@@ -1683,7 +1819,11 @@ class GoofishCatcherPlugin(Star):
             return f"创建订阅失败：{exc}"
         sub = data.get("subscription") or {}
         return _json.dumps(
-            {"created": data.get("created"), "id": sub.get("id"), "keyword": sub.get("keyword")},
+            {
+                "created": data.get("created"),
+                "id": sub.get("id"),
+                "keyword": sub.get("keyword"),
+            },
             ensure_ascii=False,
         )
 
@@ -1721,6 +1861,7 @@ class GoofishCatcherPlugin(Star):
         if err := self._llm_tools_guard():
             return err
         import json as _json
+
         payload: dict[str, Any] = {}
         if keyword:
             payload["keyword"] = keyword
@@ -1825,6 +1966,7 @@ class GoofishCatcherPlugin(Star):
         if err := self._llm_tools_guard():
             return err
         import json as _json
+
         try:
             data = await self._admin_service.check_subscription(sub_id)
         except (KeyError, ValueError, PlatformUnavailableError) as exc:
@@ -1857,6 +1999,7 @@ class GoofishCatcherPlugin(Star):
         if err := self._llm_tools_guard():
             return err
         import json as _json
+
         limit = max(1, min(20, limit))
         data = await self._admin_service.list_items(
             search=search,
@@ -1898,6 +2041,7 @@ class GoofishCatcherPlugin(Star):
         if err := self._llm_tools_guard():
             return err
         import json as _json
+
         try:
             data = await self._admin_service.get_item_detail(item_id)
         except KeyError as exc:
@@ -1948,9 +2092,15 @@ class GoofishCatcherPlugin(Star):
         resolved_url = (url or "").strip() or (summary.url if summary else "")
         if not resolved_url:
             resolved_url = build_item_url(resolved_id)
-        resolved_title = (title or "").strip() or (summary.title if summary else "") or f"闲鱼商品 {resolved_id}"
-        resolved_price = float(price) if price and price > 0 else (
-            float(summary.price) if summary else 0.0
+        resolved_title = (
+            (title or "").strip()
+            or (summary.title if summary else "")
+            or f"闲鱼商品 {resolved_id}"
+        )
+        resolved_price = (
+            float(price)
+            if price and price > 0
+            else (float(summary.price) if summary else 0.0)
         )
 
         if not force_refresh:
@@ -1982,7 +2132,9 @@ class GoofishCatcherPlugin(Star):
                 # deep_analyze_candidates drops rejected candidates from its return value,
                 # but still persists their analysis. Re-read the cache so a rejected
                 # analysis can be returned instead of opening the detail page again.
-                cached_after_scheduler = await self.storage.get_deep_analysis(resolved_id)
+                cached_after_scheduler = await self.storage.get_deep_analysis(
+                    resolved_id
+                )
                 if cached_after_scheduler is not None:
                     analysis = cached_after_scheduler
             if analysis is not None:
@@ -2047,6 +2199,7 @@ class GoofishCatcherPlugin(Star):
         if err := self._llm_tools_guard():
             return err
         import json as _json
+
         try:
             data = await self._admin_service.get_subscription_analytics(sub_id)
         except KeyError as exc:
@@ -2064,7 +2217,9 @@ class GoofishCatcherPlugin(Star):
         return text[:4000] if len(text) > 4000 else text
 
     @llm_tool(name="goofish_check_login")
-    async def goofish_check_login(self, event: AstrMessageEvent, platform: str = "goofish") -> str:
+    async def goofish_check_login(
+        self, event: AstrMessageEvent, platform: str = "goofish"
+    ) -> str:
         """检查闲鱼账号的当前登录状态。用于判断是否需要重新登录。
 
         Args:
@@ -2093,7 +2248,9 @@ class GoofishCatcherPlugin(Star):
         return message
 
     @llm_tool(name="goofish_start_login")
-    async def goofish_start_login(self, event: AstrMessageEvent, platform: str = "goofish") -> str:
+    async def goofish_start_login(
+        self, event: AstrMessageEvent, platform: str = "goofish"
+    ) -> str:
         """发起闲鱼登录流程。会优先尝试自动快速登录；若页面显示的是二维码且必须扫码，
         则将二维码截图发送到当前对话，用户扫码后回复任意消息即可完成登录。
 
@@ -2126,77 +2283,24 @@ class GoofishCatcherPlugin(Star):
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):
         """闲鱼监控指令入口，查看命令总览。"""
-        yield event.plain_result(
-            "用法：\n"
-            "/闲鱼 订阅 <关键词> [interval_sec] [pages]\n"
-            "/闲鱼 退订 <关键词>\n"
-            "/闲鱼 列表\n"
-            "/闲鱼 暂停 <关键词>\n"
-            "/闲鱼 恢复 <关键词>\n"
-            "/闲鱼 立即检查 [关键词]\n"
-            "/闲鱼 查询 <关键词...> [--pages N]\n"
-            "/闲鱼 登录 [淘宝]\n"
-            "/闲鱼 登录取消\n"
-            "/闲鱼 明细 <关键词> [limit]\n"
-            "/闲鱼 状态"
-        )
+        yield event.plain_result(_GOOFISH_USAGE)
 
     @goofish.command("订阅", alias={"subscribe", "watch"})
     async def subscribe(
         self,
         event: AstrMessageEvent,
-        keyword: str,
-        interval_sec: int = 0,
-        pages: int = 0,
+        rest: GreedyStr = "",
     ):
-        """创建或更新关键词订阅，并立即触发一次检查。"""
+        """创建或更新关键词订阅。支持「淘宝 总统黄油」或「淘宝的 总统黄油」。"""
         if not await self._check_ready(event):
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
-        if self.storage is None:
-            yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
+        intent = parse_subscribe_command(str(rest or ""))
+        if intent is None:
+            yield event.plain_result(_SUBSCRIBE_USAGE)
             return
-
-        interval = (
-            interval_sec if interval_sec > 0 else self.settings.default_interval_sec
-        )
-        page_count = pages if pages > 0 else self.settings.default_pages
-        page_count = max(1, min(page_count, self.settings.max_pages))
-        interval = max(30, interval)
-        umo = event.unified_msg_origin
-        current = await self.storage.get_subscription(umo, keyword)
-
-        subscription, created = await self.storage.upsert_subscription(
-            umo=umo,
-            keyword=keyword,
-            interval_sec=interval,
-            pages=page_count,
-            recommend_max_price=(
-                current.recommend_max_price if current is not None else None
-            ),
-            drop_abs=self.settings.default_drop_abs,
-            drop_pct=self.settings.default_drop_pct,
-            new_window_sec=self.settings.default_new_window_sec,
-            cooldown_sec=self.settings.default_cooldown_sec,
-        )
-        await self._ensure_scheduler_started()
-        if self.scheduler is not None:
-            await self.scheduler.enqueue_manual_check(subscription.id)
-
-        action = "已创建" if created else "已更新"
-        message = (
-            f"{action}订阅：{keyword}\n"
-            f"间隔：{interval}s，页数：{page_count}\n"
-            f"降价阈值：￥{subscription.drop_abs:.2f} 或 {subscription.drop_pct:.1%}"
-        )
-        if subscription.recommend_max_price is not None:
-            message += f"\n推荐价格阈值：≤￥{subscription.recommend_max_price:.2f}"
-        if self._provider_error:
-            message += (
-                "\n⚠️ 当前 Provider 不可用，任务不会执行。"
-                f"\n原因：{self._provider_error}"
-            )
-        yield event.plain_result(message)
+        result = await self._upsert_subscription_from_intent(event, intent)
+        yield result
 
     @goofish.command("退订", alias={"unsubscribe", "unwatch"})
     async def unsubscribe(self, event: AstrMessageEvent, keyword: GreedyStr):
@@ -2208,13 +2312,22 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
             return
 
+        lookup = parse_subscribe_command(str(keyword))
+        if lookup is None:
+            yield event.plain_result(f"未识别关键词：{keyword}")
+            return
         deleted = await self.storage.delete_subscription(
-            event.unified_msg_origin, keyword
+            event.unified_msg_origin, lookup.keyword, platform=lookup.platform
         )
         if not deleted:
-            yield event.plain_result(f"未找到订阅：{keyword}")
+            yield event.plain_result(
+                f"未找到订阅：{lookup.keyword}"
+                f"（{platform_display_name(lookup.platform)}）"
+            )
             return
-        yield event.plain_result(f"已退订：{keyword}")
+        yield event.plain_result(
+            f"已退订：{platform_display_name(lookup.platform)} {lookup.keyword}"
+        )
 
     @goofish.command("列表", alias={"list"})
     async def list_subscriptions(self, event: AstrMessageEvent):
@@ -2262,12 +2375,23 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
             return
 
-        sub = await self.storage.get_subscription(event.unified_msg_origin, keyword)
+        lookup = parse_subscribe_command(str(keyword))
+        if lookup is None:
+            yield event.plain_result(f"未识别关键词：{keyword}")
+            return
+        sub = await self.storage.get_subscription(
+            event.unified_msg_origin, lookup.keyword, platform=lookup.platform
+        )
         if sub is None:
-            yield event.plain_result(f"未找到订阅：{keyword}")
+            yield event.plain_result(
+                f"未找到订阅：{lookup.keyword}"
+                f"（{platform_display_name(lookup.platform)}）"
+            )
             return
         await self.storage.pause_subscription(sub.id, "MANUAL_PAUSE")
-        yield event.plain_result(f"已暂停订阅：{keyword}")
+        yield event.plain_result(
+            f"已暂停订阅：{platform_display_name(lookup.platform)} {lookup.keyword}"
+        )
 
     @goofish.command("恢复", alias={"resume"})
     async def resume(self, event: AstrMessageEvent, keyword: GreedyStr):
@@ -2279,16 +2403,27 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result("插件内部错误：存储组件不可用，请重启后重试。")
             return
 
-        sub = await self.storage.get_subscription(event.unified_msg_origin, keyword)
+        lookup = parse_subscribe_command(str(keyword))
+        if lookup is None:
+            yield event.plain_result(f"未识别关键词：{keyword}")
+            return
+        sub = await self.storage.get_subscription(
+            event.unified_msg_origin, lookup.keyword, platform=lookup.platform
+        )
         if sub is None:
-            yield event.plain_result(f"未找到订阅：{keyword}")
+            yield event.plain_result(
+                f"未找到订阅：{lookup.keyword}"
+                f"（{platform_display_name(lookup.platform)}）"
+            )
             return
         now_ts = int(time.time())
         await self.storage.resume_subscription(sub.id, now_ts)
         await self._ensure_scheduler_started()
         if self.scheduler is not None:
             await self.scheduler.enqueue_manual_check(sub.id)
-        yield event.plain_result(f"已恢复订阅：{keyword}")
+        yield event.plain_result(
+            f"已恢复订阅：{platform_display_name(lookup.platform)} {lookup.keyword}"
+        )
 
     @goofish.command("立即检查", alias={"checknow", "run"})
     async def check_now(self, event: AstrMessageEvent, keyword: GreedyStr = ""):
@@ -2316,13 +2451,30 @@ class GoofishCatcherPlugin(Star):
             return
 
         if keyword:
-            sub = await self.storage.get_subscription(event.unified_msg_origin, keyword)
+            lookup = parse_subscribe_command(str(keyword))
+            if lookup is None:
+                yield event.plain_result(f"未识别关键词：{keyword}")
+                return
+            sub = await self.storage.get_subscription(
+                event.unified_msg_origin,
+                lookup.keyword,
+                platform=lookup.platform,
+            )
             if sub is None:
-                yield event.plain_result(f"未找到订阅：{keyword}")
+                yield event.plain_result(
+                    f"未找到订阅：{lookup.keyword}"
+                    f"（{platform_display_name(lookup.platform)}）"
+                )
                 return
             if not sub.enabled:
+                resume_hint = lookup.keyword
+                if lookup.platform != PLATFORM_GOOFISH:
+                    resume_hint = (
+                        f"{platform_display_name(lookup.platform)} {lookup.keyword}"
+                    )
                 yield event.plain_result(
-                    f"订阅 {keyword} 当前处于暂停状态（{sub.paused_reason or 'manual'}），请先执行 /闲鱼 恢复 {keyword}"
+                    f"订阅 {resume_hint} 当前处于暂停状态（{sub.paused_reason or 'manual'}），"
+                    f"请先执行 /闲鱼 恢复 {resume_hint}"
                 )
                 return
             try:
@@ -2486,7 +2638,8 @@ class GoofishCatcherPlugin(Star):
             )
             if price_min is not None or price_max is not None:
                 filtered_items = [
-                    item for item in filtered_items
+                    item
+                    for item in filtered_items
                     if (price_min is None or item.price >= price_min)
                     and (price_max is None or item.price <= price_max)
                 ]
@@ -2518,7 +2671,9 @@ class GoofishCatcherPlugin(Star):
                         MessageChain([nodes]),
                     )
                 except Exception as exc:
-                    logger.warning("[goofish_catcher] query send forward failed: %s", exc)
+                    logger.warning(
+                        "[goofish_catcher] query send forward failed: %s", exc
+                    )
                     try:
                         await self.context.send_message(
                             event.unified_msg_origin,
@@ -2540,17 +2695,19 @@ class GoofishCatcherPlugin(Star):
                             fallback_exc,
                         )
                 if recommendation.top:
-                    self._forward_search_cache[event.unified_msg_origin] = ReplyFavoriteTarget(
-                        source="recommendation",
-                        items=[
-                            ReplyFavoriteItem(
-                                index=idx,
-                                title=item.title,
-                                url=item.url,
-                                item_id=item.item_id,
-                            )
-                            for idx, item in enumerate(recommendation.top, start=1)
-                        ],
+                    self._forward_search_cache[event.unified_msg_origin] = (
+                        ReplyFavoriteTarget(
+                            source="recommendation",
+                            items=[
+                                ReplyFavoriteItem(
+                                    index=idx,
+                                    title=item.title,
+                                    url=item.url,
+                                    item_id=item.item_id,
+                                )
+                                for idx, item in enumerate(recommendation.top, start=1)
+                            ],
+                        )
                     )
             else:
                 yield event.chain_result(
@@ -2672,7 +2829,9 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(message)
             return
         except ProviderError as exc:
-            yield event.plain_result(f"取消登录恢复失败：{exc.code.value}\n{exc.message}")
+            yield event.plain_result(
+                f"取消登录恢复失败：{exc.code.value}\n{exc.message}"
+            )
             return
         except Exception as exc:
             yield event.plain_result(f"取消登录恢复失败：{exc}")
@@ -2781,6 +2940,31 @@ class GoofishCatcherPlugin(Star):
             return True
         logger.warning("[goofish_catcher] command called before ready")
         return False
+
+
+_SUBSCRIBE_USAGE = (
+    "订阅用法：\n"
+    "/闲鱼 订阅 <关键词>\n"
+    "/闲鱼 订阅 淘宝 <关键词>\n"
+    "也可以直接发送：订阅淘宝的 总统黄油\n"
+    "可选：末尾加间隔秒数和页数，例如 /闲鱼 订阅 淘宝 总统黄油 1800 1"
+)
+
+_GOOFISH_USAGE = (
+    "用法：\n"
+    "/闲鱼 订阅 [淘宝] <关键词> [interval_sec] [pages]\n"
+    "/闲鱼 退订 <关键词>\n"
+    "/闲鱼 列表\n"
+    "/闲鱼 暂停 <关键词>\n"
+    "/闲鱼 恢复 <关键词>\n"
+    "/闲鱼 立即检查 [关键词]\n"
+    "/闲鱼 查询 <关键词...> [--pages N]\n"
+    "/闲鱼 登录 [淘宝]\n"
+    "/闲鱼 登录取消\n"
+    "/闲鱼 明细 <关键词> [limit]\n"
+    "/闲鱼 状态\n"
+    "也可以直接发送：订阅淘宝的 总统黄油"
+)
 
 
 def _format_ts(ts: int | None) -> str:
@@ -3006,7 +3190,9 @@ def _build_query_recommendation_chain(
     return parts
 
 
-def _build_recommendation_item_parts(idx: int, item, *, include_link: bool = True) -> list[Any]:
+def _build_recommendation_item_parts(
+    idx: int, item, *, include_link: bool = True
+) -> list[Any]:
     analysis = item.deep_analysis
     image_url = ""
     if analysis and analysis.image_urls:
@@ -3031,17 +3217,26 @@ def _build_recommendation_item_parts(idx: int, item, *, include_link: bool = Tru
     return parts
 
 
-def _render_recommendation_item_text(idx: int, item, *, include_link: bool = True) -> list[str]:
+def _render_recommendation_item_text(
+    idx: int, item, *, include_link: bool = True
+) -> list[str]:
     lines = [
         f"{idx}. [{item.score:.1f}] {item.title}",
         f"   价格：￥{item.price:.2f}",
         f"   理由：{item.reason}",
         f"   风险：{item.risk}",
     ]
-    lines.extend(f"   {line}" for line in _render_deep_analysis_lines(
-        item.deep_analysis,
-        image_url=(item.deep_analysis.image_urls[0] if item.deep_analysis and item.deep_analysis.image_urls else ""),
-    ))
+    lines.extend(
+        f"   {line}"
+        for line in _render_deep_analysis_lines(
+            item.deep_analysis,
+            image_url=(
+                item.deep_analysis.image_urls[0]
+                if item.deep_analysis and item.deep_analysis.image_urls
+                else ""
+            ),
+        )
+    )
     if include_link:
         lines.append(f"   链接：{item.url}")
     return lines
@@ -3280,14 +3475,18 @@ def _parse_query_input(
             text = re.sub(r"\s+", " ", text).strip()
             text = re.sub(r"^[，,。.!?]+|[，,。.!?]+$", "", text).strip()
 
-    return text, page_count, SearchFilters(
-        price_lower=price_min,
-        price_upper=price_max,
-        personal_only=personal_only,
-        free_shipping=free_shipping,
-        new_publish_option=new_publish_option,
-        region=region,
-    ).normalized()
+    return (
+        text,
+        page_count,
+        SearchFilters(
+            price_lower=price_min,
+            price_upper=price_max,
+            personal_only=personal_only,
+            free_shipping=free_shipping,
+            new_publish_option=new_publish_option,
+            region=region,
+        ).normalized(),
+    )
 
 
 def _render_query_recommendation_preview(
