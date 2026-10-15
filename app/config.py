@@ -13,6 +13,7 @@ except ModuleNotFoundError:
 
 # 与 platforms.registry.PLATFORM_GOOFISH 同源（types.DEFAULT_PLATFORM）；
 # 从 types 直接取常量，避免 config → platforms 的包级 import。
+from .chat_access import parse_chat_entries
 from .types import DEFAULT_PLATFORM as _PLATFORM_GOOFISH
 
 PROVIDER_MODE_PLAYWRIGHT_LOCAL = "playwright_local"
@@ -214,6 +215,9 @@ class PluginSettings:
     # 淘宝订阅轮询间隔下限（秒）。淘宝风控激进，过低频率易触发 punish；
     # 创建/更新淘宝订阅时统一兜底，默认 1800（30 分钟），可按需调低但自担风险。
     taobao_min_interval_sec: int = 1800
+    # Empty means unrestricted. Tokens are group ids, private user ids, or UMOs.
+    chat_whitelist: tuple[str, ...] = ()
+    chat_blacklist: tuple[str, ...] = ()
 
     def storage_state_path_for(self, platform: str) -> Path | None:
         """按平台解析登录态 storage_state 文件路径（唯一权威推导）。
@@ -423,4 +427,6 @@ def load_plugin_settings(
         taobao_min_interval_sec=max(
             300, _as_int(raw.get("taobao_min_interval_sec"), 1800)
         ),
+        chat_whitelist=parse_chat_entries(raw.get("chat_whitelist")),
+        chat_blacklist=parse_chat_entries(raw.get("chat_blacklist")),
     )

@@ -19,6 +19,11 @@ from .app.admin_server import AdminWebuiServer
 from .app.admin_service import AdminService
 from .app.auth_session import LocalAuthSessionController
 from .app.browser_agent import GofishBrowserAgent
+from .app.chat_access import (
+    CHAT_BLOCKED_TOOL_MESSAGE,
+    active_chat_allowed,
+    set_active_chat_rules,
+)
 from .app.config import (
     PROVIDER_MODE_PLAYWRIGHT_LOCAL,
     PROVIDER_MODE_REMOTE_REST,
@@ -84,6 +89,13 @@ from .app.types import (
 PLUGIN_NAME = "astrbot_plugin_goofish_catcher"
 
 
+class _ChatAccessFilter(filter.CustomFilter):
+    """Skip plugin handlers when the session is outside the allow/deny lists."""
+
+    def filter(self, event: AstrMessageEvent, cfg) -> bool:
+        return active_chat_allowed(event)
+
+
 class GoofishCatcherPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None):
         super().__init__(context)
@@ -94,6 +106,7 @@ class GoofishCatcherPlugin(Star):
             PLUGIN_NAME,
             plugin_data_dir=StarTools.get_data_dir(PLUGIN_NAME),
         )
+        self._sync_chat_access_rules()
 
         self.storage: SubscriptionStorage | None = None
         self.provider: SearchProvider | None = None
@@ -233,7 +246,14 @@ class GoofishCatcherPlugin(Star):
             f"http://{self.settings.admin_webui_host}:{self.settings.admin_webui_port}"
         )
 
+    def _sync_chat_access_rules(self) -> None:
+        set_active_chat_rules(
+            self.settings.chat_whitelist,
+            self.settings.chat_blacklist,
+        )
+
     async def _configure_runtime(self) -> None:
+        self._sync_chat_access_rules()
         self._provider_error = None
         self._provider_health = None
         self._provider_health_checked_at = None
@@ -805,6 +825,7 @@ class GoofishCatcherPlugin(Star):
             timeout_sec=self.settings.fetch_timeout_sec,
         )
 
+    @filter.custom_filter(_ChatAccessFilter)
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 20)
     async def auto_complete_remote_auth_flow(self, event: AstrMessageEvent):
         if not await self._check_ready(event):
@@ -1133,6 +1154,7 @@ class GoofishCatcherPlugin(Star):
             )
         return event.plain_result(message)
 
+    @filter.custom_filter(_ChatAccessFilter)
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 21)
     async def favorite_recommendation_by_reply(self, event: AstrMessageEvent):
         if not await self._check_ready(event):
@@ -1143,6 +1165,7 @@ class GoofishCatcherPlugin(Star):
         yield result.stop_event()
         return
 
+    @filter.custom_filter(_ChatAccessFilter)
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 22)
     async def intercept_subscribe_intent(self, event: AstrMessageEvent):
         if not await self._check_ready(event):
@@ -1159,6 +1182,8 @@ class GoofishCatcherPlugin(Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
+        if not active_chat_allowed(event):
+            return
         if not self._ready:
             return
         result = await self._build_reply_favorite_result(event)
@@ -1182,8 +1207,10 @@ class GoofishCatcherPlugin(Star):
     # 所有 @llm_tool 方法必须定义在 main.py（与插件主模块同 __module__），
     # 否则 AstrBot 的 ft.handler.__module__ == metadata.module_path 检查会失败。
 
-    def _llm_tools_guard(self) -> str | None:
+    def _llm_tools_guard(self, event: AstrMessageEvent | None = None) -> str | None:
         """Return an error message if the plugin isn't ready, else None."""
+        if event is not None and not active_chat_allowed(event):
+            return CHAT_BLOCKED_TOOL_MESSAGE
         if self._admin_service is None:
             return "插件尚未初始化，请稍后重试。"
         return None
@@ -1217,7 +1244,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             task(string): 用自然语言描述需要在闲鱼上完成的具体任务
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         if not self.settings.llm_agent_enabled:
             return "浏览器 Agent 功能已关闭。如需启用，请在插件设置中开启「启用浏览器 Agent」。搜索商品请使用 goofish_search_live，订阅管理请使用 goofish_*_subscription。"
@@ -1359,7 +1386,7 @@ class GoofishCatcherPlugin(Star):
             region(string): 地区筛选，如 江苏/南京/全南京，空表示不限（闲鱼特有，淘宝忽略）
             platform(string): 搜索平台：goofish=闲鱼（默认）、taobao=淘宝
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         resolved_platform = _normalize_platform_arg(platform)
         if resolved_platform is None:
@@ -1517,7 +1544,7 @@ class GoofishCatcherPlugin(Star):
             requirement(string): 采购需求原文（保留用户措辞，含平台/预算等限定），如“红色 RTX 5090 预算1万5”
             top_k(number): 最多推荐条数，默认5
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         if not self.providers:
             return "搜索组件未就绪，请稍后重试。"
@@ -1642,7 +1669,7 @@ class GoofishCatcherPlugin(Star):
             region(string): 地区筛选，如 江苏/南京/全南京，空表示不限
             top_k(number): 推荐数量，0 表示使用系统默认
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -1698,7 +1725,7 @@ class GoofishCatcherPlugin(Star):
 
         Args:
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -1725,7 +1752,7 @@ class GoofishCatcherPlugin(Star):
             keyword(string): 按关键词过滤，为空则显示全部
             status(string): 状态过滤，可选值：all（全部）/ enabled（运行中）/ paused（已暂停）
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -1786,7 +1813,7 @@ class GoofishCatcherPlugin(Star):
             region(string): 地区筛选，如 江苏/南京/全南京，空表示不限
             platform(string): 订阅平台：goofish=闲鱼（默认）、taobao=淘宝
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -1858,7 +1885,7 @@ class GoofishCatcherPlugin(Star):
             new_publish_option(string): 新发布范围；空字符串表示清除
             region(string): 地区筛选；空字符串表示清除
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -1906,7 +1933,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             sub_id(number): 要删除的订阅 ID
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         try:
             await self._admin_service.delete_subscription(sub_id)
@@ -1925,7 +1952,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             sub_id(number): 要暂停的订阅 ID
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         try:
             await self._admin_service.pause_subscription(sub_id)
@@ -1944,7 +1971,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             sub_id(number): 要恢复的订阅 ID
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         try:
             await self._admin_service.resume_subscription(sub_id)
@@ -1963,7 +1990,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             sub_id(number): 要立即检查的订阅 ID
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -1996,7 +2023,7 @@ class GoofishCatcherPlugin(Star):
             sort_by(string): 排序字段，可选：last_seen_at（最近出现）/ first_seen_at（最早入库）/ price（价格）
             limit(number): 返回数量上限，最大 20
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -2038,7 +2065,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             item_id(string): 商品 ID（可从 goofish_list_items 的结果中获取）
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -2078,7 +2105,7 @@ class GoofishCatcherPlugin(Star):
             price(number): 商品价格；可选
             force_refresh(boolean): 是否强制刷新详情页，默认 false
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         if self.provider is None or self.storage is None:
             return "深度分析组件未就绪，请稍后重试。"
@@ -2196,7 +2223,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             sub_id(number): 订阅 ID
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         import json as _json
 
@@ -2225,7 +2252,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             platform(string): 登录平台：goofish=闲鱼（默认）、taobao=淘宝
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         if platform == "goofish":
             provider = self.provider
@@ -2259,7 +2286,7 @@ class GoofishCatcherPlugin(Star):
         Args:
             platform(string): 登录平台：goofish=闲鱼（默认）、taobao=淘宝
         """
-        if err := self._llm_tools_guard():
+        if err := self._llm_tools_guard(event):
             return err
         if self.remote_auth_coordinator is None:
             return "当前 provider 未启用登录恢复流程。"
@@ -2280,11 +2307,13 @@ class GoofishCatcherPlugin(Star):
 
     # ── Commands ──────────────────────────────────────────────────────────────
 
+    @filter.custom_filter(_ChatAccessFilter)
     @filter.command_group("闲鱼", alias={"goofish"})
     async def goofish(self, event: AstrMessageEvent):
         """闲鱼监控指令入口，查看命令总览。"""
         yield event.plain_result(_GOOFISH_USAGE)
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("订阅", alias={"subscribe", "watch"})
     async def subscribe(
         self,
@@ -2302,6 +2331,7 @@ class GoofishCatcherPlugin(Star):
         result = await self._upsert_subscription_from_intent(event, intent)
         yield result
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("退订", alias={"unsubscribe", "unwatch"})
     async def unsubscribe(self, event: AstrMessageEvent, keyword: GreedyStr):
         """删除当前会话下指定关键词的订阅。"""
@@ -2329,6 +2359,7 @@ class GoofishCatcherPlugin(Star):
             f"已退订：{platform_display_name(lookup.platform)} {lookup.keyword}"
         )
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("列表", alias={"list"})
     async def list_subscriptions(self, event: AstrMessageEvent):
         """查看当前会话的订阅列表与运行状态。"""
@@ -2365,6 +2396,7 @@ class GoofishCatcherPlugin(Star):
             )
         yield event.plain_result("\n".join(lines))
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("暂停", alias={"pause"})
     async def pause(self, event: AstrMessageEvent, keyword: GreedyStr):
         """暂停指定关键词订阅，不再参与自动轮询。"""
@@ -2393,6 +2425,7 @@ class GoofishCatcherPlugin(Star):
             f"已暂停订阅：{platform_display_name(lookup.platform)} {lookup.keyword}"
         )
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("恢复", alias={"resume"})
     async def resume(self, event: AstrMessageEvent, keyword: GreedyStr):
         """恢复已暂停订阅，并立即入队一次检查。"""
@@ -2425,6 +2458,7 @@ class GoofishCatcherPlugin(Star):
             f"已恢复订阅：{platform_display_name(lookup.platform)} {lookup.keyword}"
         )
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("立即检查", alias={"checknow", "run"})
     async def check_now(self, event: AstrMessageEvent, keyword: GreedyStr = ""):
         """对订阅执行立即检查并返回推荐；不填关键词则批量入队当前会话全部订阅。"""
@@ -2583,6 +2617,7 @@ class GoofishCatcherPlugin(Star):
             )
         )
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("查询", alias={"query", "search", "inspect"})
     async def query_once(
         self,
@@ -2744,6 +2779,7 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(f"查询失败：{exc}")
             return
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("登录", alias={"login", "auth"})
     async def remote_login(self, event: AstrMessageEvent, platform: str = ""):
         """手动拉起登录流程并回传二维码截图。可选平台参数：淘宝/taobao（默认闲鱼）。"""
@@ -2783,6 +2819,7 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(f"启动登录失败：{exc}")
             return
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("登录完成", alias={"login_done", "auth_done"})
     async def remote_login_done(self, event: AstrMessageEvent):
         """确认扫码已完成，保存登录态并自动恢复订阅。"""
@@ -2812,6 +2849,7 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(f"保存登录态失败：{exc}")
             return
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("登录取消", alias={"login_cancel", "auth_cancel"})
     async def remote_login_cancel(self, event: AstrMessageEvent):
         """取消当前登录恢复流程。"""
@@ -2837,6 +2875,7 @@ class GoofishCatcherPlugin(Star):
             yield event.plain_result(f"取消登录恢复失败：{exc}")
             return
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("明细", alias={"detail", "items"})
     async def detail(
         self,
@@ -2880,6 +2919,7 @@ class GoofishCatcherPlugin(Star):
             )
         )
 
+    @goofish.custom_filter(_ChatAccessFilter)
     @goofish.command("状态", alias={"status"})
     async def status(self, event: AstrMessageEvent):
         """查看调度器、Provider 与当前会话订阅的运行状态。"""
@@ -2907,6 +2947,7 @@ class GoofishCatcherPlugin(Star):
             f"- 执行中：{scheduler_status.get('inflight', 0)}",
             f"- Worker 数：{scheduler_status.get('workers', 0)}",
             f"- 当前会话订阅：{len(umo_subscriptions)}（启用 {enabled_local} / 暂停 {paused_local}）",
+            *_render_chat_access_lines(self.settings, event),
             f"- 全局启用订阅：{scheduler_status.get('enabled_subscriptions', 0)}",
             f"- Provider：{self.settings.provider_mode}",
             f"- Provider 可用：{self._provider_error is None}",
@@ -2965,6 +3006,22 @@ _GOOFISH_USAGE = (
     "/闲鱼 状态\n"
     "也可以直接发送：订阅淘宝的 总统黄油"
 )
+
+
+def _render_chat_access_lines(
+    settings: PluginSettings, event: AstrMessageEvent
+) -> list[str]:
+    whitelist = settings.chat_whitelist
+    blacklist = settings.chat_blacklist
+    lines = [f"- 当前会话：{event.unified_msg_origin}"]
+    group_id = str(event.get_group_id() or "").strip()
+    if group_id:
+        lines.append(f"- 当前群号：{group_id}")
+    whitelist_text = f"{len(whitelist)} 项" if whitelist else "未限制"
+    blacklist_text = f"{len(blacklist)} 项" if blacklist else "未限制"
+    lines.append(f"- 会话白名单：{whitelist_text}")
+    lines.append(f"- 会话黑名单：{blacklist_text}")
+    return lines
 
 
 def _format_ts(ts: int | None) -> str:

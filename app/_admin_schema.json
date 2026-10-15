@@ -302,5 +302,23 @@
     "description": "后台 API Key",
     "hint": "启用后台时必须配置，用于登录认证",
     "default": ""
+  },
+  "chat_whitelist": {
+    "type": "list",
+    "description": "会话白名单",
+    "hint": "留空表示不限制。每行一个群号、私聊对方 ID，或统一会话标识（/sid，如 aiocqhttp:GroupMessage:123456）。填写后只处理这些会话的请求。已有订阅的推送不受影响。",
+    "default": [],
+    "items": {
+      "type": "string"
+    }
+  },
+  "chat_blacklist": {
+    "type": "list",
+    "description": "会话黑名单",
+    "hint": "留空表示不限制。命中后忽略该群聊或私聊的请求。两边都填时先排除黑名单，其余会话还必须在白名单内。",
+    "default": [],
+    "items": {
+      "type": "string"
+    }
   }
 }

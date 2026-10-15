@@ -1002,6 +1002,8 @@ class AdminService:
             "admin_webui_host": settings.admin_webui_host or DEFAULT_ADMIN_WEBUI_HOST,
             "admin_webui_port": settings.admin_webui_port or DEFAULT_ADMIN_WEBUI_PORT,
             "admin_webui_api_key": settings.admin_webui_api_key or "",
+            "chat_whitelist": list(settings.chat_whitelist),
+            "chat_blacklist": list(settings.chat_blacklist),
         }
 
     def _validate_config_values(self, values: dict[str, Any]) -> dict[str, str]:
@@ -1065,6 +1067,11 @@ class AdminService:
 
     def _config_groups(self) -> list[dict[str, Any]]:
         return [
+            {
+                "id": "chat_access",
+                "title": "会话黑白名单",
+                "fields": ["chat_whitelist", "chat_blacklist"],
+            },
             {
                 "id": "provider",
                 "title": "抓取模式",
