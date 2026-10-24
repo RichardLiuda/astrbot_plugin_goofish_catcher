@@ -69,6 +69,7 @@ from .app.reply_favorite import (
     extract_non_reply_text,
     extract_reply_context_from_outline,
     extract_reply_text,
+    format_reply_index_range,
     map_reply_selection,
     parse_reply_selection,
     parse_reply_target,
@@ -987,10 +988,10 @@ class GoofishCatcherPlugin(Star):
 
         selected_items, invalid = map_reply_selection(target, selections)
         if invalid:
-            max_index = max((item.index for item in target.items), default=0)
             invalid_text = "、".join(str(value) for value in invalid)
             return event.plain_result(
-                f"序号超出范围：{invalid_text}\n当前可选范围：1-{max_index}"
+                f"序号超出范围：{invalid_text}\n"
+                f"当前可选范围：{format_reply_index_range(target.items)}"
             )
         if not selected_items:
             return event.plain_result(

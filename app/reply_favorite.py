@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from astrbot.api.message_components import Plain, Reply
 
 _INDEX_LINE_RE = re.compile(r"^(\d+)\.\s+\[[^\]]+\]\s+(.+)$")
-_LINK_LINE_RE = re.compile(r"^链接：\s*(https?://\S+)\s*$")
+# QQ flattens image segments out of the quoted text, so a link that was sent
+# after an image can be glued onto the previous line: "主图：链接：https://..."
+_LINK_LINE_RE = re.compile(r"链接：\s*(https?://\S+)")
 _SELECTION_RE = re.compile(r"^\s*\d+(?:[\s,，、]+\d+)*\s*$")
 _RECOMMENDATION_HINT = "引用本消息回复序号可收藏，支持 1 或 1 3"
 _SUPPORTED_HEADERS = ("【闲鱼建议】", "【淘宝建议】", "【查询推荐】", "【立即检查】")
@@ -31,21 +33,31 @@ def recommendation_reply_hint() -> str:
     return _RECOMMENDATION_HINT
 
 
+def _plain_text_from_chain(chain: list[object]) -> str | None:
+    parts: list[str] = []
+    for item in chain:
+        if not isinstance(item, Plain):
+            continue
+        text = str(getattr(item, "text", "") or "").strip("\n")
+        if text.strip():
+            parts.append(text)
+    text = "\n".join(parts).strip()
+    return text or None
+
+
 def extract_reply_text(messages: list[object]) -> str | None:
     for component in messages:
         if not isinstance(component, Reply):
             continue
+        # message_str drops image segments and concatenates the surrounding
+        # text, which glues "主图：" onto the following "链接：" line.
+        # The original chain still has those pieces separated.
+        chain_text = _plain_text_from_chain(getattr(component, "chain", None) or [])
+        if chain_text:
+            return chain_text
         message_str = str(getattr(component, "message_str", "") or "").strip()
         if message_str:
             return message_str
-        chain = getattr(component, "chain", None) or []
-        parts: list[str] = []
-        for item in chain:
-            if isinstance(item, Plain):
-                parts.append(item.text)
-        text = "\n".join(part.strip() for part in parts if part.strip()).strip()
-        if text:
-            return text
     return None
 
 
@@ -125,7 +137,7 @@ def parse_reply_target(text: str) -> ReplyFavoriteTarget | None:
             continue
         if current_index is None or current_title is None:
             continue
-        link_match = _LINK_LINE_RE.match(line)
+        link_match = _LINK_LINE_RE.search(line)
         if not link_match:
             continue
         url = link_match.group(1).strip()
@@ -149,6 +161,15 @@ def parse_reply_target(text: str) -> ReplyFavoriteTarget | None:
     return ReplyFavoriteTarget(source="recommendation", items=items)
 
 
+def format_reply_index_range(items: list[ReplyFavoriteItem]) -> str:
+    indexes = sorted({item.index for item in items})
+    if not indexes:
+        return "无"
+    if indexes == list(range(1, indexes[-1] + 1)):
+        return f"1-{indexes[-1]}"
+    return "、".join(str(index) for index in indexes)
+
+
 def map_reply_selection(
     target: ReplyFavoriteTarget,
     selections: list[int],
@@ -166,7 +187,9 @@ def map_reply_selection(
 
 
 def _extract_item_id_from_url(url: str) -> str | None:
-    match = re.search(r"(?:[?&](?:id|item_id|itemId|auctionId)=|item(?:_id)?[=/])(\d+)", url)
+    match = re.search(
+        r"(?:[?&](?:id|item_id|itemId|auctionId)=|item(?:_id)?[=/])(\d+)", url
+    )
     if match:
         return match.group(1)
     return None
