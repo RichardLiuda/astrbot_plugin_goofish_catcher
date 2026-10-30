@@ -676,6 +676,12 @@ class AdminService:
         region = self._normalize_optional_text(
             payload.get("region", current.region if current else None)
         )
+        allow_umos = self._normalize_chat_list(
+            payload.get("allow_umos", current.allow_umos if current else ())
+        )
+        deny_umos = self._normalize_chat_list(
+            payload.get("deny_umos", current.deny_umos if current else ())
+        )
         return {
             "umo": umo,
             "keyword": keyword,
@@ -696,7 +702,38 @@ class AdminService:
             "free_shipping": free_shipping,
             "new_publish_option": new_publish_option,
             "region": region,
+            "allow_umos": allow_umos,
+            "deny_umos": deny_umos,
         }
+
+    @staticmethod
+    def _normalize_chat_list(value: Any) -> list[str]:
+        """Normalize a per-subscription chat allow/deny list.
+
+        Accepts a list or a comma/newline separated string. Order is kept and
+        duplicates are dropped; the original spelling is preserved so the
+        admin UI shows exactly what the user typed.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            pieces = value.replace("\n", ",").split(",")
+        elif isinstance(value, (list, tuple, set)):
+            pieces = [str(item) for item in value]
+        else:
+            pieces = [str(value)]
+        out: list[str] = []
+        seen: set[str] = set()
+        for piece in pieces:
+            text = piece.strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        return out
 
     @staticmethod
     def _normalize_price_bound(
@@ -946,6 +983,8 @@ class AdminService:
             free_shipping=sub.free_shipping,
             new_publish_option=sub.new_publish_option,
             region=sub.region,
+            allow_umos=list(sub.allow_umos or ()),
+            deny_umos=list(sub.deny_umos or ()),
         )
 
     def _settings_to_editable_values(self) -> dict[str, Any]:

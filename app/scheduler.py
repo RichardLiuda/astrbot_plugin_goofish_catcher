@@ -10,6 +10,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context
 
 from .config import PluginSettings
+from .chat_access import subscription_chat_allowed
 from .detector import (
     EventPayload,
     build_payload_hash,
@@ -525,6 +526,23 @@ class MonitoringScheduler:
         except asyncio.CancelledError:
             raise
 
+    def _push_allowed(self, sub: Subscription) -> bool:
+        """Whether this subscription may push to its own chat under its lists."""
+        allowed = subscription_chat_allowed(sub, unified_msg_origin=sub.umo)
+        if not allowed:
+            logger.debug(
+                "[goofish_catcher] sub=%s push suppressed by its chat lists (umo=%s)",
+                sub.id,
+                sub.umo,
+            )
+        return allowed
+
+    async def _notify(self, sub: Subscription, sender: Callable[..., Any], **kwargs: Any) -> Any:
+        """Call a notifier method unless the subscription's chat lists deny it."""
+        if not self._push_allowed(sub):
+            return None
+        return await sender(umo=sub.umo, **kwargs)
+
     async def _process_subscription(self, sub: Subscription, worker_idx: int) -> None:
         started_at = int(time.time())
         run_id = await self.storage.create_fetch_run(sub.id, started_at)
@@ -558,8 +576,9 @@ class MonitoringScheduler:
                     items_count=0,
                 )
                 await self.storage.pause_subscription(sub.id, "PLATFORM_UNAVAILABLE")
-                await self.notifier.send_alert(
-                    umo=sub.umo,
+                await self._notify(
+                    sub,
+                    self.notifier.send_alert,
                     keyword=sub.keyword,
                     code="PLATFORM_UNAVAILABLE",
                     message=(
@@ -655,8 +674,9 @@ class MonitoringScheduler:
                     recommend_max_price=sub.recommend_max_price,
                 )
                 if recommendation.top:
-                    sent = await self.notifier.send_recommendation_summary(
-                        umo=sub.umo,
+                    sent = await self._notify(
+                        sub,
+                        self.notifier.send_recommendation_summary,
                         recommendation=recommendation,
                     )
                     if sent:
@@ -665,7 +685,7 @@ class MonitoringScheduler:
                             candidates=candidates,
                             sent_at=now_ts,
                         )
-                    else:
+                    elif sent is False:
                         logger.warning(
                             "[goofish_catcher] sub=%s summary send failed, skip notification dedupe write",
                             sub.id,
@@ -710,8 +730,9 @@ class MonitoringScheduler:
                 retry_sec,
             )
             if failure_count % _CONSECUTIVE_FAILURE_ALERT_THRESHOLD == 0:
-                await self.notifier.send_alert(
-                    umo=sub.umo,
+                await self._notify(
+                    sub,
+                    self.notifier.send_alert,
                     keyword=sub.keyword,
                     code=ProviderErrorCode.TIMEOUT.value,
                     message="provider search timed out",
@@ -785,8 +806,9 @@ class MonitoringScheduler:
                             recovery_exc,
                             exc_info=True,
                         )
-                await self.notifier.send_alert(
-                    umo=sub.umo,
+                await self._notify(
+                    sub,
+                    self.notifier.send_alert,
                     keyword=sub.keyword,
                     code=exc.code.value,
                     message=exc.message,
@@ -816,8 +838,9 @@ class MonitoringScheduler:
             )
             # 连续失败达到阈值时推送告警，避免 NETWORK_ERROR 等错误静默丢失
             if failure_count % _CONSECUTIVE_FAILURE_ALERT_THRESHOLD == 0:
-                await self.notifier.send_alert(
-                    umo=sub.umo,
+                await self._notify(
+                    sub,
+                    self.notifier.send_alert,
                     keyword=sub.keyword,
                     code=exc.code.value,
                     message=exc.message,
@@ -852,8 +875,9 @@ class MonitoringScheduler:
                 exc_info=True,
             )
             if failure_count % _CONSECUTIVE_FAILURE_ALERT_THRESHOLD == 0:
-                await self.notifier.send_alert(
-                    umo=sub.umo,
+                await self._notify(
+                    sub,
+                    self.notifier.send_alert,
                     keyword=sub.keyword,
                     code=ProviderErrorCode.UNKNOWN.value,
                     message=str(exc),

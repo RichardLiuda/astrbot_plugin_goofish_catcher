@@ -562,7 +562,11 @@ export function SubscriptionDialog({ open, value, onClose, onSubmit }) {
 	const [form, setForm] = useState(value || {})
 
 	useEffect(() => {
-		setForm(value || {})
+		setForm({
+			...value,
+			allow_umos_text: (value?.allow_umos || []).join('\n'),
+			deny_umos_text: (value?.deny_umos || []).join('\n')
+		})
 	}, [open, value])
 
 	const fields = [
@@ -679,6 +683,44 @@ export function SubscriptionDialog({ open, value, onClose, onSubmit }) {
 									region: event.target.value
 								}))}
 							hint="格式如 江苏/南京/全南京，留空不限"
+						/>
+					</div>
+				<//>
+				<${Box} sx=${{ mt: 2.5 }}>
+					<${Typography} variant="subtitle2" sx=${{ mb: 0.5 }}>
+						会话黑白名单
+					<//>
+					<${Typography}
+						variant="body2"
+						color="text.secondary"
+						sx=${{ mb: 1.5 }}
+					>
+						留空表示不限。命中黑名单的会话不能操作这条订阅，也不会收到它的推送；白名单非空时，只有名单内的会话可以操作和接收。每行一个群号、私聊 ID 或 /sid 看到的会话标识。
+					<//>
+					<div className="form-grid">
+						<${AppTextField}
+							label="允许的会话（白名单）"
+							multiline=${true}
+							rows=${3}
+							value=${form.allow_umos_text ?? ''}
+							onChange=${(event) =>
+								setForm((current) => ({
+									...current,
+									allow_umos_text: event.target.value
+								}))}
+							hint="留空表示不限制；填了就只有这些会话能操作与接收"
+						/>
+						<${AppTextField}
+							label="禁止的会话（黑名单）"
+							multiline=${true}
+							rows=${3}
+							value=${form.deny_umos_text ?? ''}
+							onChange=${(event) =>
+								setForm((current) => ({
+									...current,
+									deny_umos_text: event.target.value
+								}))}
+							hint="优先级高于白名单；填上订阅自己的会话会让它不再推送"
 						/>
 					</div>
 				<//>

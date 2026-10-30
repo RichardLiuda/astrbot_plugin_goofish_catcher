@@ -65,6 +65,8 @@ class SubscriptionSummary:
     free_shipping: bool = False
     new_publish_option: str | None = None
     region: str | None = None
+    allow_umos: list[str] | None = None
+    deny_umos: list[str] | None = None
 
 
 @dataclass(slots=True)

@@ -22,6 +22,7 @@ from .app.browser_agent import GofishBrowserAgent
 from .app.chat_access import (
     CHAT_BLOCKED_TOOL_MESSAGE,
     active_chat_allowed,
+    event_allowed_for_subscription,
     set_active_chat_rules,
 )
 from .app.config import (
@@ -1221,6 +1222,34 @@ class GoofishCatcherPlugin(Star):
             return "插件尚未初始化，请稍后重试。"
         return None
 
+    async def _subscription_chat_guard(
+        self, event: AstrMessageEvent, sub_id: int
+    ) -> str | None:
+        """Reject tool calls acting on a subscription outside its chat lists.
+
+        The subscription's own ``allow_umos`` / ``deny_umos`` decide which chats
+        may inspect or modify it. Empty lists inherit the global rules only.
+        """
+        if self.storage is None:
+            return None
+        try:
+            subscription = await self.storage.get_subscription_by_id(sub_id)
+        except Exception:
+            logger.debug(
+                "[goofish_catcher] subscription lookup failed for chat guard sub=%s",
+                sub_id,
+                exc_info=True,
+            )
+            return None
+        if subscription is None:
+            return None
+        if event_allowed_for_subscription(event, subscription):
+            return None
+        return (
+            f"订阅 {sub_id}（{subscription.keyword}）未对当前会话开放，未执行任何操作。"
+            "请告诉用户此会话无权操作该订阅，不要编造结果。"
+        )
+
     def _platform_unavailable_message(self, platform: str) -> str:
         """平台无 provider 时的提示：远程模式说真实原因（不支持），
         本地模式指向开关配置。"""
@@ -1893,6 +1922,8 @@ class GoofishCatcherPlugin(Star):
         """
         if err := self._llm_tools_guard(event):
             return err
+        if err := await self._subscription_chat_guard(event, sub_id):
+            return err
         import json as _json
 
         payload: dict[str, Any] = {}
@@ -1941,6 +1972,8 @@ class GoofishCatcherPlugin(Star):
         """
         if err := self._llm_tools_guard(event):
             return err
+        if err := await self._subscription_chat_guard(event, sub_id):
+            return err
         try:
             await self._admin_service.delete_subscription(sub_id)
         except KeyError as exc:
@@ -1959,6 +1992,8 @@ class GoofishCatcherPlugin(Star):
             sub_id(number): 要暂停的订阅 ID
         """
         if err := self._llm_tools_guard(event):
+            return err
+        if err := await self._subscription_chat_guard(event, sub_id):
             return err
         try:
             await self._admin_service.pause_subscription(sub_id)
@@ -1979,6 +2014,8 @@ class GoofishCatcherPlugin(Star):
         """
         if err := self._llm_tools_guard(event):
             return err
+        if err := await self._subscription_chat_guard(event, sub_id):
+            return err
         try:
             await self._admin_service.resume_subscription(sub_id)
         except KeyError as exc:
@@ -1997,6 +2034,8 @@ class GoofishCatcherPlugin(Star):
             sub_id(number): 要立即检查的订阅 ID
         """
         if err := self._llm_tools_guard(event):
+            return err
+        if err := await self._subscription_chat_guard(event, sub_id):
             return err
         import json as _json
 
@@ -2230,6 +2269,8 @@ class GoofishCatcherPlugin(Star):
             sub_id(number): 订阅 ID
         """
         if err := self._llm_tools_guard(event):
+            return err
+        if err := await self._subscription_chat_guard(event, sub_id):
             return err
         import json as _json
 

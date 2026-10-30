@@ -4,6 +4,14 @@ export function cx(...names) {
 	return names.filter(Boolean).join(' ')
 }
 
+// Split a per-subscription chat allow/deny textarea into entries.
+export function splitChatList(text) {
+	return String(text || '')
+		.split(/[\s,，;；]+/)
+		.map((item) => item.trim())
+		.filter(Boolean)
+}
+
 export function getRoute() {
 	const route = window.location.hash.replace(/^#\/?/, '').trim()
 	return NAV_ITEMS.some((item) => item.key === route) ? route : 'dashboard'

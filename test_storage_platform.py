@@ -56,15 +56,17 @@ class StoragePlatformTests(unittest.IsolatedAsyncioTestCase):
         await self.storage.close()
         self._tmpdir.cleanup()
 
-    async def test_fresh_db_has_v7_schema(self) -> None:
+    async def test_fresh_db_has_latest_schema(self) -> None:
         async with aiosqlite.connect(self.db_path.as_posix()) as conn:
             row = await (await conn.execute("PRAGMA user_version")).fetchone()
-            self.assertEqual(int(row[0]), 7)
+            self.assertEqual(int(row[0]), 8)
             col_rows = await (
                 await conn.execute("PRAGMA table_info(subscriptions)")
             ).fetchall()
             cols = {r[1] for r in col_rows}
             self.assertIn("platform", cols)
+            self.assertIn("allow_umos", cols)
+            self.assertIn("deny_umos", cols)
             mp_cols = await (
                 await conn.execute("PRAGMA table_info(market_price)")
             ).fetchall()
@@ -223,7 +225,7 @@ class StoragePlatformTests(unittest.IsolatedAsyncioTestCase):
             try:
                 async with aiosqlite.connect(db_path.as_posix()) as conn:
                     row = await (await conn.execute("PRAGMA user_version")).fetchone()
-                    self.assertEqual(int(row[0]), 7)
+                    self.assertEqual(int(row[0]), 8)
 
                     row = await (
                         await conn.execute(
@@ -306,7 +308,7 @@ class StoragePlatformTests(unittest.IsolatedAsyncioTestCase):
     async def _assert_v7_converged(self, db_path: Path) -> None:
         async with aiosqlite.connect(db_path.as_posix()) as conn:
             row = await (await conn.execute("PRAGMA user_version")).fetchone()
-            self.assertEqual(int(row[0]), 7)
+            self.assertEqual(int(row[0]), 8)
             mp_cols = {
                 r[1]
                 for r in await (

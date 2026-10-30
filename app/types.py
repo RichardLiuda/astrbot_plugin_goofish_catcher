@@ -105,6 +105,11 @@ class Subscription:
     new_publish_option: str | None = None
     region: str | None = None
     platform: str = DEFAULT_PLATFORM
+    # Per-subscription chat allow/deny lists. Empty allow does not restrict;
+    # a deny hit always wins. Entries use the same tokens as the global
+    # chat_whitelist / chat_blacklist (group id, private id, or umo).
+    allow_umos: tuple[str, ...] = ()
+    deny_umos: tuple[str, ...] = ()
 
     def search_filters(self) -> SearchFilters:
         return SearchFilters(

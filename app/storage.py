@@ -29,6 +29,38 @@ from .types import (
 )
 
 
+def _load_chat_entries(raw: object) -> tuple[str, ...]:
+    """Decode the JSON array stored in ``subscriptions.allow_umos``/``deny_umos``."""
+    if not raw:
+        return ()
+    text = str(raw).strip()
+    if not text:
+        return ()
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = [piece for piece in text.replace("\n", ",").split(",")]
+    if isinstance(data, str):
+        data = [data]
+    if not isinstance(data, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in data if str(item).strip())
+
+
+def _dump_chat_entries(entries: object) -> str:
+    """Serialize a chat allow/deny list into its column representation."""
+    if entries is None:
+        return ""
+    if isinstance(entries, str):
+        values = [piece for piece in entries.replace("\n", ",").split(",")]
+    elif isinstance(entries, (list, tuple, set)):
+        values = [str(item) for item in entries]
+    else:
+        values = [str(entries)]
+    cleaned = [item.strip() for item in values if str(item).strip()]
+    return json.dumps(cleaned, ensure_ascii=False) if cleaned else ""
+
+
 class SubscriptionStorage:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -351,6 +383,19 @@ class SubscriptionStorage:
             await conn.execute("PRAGMA user_version = 7;")
             await conn.commit()
 
+        if version < 8:
+            col_rows = await (
+                await conn.execute("PRAGMA table_info(subscriptions)")
+            ).fetchall()
+            existing_cols = {row[1] for row in col_rows}
+            for col_name in ("allow_umos", "deny_umos"):
+                if col_name not in existing_cols:
+                    await conn.execute(
+                        f"ALTER TABLE subscriptions ADD COLUMN {col_name} TEXT NOT NULL DEFAULT ''"
+                    )
+            await conn.execute("PRAGMA user_version = 8;")
+            await conn.commit()
+
     @staticmethod
     def _row_to_subscription(row: aiosqlite.Row) -> Subscription:
         keys = row.keys() if hasattr(row, "keys") else []
@@ -361,6 +406,10 @@ class SubscriptionStorage:
         new_publish_option = row["new_publish_option"] if "new_publish_option" in keys else None
         region = row["region"] if "region" in keys else None
         platform = row["platform"] if "platform" in keys else None
+        allow_umos = (
+            _load_chat_entries(row["allow_umos"]) if "allow_umos" in keys else ()
+        )
+        deny_umos = _load_chat_entries(row["deny_umos"]) if "deny_umos" in keys else ()
         return Subscription(
             id=int(row["id"]),
             umo=str(row["umo"]),
@@ -388,6 +437,8 @@ class SubscriptionStorage:
             free_shipping=bool(free_shipping),
             new_publish_option=str(new_publish_option).strip() if new_publish_option else None,
             region=str(region).strip() if region else None,
+            allow_umos=allow_umos,
+            deny_umos=deny_umos,
         )
 
     @staticmethod
@@ -447,6 +498,8 @@ class SubscriptionStorage:
         new_publish_option: str | None = None,
         region: str | None = None,
         platform: str = DEFAULT_PLATFORM,
+        allow_umos: object = None,
+        deny_umos: object = None,
     ) -> tuple[Subscription, bool]:
         conn = self._conn_or_raise()
         now_ts = int(time.time())
@@ -470,10 +523,10 @@ class SubscriptionStorage:
                     new_window_sec, cooldown_sec, enabled, paused_reason,
                     last_run_at, next_run_at, consecutive_failures,
                     price_min, price_max, personal_only, free_shipping,
-                    new_publish_option, region,
+                    new_publish_option, region, allow_umos, deny_umos,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(umo, platform, keyword) DO UPDATE SET
                     interval_sec = excluded.interval_sec,
                     pages = excluded.pages,
@@ -488,6 +541,8 @@ class SubscriptionStorage:
                     free_shipping = excluded.free_shipping,
                     new_publish_option = excluded.new_publish_option,
                     region = excluded.region,
+                    allow_umos = excluded.allow_umos,
+                    deny_umos = excluded.deny_umos,
                     enabled = 1,
                     paused_reason = NULL,
                     next_run_at = excluded.next_run_at,
@@ -511,6 +566,8 @@ class SubscriptionStorage:
                     1 if free_shipping else 0,
                     (new_publish_option or None),
                     (region or None),
+                    _dump_chat_entries(allow_umos),
+                    _dump_chat_entries(deny_umos),
                     now_ts,
                     now_ts,
                 ),
@@ -1473,6 +1530,8 @@ class SubscriptionStorage:
         free_shipping: bool = False,
         new_publish_option: str | None = None,
         region: str | None = None,
+        allow_umos: object = None,
+        deny_umos: object = None,
     ) -> Subscription | None:
         conn = self._conn_or_raise()
         now_ts = int(time.time())
@@ -1495,6 +1554,8 @@ class SubscriptionStorage:
                     free_shipping = ?,
                     new_publish_option = ?,
                     region = ?,
+                    allow_umos = ?,
+                    deny_umos = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -1514,6 +1575,8 @@ class SubscriptionStorage:
                     1 if free_shipping else 0,
                     (new_publish_option or None),
                     (region or None),
+                    _dump_chat_entries(allow_umos),
+                    _dump_chat_entries(deny_umos),
                     now_ts,
                     sub_id,
                 ),

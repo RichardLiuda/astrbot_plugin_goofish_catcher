@@ -45,6 +45,8 @@ class SubscriptionRequest(BaseModel):
     free_shipping: bool | None = None
     new_publish_option: str | None = None
     region: str | None = None
+    allow_umos: list[str] | None = None
+    deny_umos: list[str] | None = None
 
 
 class QueryRequest(BaseModel):

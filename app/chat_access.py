@@ -126,6 +126,46 @@ def is_chat_allowed(
     return True
 
 
+def subscription_chat_allowed(
+    subscription: Any,
+    *,
+    unified_msg_origin: str = "",
+    group_id: str = "",
+    sender_id: str = "",
+    is_private: bool = False,
+) -> bool:
+    """Whether this chat may act on a single subscription or receive its pushes.
+
+    Uses the subscription's own ``allow_umos`` / ``deny_umos``; both empty means
+    the subscription inherits the global rules only.
+    """
+    allow = getattr(subscription, "allow_umos", ()) or ()
+    deny = getattr(subscription, "deny_umos", ()) or ()
+    if not allow and not deny:
+        return True
+    return is_chat_allowed(
+        allow,
+        deny,
+        group_id=group_id,
+        unified_msg_origin=unified_msg_origin,
+        sender_id=sender_id,
+        is_private=is_private,
+    )
+
+
+def event_allowed_for_subscription(event: Any, subscription: Any) -> bool:
+    """Apply a subscription's own chat lists to an incoming message event."""
+    group_id = _event_text(event, "get_group_id")
+    private = _event_is_private(event, group_id)
+    return subscription_chat_allowed(
+        subscription,
+        group_id=group_id,
+        unified_msg_origin=str(getattr(event, "unified_msg_origin", "") or ""),
+        sender_id=_event_text(event, "get_sender_id") if private else "",
+        is_private=private,
+    )
+
+
 def set_active_chat_rules(whitelist: Any, blacklist: Any) -> None:
     """Publish the lists used by message filters and outbound checks."""
     global _active_whitelist, _active_blacklist

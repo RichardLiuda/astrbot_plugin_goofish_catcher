@@ -29,6 +29,7 @@ import {
 	formatMoney,
 	formatRatio,
 	formatTs,
+	splitChatList,
 	statusChipProps,
 	toNumberOrNull
 } from '../utils.js'
@@ -96,7 +97,9 @@ export function SubscriptionsPage({ notify }) {
 			personal_only: Boolean(form.personal_only),
 			free_shipping: Boolean(form.free_shipping),
 			new_publish_option: String(form.new_publish_option || '').trim(),
-			region: String(form.region || '').trim()
+			region: String(form.region || '').trim(),
+			allow_umos: splitChatList(form.allow_umos_text),
+			deny_umos: splitChatList(form.deny_umos_text)
 		}
 		try {
 			if (editing?.id) {
