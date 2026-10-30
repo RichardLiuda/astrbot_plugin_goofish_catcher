@@ -4,11 +4,29 @@
 
 ## 远程 Worker 兼容性
 
-当前插件版本（v4.1.1）需要 Worker **≥ v3.5.0**。
+当前插件版本（v4.2.0）需要 Worker **≥ v3.5.0**。
 
 > Worker 有 breaking change 时会同步更新此行，并在对应版本的 CHANGELOG 中注明。
 
 ---
+
+## [4.2.0] - 2026-10-30
+
+### Added（管理后台接入 AstrBot 插件视图）
+
+- 管理后台现在可以直接在 AstrBot WebUI 里打开：插件详情页或侧边栏会多出「闲鱼蹲蹲助手管理」入口（需 AstrBot ≥ 4.29），复用 AstrBot 登录态，不用单独开端口、也不用填 API Key。订阅、商品、运行状态、配置四个页面的能力与独立版一致。
+- 插件视图桥接只支持 GET / POST，因此插件侧在同一进程内把请求转发给现有的 admin API，并跳过 API Key 会话校验（用户已由 AstrBot 登录态认证）；原状态码与错误体（如订阅表单的字段校验错误）原样透传，前端不需要为两种承载方式写两套逻辑。
+- 新增 `.astrbot-plugin/i18n/zh-CN.json` / `en-US.json`，入口标题与描述支持中英双语。注意 AstrBot 的视图 i18n key 是 `pages.<视图名>`（不是按 `views/` 目录名推断），写错会静默回退成裸目录名。
+
+### Changed
+
+- 前端静态资源目录由 `data/admin_webui/` 迁至 `views/admin/`（AstrBot 插件视图约定路径），`npm run build:webui` 的构建入口与产物路径同步更新，旧目录已移除。
+- 独立端口版 WebUI（`admin_webui_enabled`）行为不变：静态资源改为挂载在根路径、API 路由优先匹配；`admin_webui_*` 系列配置仅控制独立版，未启用也不影响内嵌视图。
+- README 与 `CONFIG_REFERENCE.md` 补充两种后台入口的区别及 AstrBot 版本要求。
+
+### Fixed
+
+- 修复 `test_scheduler_platform_routing` 中工具守卫桩与调用签名不匹配（`lambda` 缺少 `event` 参数）导致该用例长期报错的问题，全量测试恢复全绿。
 
 ## [4.1.1] - 2026-10-24
 
