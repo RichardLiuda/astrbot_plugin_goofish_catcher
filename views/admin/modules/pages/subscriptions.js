@@ -34,6 +34,7 @@ import {
 } from '../utils.js'
 import {
 	AppTextField,
+	ConfirmDialog,
 	EmptyState,
 	PageHeader,
 	QueryPreviewPanel,
@@ -53,6 +54,7 @@ export function SubscriptionsPage({ notify }) {
 	const [editing, setEditing] = useState(null)
 	const [preview, setPreview] = useState(null)
 	const [analyticsTarget, setAnalyticsTarget] = useState(null)
+	const [pendingDelete, setPendingDelete] = useState(null)
 
 	const deferredKeyword = useDeferredValue(filters.keyword)
 
@@ -130,9 +132,6 @@ export function SubscriptionsPage({ notify }) {
 	}
 
 	async function remove(id) {
-		if (!window.confirm('确认删除这条订阅？')) {
-			return
-		}
 		try {
 			await api(`/api/subscriptions/${id}`, { method: 'DELETE' })
 			notify('订阅已删除', 'success')
@@ -417,8 +416,8 @@ export function SubscriptionsPage({ notify }) {
 																size="small"
 																color="error"
 																onClick=${() =>
-																	remove(
-																		item.id
+																	setPendingDelete(
+																		item
 																	)}
 															>
 																删除
@@ -459,6 +458,23 @@ export function SubscriptionsPage({ notify }) {
 				subscription=${analyticsTarget}
 				onClose=${() => setAnalyticsTarget(null)}
 				notify=${notify}
+			/>
+			<${ConfirmDialog}
+				open=${Boolean(pendingDelete)}
+				title="删除订阅"
+				description=${pendingDelete
+					? `确认删除「${pendingDelete.keyword}」这条订阅？删除后不可恢复，已抓取的商品记录仍保留在数据库中。`
+					: ''}
+				confirmText="删除"
+				destructive=${true}
+				onCancel=${() => setPendingDelete(null)}
+				onConfirm=${() => {
+					const target = pendingDelete
+					setPendingDelete(null)
+					if (target) {
+						remove(target.id)
+					}
+				}}
 			/>
 		<//>
 	`

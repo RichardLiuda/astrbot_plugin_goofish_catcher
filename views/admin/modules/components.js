@@ -509,6 +509,55 @@ export function LoginView({ loading, error, onLogin }) {
 	`
 }
 
+/**
+ * In-page confirmation dialog.
+ *
+ * `window.confirm` is unusable here: when the admin UI is embedded in the
+ * AstrBot WebUI it runs in a sandboxed iframe without `allow-modals`, so the
+ * browser silently ignores the call and returns false - every destructive
+ * action would look cancelled. Always confirm through this component instead.
+ */
+export function ConfirmDialog({
+	open,
+	title = '确认操作',
+	description = '',
+	confirmText = '确认',
+	cancelText = '取消',
+	destructive = false,
+	onCancel,
+	onConfirm
+}) {
+	return html`
+		<${Dialog}
+			open=${open}
+			onClose=${onCancel}
+			fullWidth=${true}
+			maxWidth="xs"
+		>
+			<${DialogTitle}>${title}<//>
+			${description
+				? html`
+						<${DialogContent}>
+							<${Typography} variant="body2" color="text.secondary">
+								${description}
+							<//>
+						<//>
+					`
+				: null}
+			<${DialogActions} sx=${{ px: 3, pb: 3, pt: 2 }}>
+				<${Button} onClick=${onCancel}>${cancelText}<//>
+				<${Button}
+					variant="contained"
+					color=${destructive ? 'error' : 'primary'}
+					onClick=${onConfirm}
+				>
+					${confirmText}
+				<//>
+			<//>
+		<//>
+	`
+}
+
 export function SubscriptionDialog({ open, value, onClose, onSubmit }) {
 	const [form, setForm] = useState(value || {})
 
