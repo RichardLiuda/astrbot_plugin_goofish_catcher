@@ -45,6 +45,7 @@ from .app.platforms import (
     split_item_id,
 )
 from .app.platforms.registry import PLATFORM_GOOFISH, PLATFORM_TAOBAO
+from .app.plugin_view_api import AdminPluginViewApi
 from .app.provider import (
     ProviderConfigurationError,
     ProviderDependencyError,
@@ -123,6 +124,9 @@ class GoofishCatcherPlugin(Star):
         self._ready = False
         self._loaded = False
         self._admin_webui = AdminWebuiServer(self)
+        # Admin UI embedded in the AstrBot WebUI as a plugin view (views/admin).
+        self._admin_view_api = AdminPluginViewApi(self, PLUGIN_NAME)
+        self._admin_view_api.register(context)
         self._start_lock = asyncio.Lock()
         self._reload_lock = asyncio.Lock()
         # Cache last search/query results per umo for aiocqhttp forwarded-message reply-to-favorite
@@ -170,6 +174,7 @@ class GoofishCatcherPlugin(Star):
 
     async def terminate(self) -> None:
         await self._safe_close("admin_webui", self._admin_webui.stop)
+        await self._safe_close("admin_view_api", self._admin_view_api.close)
         await self._close_runtime(close_storage=True)
         self._ready = False
         self._loaded = False

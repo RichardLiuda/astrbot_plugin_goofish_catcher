@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "admin": {
+      "title": "Goofish Catcher Admin",
+      "description": "Manage subscriptions, items, runtime status and plugin settings."
+    }
+  }
+}

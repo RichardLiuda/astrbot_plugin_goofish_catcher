@@ -34,6 +34,7 @@ import {
 	formatDuration,
 	formatTs,
 	getRoute,
+	pluginBridge,
 	setRoute
 } from './modules/utils.js'
 
@@ -77,12 +78,28 @@ function App() {
 		items: []
 	})
 	const prefersDarkMode = useMediaQuery('(prefers-color-scheme: dark)')
-	const activeTheme = prefersDarkMode ? darkTheme : lightTheme
+	// Inside the AstrBot WebUI, follow the dashboard theme instead of the OS.
+	const [hostDarkMode, setHostDarkMode] = useState(() =>
+		pluginBridge ? document.documentElement.dataset.theme === 'dark' : null
+	)
+	const isDarkMode = hostDarkMode ?? prefersDarkMode
+	const activeTheme = isDarkMode ? darkTheme : lightTheme
 	const isMobile = useMediaQuery(SHELL_MOBILE_QUERY)
 
 	useEffect(() => {
-		document.documentElement.dataset.theme = prefersDarkMode ? 'dark' : 'light'
-	}, [prefersDarkMode])
+		if (!pluginBridge) {
+			return undefined
+		}
+		return pluginBridge.onContext((context) => {
+			if (typeof context?.isDark === 'boolean') {
+				setHostDarkMode(context.isDark)
+			}
+		})
+	}, [])
+
+	useEffect(() => {
+		document.documentElement.dataset.theme = isDarkMode ? 'dark' : 'light'
+	}, [isDarkMode])
 
 	function notify(message, severity = 'success') {
 		setSnack({ open: true, message, severity })
@@ -293,7 +310,7 @@ function App() {
 			<div className="brand-row">
 				<div className="brand-mark">
 					<img
-						src="/assets/logo.png"
+						src="./logo.png"
 						alt="Goofish Catcher logo"
 						className="brand-mark-img"
 					/>
@@ -421,7 +438,9 @@ function App() {
 									<div className="topbar-description">
 										${currentNav.description}
 									</div>
-									<${Button} onClick=${logout}>退出登录<//>
+									${pluginBridge
+										? null
+										: html`<${Button} onClick=${logout}>退出登录<//>`}
 								</div>
 							<//>
 						<//>

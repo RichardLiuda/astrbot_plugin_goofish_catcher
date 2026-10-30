@@ -7,10 +7,12 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <title>闲鱼监控管理后台</title>
-    <link rel="stylesheet" href="/assets/theme.css" />
+    <link rel="icon" href="./logo.png" />
+    <link rel="stylesheet" href="./theme.css" />
   </head>
   <body>
     <div id="root"></div>
-    <script src="/assets/app.bundle.js"></script>
+    <!-- Deferred so the AstrBot plugin page bridge injected at the end of body loads first. -->
+    <script defer src="./app.bundle.js"></script>
   </body>
 </html>

@@ -87,6 +87,8 @@
 | `admin_webui_port` | `8790` | WebUI 监听端口 |
 | `admin_webui_api_key` | `""` | WebUI API Key |
 
+> 以上 `admin_webui_*` 仅控制独立端口版后台。AstrBot WebUI 内嵌的「管理后台」可视化视图（AstrBot ≥ 4.29，插件详情页 / 侧边栏）始终可用，复用 AstrBot 登录态。
+
 ## 会话黑白名单
 
 | 配置项 | 默认值 | 说明 |

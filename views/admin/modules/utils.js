@@ -108,7 +108,52 @@ export function shouldHideItemByTerms(item, terms) {
 	return terms.some((term) => haystack.includes(term))
 }
 
+// Present when embedded in the AstrBot WebUI as a plugin view.
+// `AstrBotPluginPage` is the legacy alias kept by AstrBot.
+export const pluginBridge =
+	typeof window !== 'undefined'
+		? window.AstrBotPluginView || window.AstrBotPluginPage || null
+		: null
+
+function raiseApiError(status, payload) {
+	if (status === 401) {
+		const error = new Error('需要重新登录')
+		error.code = 'UNAUTHORIZED'
+		throw error
+	}
+	if (status >= 400 || payload?.ok === false) {
+		const error = new Error(
+			payload?.error?.message || `请求失败: ${status}`
+		)
+		error.payload = payload
+		throw error
+	}
+}
+
+async function bridgeApi(path, options) {
+	const url = new URL(path, 'http://plugin.local')
+	const endpoint = url.pathname.replace(/^\/+/, '')
+	const method = (options.method || 'GET').toUpperCase()
+	const result =
+		method === 'GET'
+			? await pluginBridge.apiGet(
+					endpoint,
+					Object.fromEntries(url.searchParams)
+				)
+			: await pluginBridge.apiPost(endpoint, {
+					method,
+					query: Object.fromEntries(url.searchParams),
+					body: options.body
+				})
+	const payload = result?.body || {}
+	raiseApiError(Number(result?.status_code || 500), payload)
+	return payload
+}
+
 export async function api(path, options = {}) {
+	if (pluginBridge) {
+		return bridgeApi(path, options)
+	}
 	const config = {
 		method: options.method || 'GET',
 		credentials: 'include',
@@ -125,18 +170,7 @@ export async function api(path, options = {}) {
 		? await response.json()
 		: {}
 
-	if (response.status === 401) {
-		const error = new Error('需要重新登录')
-		error.code = 'UNAUTHORIZED'
-		throw error
-	}
-	if (!response.ok || payload.ok === false) {
-		const error = new Error(
-			payload?.error?.message || `请求失败: ${response.status}`
-		)
-		error.payload = payload
-		throw error
-	}
+	raiseApiError(response.status, payload)
 	return payload
 }
 

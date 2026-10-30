@@ -671,7 +671,7 @@ class MainIntegrationPlatformRoutingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_analyze_item_detail_routes_by_item_platform(self) -> None:
         self.plugin.scheduler = None
-        self.plugin._llm_tools_guard = lambda: None
+        self.plugin._llm_tools_guard = lambda *_: None
 
         result = await self.plugin.goofish_analyze_item_detail(
             None, item_id="taobao:812345", force_refresh=True

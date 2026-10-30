@@ -233,3 +233,6 @@ thirdparty
 report
 .DS_Store
 astrbot日志.txt
+
+# Local agent workspace state
+.workbuddy/

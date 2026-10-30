@@ -461,7 +461,7 @@ export function LoginView({ loading, error, onLogin }) {
 						<div className="brand-row">
 							<div className="brand-mark brand-mark-large">
 								<img
-									src="/assets/logo.png"
+									src="./logo.png"
 									alt="Goofish Catcher logo"
 									className="brand-mark-img"
 								/>
